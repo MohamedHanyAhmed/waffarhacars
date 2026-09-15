@@ -82,6 +82,7 @@ export async function terminateChildProcess(childProcess = null, pid = null, opt
   const timeoutMs = options.timeoutMs ?? options.deps?.timeoutMs ?? 1500;
   const pollTimeoutMs = options.pollTimeoutMs ?? options.deps?.pollTimeoutMs ?? 500;
   const deps = options.deps || {};
+  const platform = deps.platform ?? process.platform;
 
   const isAlive = deps.isProcessAlive || isProcessAlive;
   const killFn = deps.killProcess || ((proc, sig) => proc?.kill?.(sig));
@@ -166,7 +167,7 @@ export async function terminateChildProcess(childProcess = null, pid = null, opt
 
   // 3. Fallback: argument-based taskkill.exe /PID <owned-pid> /T /F on Windows or SIGKILL on POSIX
   result.method = "fallback";
-  if (process.platform === "win32") {
+  if (platform === "win32") {
     try {
       const tk = taskkillFn(targetPid);
       result.taskkillResult = tk;
@@ -249,13 +250,15 @@ export function terminateProcessTree(pid, options = {}) {
     };
   }
 
-  if (process.platform === "win32") {
+  const platform = options.deps?.platform ?? process.platform;
+
+  if (platform === "win32") {
     const tk = (options.deps?.taskkillSync || defaultTaskkillSync)(targetPid);
     const postAlive = (options.deps?.isProcessAlive || isProcessAlive)(targetPid);
     const success = tk.status === 0 || tk.status === 128 || !postAlive;
     return {
       attempted: true,
-      platform: process.platform,
+      platform,
       success,
       exitCode: success ? 0 : (tk.status ?? 1),
       errorMessage: success ? null : tk.stderr || tk.stdout || "taskkill failed",
@@ -267,7 +270,7 @@ export function terminateProcessTree(pid, options = {}) {
       const postAlive = (options.deps?.isProcessAlive || isProcessAlive)(targetPid);
       return {
         attempted: true,
-        platform: process.platform,
+        platform,
         success: !postAlive,
         exitCode: !postAlive ? 0 : 1,
         errorMessage: !postAlive ? null : "Process alive after SIGKILL",
