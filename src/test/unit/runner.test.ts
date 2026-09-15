@@ -71,8 +71,9 @@ describe("E2E Test Runner Lifecycle & Process Supervisor", () => {
     expect(alive).toBe(false);
   });
 
-  it("falls back to argument-based taskkill when child.kill() fails to terminate process", async () => {
+  it("falls back to argument-based taskkill on Windows when child.kill() fails to terminate process", async () => {
     let taskkillCalledWith: number | null = null;
+    let posixKillCalled = false;
     let aliveChecks = 0;
 
     const dummyChild = new EventEmitter() as unknown as import("node:child_process").ChildProcess;
@@ -84,6 +85,7 @@ describe("E2E Test Runner Lifecycle & Process Supervisor", () => {
     });
 
     const mockDeps = {
+      platform: "win32",
       isProcessAlive: () => {
         aliveChecks++;
         return aliveChecks <= 2;
@@ -91,6 +93,10 @@ describe("E2E Test Runner Lifecycle & Process Supervisor", () => {
       taskkillSync: (pid: number) => {
         taskkillCalledWith = pid;
         return { status: 0, stdout: "SUCCESS: Terminated", stderr: "" };
+      },
+      posixKill: () => {
+        posixKillCalled = true;
+        throw new Error("posixKill must not be invoked on Windows platform");
       },
     };
 
@@ -103,11 +109,55 @@ describe("E2E Test Runner Lifecycle & Process Supervisor", () => {
     expect(result.method).toBe("fallback");
     expect(result.success).toBe(true);
     expect(taskkillCalledWith).toBe(12345);
+    expect(posixKillCalled).toBe(false);
+  });
+
+  it("falls back to POSIX process kill on Linux when child.kill() fails to terminate process", async () => {
+    let posixKillCalledWith: number | null = null;
+    let taskkillCalled = false;
+    let aliveChecks = 0;
+
+    const dummyChild = new EventEmitter() as unknown as import("node:child_process").ChildProcess;
+    Object.assign(dummyChild, {
+      pid: 12345,
+      killed: false,
+      exitCode: null,
+      kill: () => true,
+    });
+
+    const mockDeps = {
+      platform: "linux",
+      isProcessAlive: () => {
+        aliveChecks++;
+        return aliveChecks <= 2;
+      },
+      posixKill: (pid: number) => {
+        posixKillCalledWith = pid;
+      },
+      taskkillSync: () => {
+        taskkillCalled = true;
+        throw new Error("taskkillSync must not be invoked on POSIX platform");
+      },
+    };
+
+    const result = await terminateChildProcess(dummyChild, 12345, {
+      timeoutMs: 100,
+      deps: mockDeps,
+    });
+
+    expect(result.attempted).toBe(true);
+    expect(result.method).toBe("fallback");
+    expect(result.success).toBe(true);
+    expect(posixKillCalledWith).toBe(12345);
+    expect(taskkillCalled).toBe(false);
   });
 
   it("cleanupSupervisor succeeds when all owned processes terminate and port releases", async () => {
     const mockDeps = {
+      platform: "win32",
       isProcessAlive: () => false,
+      taskkillSync: () => ({ status: 0, stdout: "", stderr: "" }),
+      posixKill: () => {},
       waitForPortRelease: async () => true,
     };
 
@@ -123,11 +173,21 @@ describe("E2E Test Runner Lifecycle & Process Supervisor", () => {
   });
 
   it("cleanupSupervisor reports error and fails when process termination fails (dependency injected)", async () => {
+    let taskkillCalled = false;
+    let posixKillCalled = false;
+
     const mockDeps = {
       timeoutMs: 50,
       pollTimeoutMs: 50,
+      platform: "win32",
       isProcessAlive: () => true, // simulates process that refuses to terminate
-      taskkillSync: () => ({ status: 1, stdout: "", stderr: "Access is denied" }),
+      taskkillSync: () => {
+        taskkillCalled = true;
+        return { status: 1, stdout: "", stderr: "Access is denied" };
+      },
+      posixKill: () => {
+        posixKillCalled = true;
+      },
       waitForPortRelease: async () => true,
     };
 
@@ -140,13 +200,18 @@ describe("E2E Test Runner Lifecycle & Process Supervisor", () => {
     expect(result.success).toBe(false);
     expect(result.errors.length).toBeGreaterThan(0);
     expect(result.errors[0]).toContain("Server termination failed");
+    expect(taskkillCalled).toBe(true);
+    expect(posixKillCalled).toBe(false);
   });
 
   it("cleanupSupervisor reports error and fails when port release fails (dependency injected)", async () => {
     const mockDeps = {
       timeoutMs: 50,
       pollTimeoutMs: 50,
+      platform: "win32",
       isProcessAlive: () => false,
+      taskkillSync: () => ({ status: 0, stdout: "", stderr: "" }),
+      posixKill: () => {},
       waitForPortRelease: async () => false,
     };
 
@@ -241,6 +306,89 @@ describe("E2E Test Runner Lifecycle & Process Supervisor", () => {
     const r4 = terminateProcessTree(0);
     expect(r4.attempted).toBe(false);
     expect(r4.success).toBe(false);
+  });
+
+  it("reports injected platform for invalid PID without invoking termination functions", () => {
+    let taskkillCalled = false;
+    let posixKillCalled = false;
+
+    const mockDeps = {
+      platform: "linux",
+      isProcessAlive: () => false,
+      taskkillSync: () => {
+        taskkillCalled = true;
+        throw new Error("taskkillSync must not be called");
+      },
+      posixKill: () => {
+        posixKillCalled = true;
+        throw new Error("posixKill must not be called");
+      },
+    };
+
+    const result = terminateProcessTree(-1, { deps: mockDeps });
+
+    expect(result.attempted).toBe(false);
+    expect(result.success).toBe(false);
+    expect(result.platform).toBe("linux");
+    expect(result.errorMessage).toBe("Invalid PID provided");
+    expect(taskkillCalled).toBe(false);
+    expect(posixKillCalled).toBe(false);
+  });
+
+  it("reports injected platform for already-dead process without invoking termination functions", () => {
+    let taskkillCalled = false;
+    let posixKillCalled = false;
+
+    const mockDeps = {
+      platform: "win32",
+      isProcessAlive: () => false,
+      taskkillSync: () => {
+        taskkillCalled = true;
+        throw new Error("taskkillSync must not be called");
+      },
+      posixKill: () => {
+        posixKillCalled = true;
+        throw new Error("posixKill must not be called");
+      },
+    };
+
+    const result = terminateProcessTree(20005, { deps: mockDeps });
+
+    expect(result.attempted).toBe(true);
+    expect(result.success).toBe(true);
+    expect(result.platform).toBe("win32");
+    expect(result.exitCode).toBe(0);
+    expect(result.errorMessage).toBeNull();
+    expect(taskkillCalled).toBe(false);
+    expect(posixKillCalled).toBe(false);
+  });
+
+  it("reports injected platform and failure when POSIX termination throws an exception without calling taskkillSync", () => {
+    let taskkillCalled = false;
+    let posixKillCalled = false;
+
+    const mockDeps = {
+      platform: "linux",
+      isProcessAlive: () => true,
+      taskkillSync: () => {
+        taskkillCalled = true;
+        throw new Error("taskkillSync must not be called on POSIX platform");
+      },
+      posixKill: () => {
+        posixKillCalled = true;
+        throw new Error("EPERM: Operation not permitted");
+      },
+    };
+
+    const result = terminateProcessTree(20006, { deps: mockDeps });
+
+    expect(result.attempted).toBe(true);
+    expect(result.success).toBe(false);
+    expect(result.platform).toBe("linux");
+    expect(result.exitCode).toBe(1);
+    expect(result.errorMessage).toContain("EPERM: Operation not permitted");
+    expect(posixKillCalled).toBe(true);
+    expect(taskkillCalled).toBe(false);
   });
 
   it("waitForServer succeeds on HTTP 200 and consumes response body", async () => {
