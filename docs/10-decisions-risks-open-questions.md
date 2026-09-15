@@ -38,7 +38,7 @@
 | Support burden overwhelms team               | Medium / high       | repeated same-day escalations                           | narrow services, playbooks, pause thresholds, no broad launch                                                                                                                                                                                          |
 | Fake price anchoring                         | Medium / high       | “original” price unverifiable                           | price evidence with date; audit and remove deceptive offers                                                                                                                                                                                            |
 
-## Founder decisions required before Gate 0 closes
+## Founder decisions and gates required before relevant implementation or commercial launch
 
 1. Decide whether Waffarha relationship/permission exists. (Owner decision: public technical review authorized under working name; commercial launch, provider contracting, consumer release, and final branding remain blocked pending clearance or written permission).
 2. Select the first 3-4 Cairo supply clusters and define what “covered” means for each service family.

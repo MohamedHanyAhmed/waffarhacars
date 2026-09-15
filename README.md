@@ -92,7 +92,7 @@ npm run test:unit
 # 5. Build optimized production Next.js application (required before running E2E tests against production server)
 npm run build
 
-# 6. Run Playwright automated acceptance tests against hermetic production server (21/21 runs: 10 Desktop + 10 Mobile + 1 Visual Evidence)
+# 6. Run Playwright automated acceptance tests against hermetic production server (acceptance scenarios across Desktop and Mobile viewports, plus visual evidence screenshot capture)
 npm run test:e2e
 
 # 7. Run complete verification pipeline in hermetic sequence (format -> lint -> typecheck -> unit tests -> build -> E2E)
@@ -149,4 +149,4 @@ Portable full-page screenshots are saved under `artifacts/screenshots/`:
 
 ## License and permitted use
 
-This repository and documentation are source-available under the terms of the [LICENSE](LICENSE) file. Access to this public repository is provided solely for personal inspection and technical evaluation. GitHub users may view and fork the repository as permitted by GitHub's Terms of Service. This project is not licensed under an open-source license, and commercial use, production deployment, redistribution, modification, and derivative works are strictly prohibited without separate prior written permission from WaffarhaCars, except where GitHub's Terms of Service necessarily provide otherwise. Final commercial licensing terms remain subject to legal review.
+This repository and documentation are source-available under the terms of the [LICENSE](LICENSE) file. Access to this public repository is provided solely for personal inspection and technical evaluation. GitHub users may view and fork the repository as permitted by GitHub's Terms of Service. This project is not licensed under an open-source license, and commercial use, production deployment, redistribution, modification, and derivative works are strictly prohibited without prior separate written permission from the copyright holder, Mohamed Hany Ahmed (or a future legal successor or assignee), except where GitHub's Terms of Service necessarily provide otherwise. Final commercial licensing terms remain subject to legal review.
