@@ -308,6 +308,89 @@ describe("E2E Test Runner Lifecycle & Process Supervisor", () => {
     expect(r4.success).toBe(false);
   });
 
+  it("reports injected platform for invalid PID without invoking termination functions", () => {
+    let taskkillCalled = false;
+    let posixKillCalled = false;
+
+    const mockDeps = {
+      platform: "linux",
+      isProcessAlive: () => false,
+      taskkillSync: () => {
+        taskkillCalled = true;
+        throw new Error("taskkillSync must not be called");
+      },
+      posixKill: () => {
+        posixKillCalled = true;
+        throw new Error("posixKill must not be called");
+      },
+    };
+
+    const result = terminateProcessTree(-1, { deps: mockDeps });
+
+    expect(result.attempted).toBe(false);
+    expect(result.success).toBe(false);
+    expect(result.platform).toBe("linux");
+    expect(result.errorMessage).toBe("Invalid PID provided");
+    expect(taskkillCalled).toBe(false);
+    expect(posixKillCalled).toBe(false);
+  });
+
+  it("reports injected platform for already-dead process without invoking termination functions", () => {
+    let taskkillCalled = false;
+    let posixKillCalled = false;
+
+    const mockDeps = {
+      platform: "win32",
+      isProcessAlive: () => false,
+      taskkillSync: () => {
+        taskkillCalled = true;
+        throw new Error("taskkillSync must not be called");
+      },
+      posixKill: () => {
+        posixKillCalled = true;
+        throw new Error("posixKill must not be called");
+      },
+    };
+
+    const result = terminateProcessTree(20005, { deps: mockDeps });
+
+    expect(result.attempted).toBe(true);
+    expect(result.success).toBe(true);
+    expect(result.platform).toBe("win32");
+    expect(result.exitCode).toBe(0);
+    expect(result.errorMessage).toBeNull();
+    expect(taskkillCalled).toBe(false);
+    expect(posixKillCalled).toBe(false);
+  });
+
+  it("reports injected platform and failure when POSIX termination throws an exception without calling taskkillSync", () => {
+    let taskkillCalled = false;
+    let posixKillCalled = false;
+
+    const mockDeps = {
+      platform: "linux",
+      isProcessAlive: () => true,
+      taskkillSync: () => {
+        taskkillCalled = true;
+        throw new Error("taskkillSync must not be called on POSIX platform");
+      },
+      posixKill: () => {
+        posixKillCalled = true;
+        throw new Error("EPERM: Operation not permitted");
+      },
+    };
+
+    const result = terminateProcessTree(20006, { deps: mockDeps });
+
+    expect(result.attempted).toBe(true);
+    expect(result.success).toBe(false);
+    expect(result.platform).toBe("linux");
+    expect(result.exitCode).toBe(1);
+    expect(result.errorMessage).toContain("EPERM: Operation not permitted");
+    expect(posixKillCalled).toBe(true);
+    expect(taskkillCalled).toBe(false);
+  });
+
   it("waitForServer succeeds on HTTP 200 and consumes response body", async () => {
     const testServer = http.createServer((_req, res) => {
       res.writeHead(200, { "Content-Type": "text/plain" });

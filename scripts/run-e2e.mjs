@@ -227,10 +227,12 @@ export async function terminateChildProcess(childProcess = null, pid = null, opt
  */
 export function terminateProcessTree(pid, options = {}) {
   const targetPid = pid;
+  const platform = options.deps?.platform ?? process.platform;
+
   if (!targetPid || typeof targetPid !== "number" || targetPid <= 0) {
     return {
       attempted: false,
-      platform: process.platform,
+      platform,
       success: false,
       exitCode: null,
       errorMessage: "Invalid PID provided",
@@ -242,15 +244,13 @@ export function terminateProcessTree(pid, options = {}) {
   if (!isAlive) {
     return {
       attempted: true,
-      platform: process.platform,
+      platform,
       success: true,
       exitCode: 0,
       errorMessage: null,
       pid: targetPid,
     };
   }
-
-  const platform = options.deps?.platform ?? process.platform;
 
   if (platform === "win32") {
     const tk = (options.deps?.taskkillSync || defaultTaskkillSync)(targetPid);
@@ -279,7 +279,7 @@ export function terminateProcessTree(pid, options = {}) {
     } catch (err) {
       return {
         attempted: true,
-        platform: process.platform,
+        platform,
         success: false,
         exitCode: 1,
         errorMessage: err instanceof Error ? err.message : String(err),
