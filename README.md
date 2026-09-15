@@ -11,7 +11,7 @@ Do not build a literal Waffarha clone. Build a car-care marketplace that uses a 
 
 ## Non-negotiable warning
 
-`WaffarhaCars` is only a working name. It is close enough to the existing Waffarha name to imply affiliation. Do not publish, buy media, commission final branding, or release an app under this name until Egyptian counsel completes trademark, unfair-competition, domain, and licensing checks—or Waffarha grants written permission. “Same everything” is also rejected as a product instruction: workflows and market conventions can inspire the product; copyrighted copy, images, code, distinctive visual expression, and brand assets cannot be copied.
+`WaffarhaCars` is only a temporary working name. This repository is not affiliated with, sponsored by, or authorized by Waffarha. The repository owner has authorized public technical review and evaluation under this temporary working name as an accepted working-name risk. This decision does not constitute legal, domain, or trademark clearance. Do not proceed with consumer launch, provider contracting, paid media, app-store release, or final branding under this name until Egyptian legal counsel completes trademark, unfair-competition, domain, and licensing checks—or Waffarha grants written permission. “Same everything” is also rejected as a product instruction: workflows and market conventions can inspire the product; copyrighted copy, images, code, distinctive visual expression, and brand assets cannot be copied.
 
 ## Product pack map
 
@@ -70,7 +70,7 @@ This repository contains the interactive, responsive, bilingual showcase prototy
 ### Prerequisites
 
 - **Required Runtime**: Node.js 24 LTS (`>=24.0.0 <25.0.0`, `.nvmrc` and `.node-version` set to `24`)
-- **Package Manager**: npm 11.15.0 (`packageManager: "npm@11.15.0"`, clean install via `npm ci`)
+- **Package Manager**: npm pinned via the `packageManager` field in `package.json` (clean install via `npm ci`)
 
 ### Separate Verification Commands
 
@@ -86,7 +86,7 @@ npm run lint
 # 3. TypeScript compiler type-check (zero type errors)
 npm run typecheck
 
-# 4. Run Vitest domain unit tests (46/46 tests passing on Vitest 5: money, transitions, maker-checker, i18n parity, scenario lifecycle)
+# 4. Run Vitest domain unit tests (Vitest 5: money, transitions, maker-checker, i18n parity, scenario lifecycle, process supervisor)
 npm run test:unit
 
 # 5. Build optimized production Next.js application (required before running E2E tests against production server)
@@ -149,4 +149,4 @@ Portable full-page screenshots are saved under `artifacts/screenshots/`:
 
 ## License and permitted use
 
-This repository and documentation are source-available under the terms of the [LICENSE](LICENSE) file. Access to this repository is provided publicly solely for inspection and technical evaluation. This project is not licensed under an open-source license, and no commercial use, redistribution, modification, or derivative works are permitted without separate prior written permission from WaffarhaCars. Final commercial licensing terms remain subject to legal review.
+This repository and documentation are source-available under the terms of the [LICENSE](LICENSE) file. Access to this public repository is provided solely for personal inspection and technical evaluation. GitHub users may view and fork the repository as permitted by GitHub's Terms of Service. This project is not licensed under an open-source license, and commercial use, production deployment, redistribution, modification, and derivative works are strictly prohibited without separate prior written permission from WaffarhaCars, except where GitHub's Terms of Service necessarily provide otherwise. Final commercial licensing terms remain subject to legal review.
