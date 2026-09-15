@@ -146,3 +146,7 @@ Portable full-page screenshots are saved under `artifacts/screenshots/`:
 - **Later** means explicitly out of MVP scope.
 - Every metric has an event definition and owner before implementation is accepted.
 - All money is stored in integer minor units; all times are UTC in storage and rendered in Africa/Cairo.
+
+## License and permitted use
+
+This repository and documentation are source-available under the terms of the [LICENSE](LICENSE) file. Access to this repository is provided publicly solely for inspection and technical evaluation. This project is not licensed under an open-source license, and no commercial use, redistribution, modification, or derivative works are permitted without separate prior written permission from WaffarhaCars. Final commercial licensing terms remain subject to legal review.
