@@ -1,0 +1,12 @@
+# Replace placeholders with real GitHub teams/users before enabling required review.
+*                                      @ORG/product @ORG/engineering
+/apps/admin/                           @ORG/operations @ORG/engineering
+/modules/identity/                     @ORG/security @ORG/engineering
+/modules/reservations/                 @ORG/backend @ORG/product
+/modules/completions/                  @ORG/backend @ORG/operations
+/modules/commission/                   @ORG/backend @ORG/finance
+/modules/collections/                  @ORG/backend @ORG/finance
+/db/migrations/                        @ORG/backend
+/.github/workflows/                    @ORG/platform @ORG/security
+/.agents/rules/                        @ORG/product @ORG/engineering
+/docs/                                 @ORG/product

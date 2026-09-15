@@ -1,0 +1,75 @@
+name: CI Verification
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Production Verification & Security Gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout Repository
+        # actions/checkout@v6.1.0
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js 24 LTS
+        # actions/setup-node@v7.0.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+          cache: "npm"
+
+      - name: Clean Dependency Installation
+        run: npm ci
+
+      - name: Production Security Audit Gate (Fail on High or Critical)
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Full Security Audit Report (Fail on High or Critical)
+        run: npm audit --audit-level=high
+
+      - name: Formatting Check
+        run: npm run format:check
+
+      - name: Lint Check
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit Tests
+        run: npm run test:unit
+
+      - name: Production Build
+        run: npm run build
+
+      - name: Install Playwright Chromium Dependencies
+        run: npx playwright install --with-deps chromium
+
+      - name: Playwright E2E Tests
+        run: npm run test:e2e
+        env:
+          CI: "true"
+
+      - name: Upload Playwright Diagnostics on Failure
+        # actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: failure()
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7

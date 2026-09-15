@@ -1,0 +1,58 @@
+declare module "lucide-react" {
+  import { FC, SVGProps } from "react";
+  export interface IconProps extends SVGProps<SVGSVGElement> {
+    size?: number | string;
+    strokeWidth?: number | string;
+    color?: string;
+    className?: string;
+  }
+  export type Icon = FC<IconProps>;
+  export const Wrench: Icon;
+  export const AlertTriangle: Icon;
+  export const Sparkles: Icon;
+  export const CircleDot: Icon;
+  export const Zap: Icon;
+  export const Wind: Icon;
+  export const Sliders: Icon;
+  export const ShieldCheck: Icon;
+  export const ShieldAlert: Icon;
+  export const CheckCircle2: Icon;
+  export const XCircle: Icon;
+  export const AlertCircle: Icon;
+  export const Clock: Icon;
+  export const Ban: Icon;
+  export const MapPin: Icon;
+  export const Star: Icon;
+  export const ChevronRight: Icon;
+  export const ChevronLeft: Icon;
+  export const ChevronDown: Icon;
+  export const QrCode: Icon;
+  export const Copy: Icon;
+  export const Check: Icon;
+  export const KeyRound: Icon;
+  export const DollarSign: Icon;
+  export const FileText: Icon;
+  export const HelpCircle: Icon;
+  export const Car: Icon;
+  export const Briefcase: Icon;
+  export const FileCheck: Icon;
+  export const Upload: Icon;
+  export const Lock: Icon;
+  export const ArrowRight: Icon;
+  export const ArrowLeft: Icon;
+  export const FileSpreadsheet: Icon;
+  export const TrendingUp: Icon;
+  export const Receipt: Icon;
+  export const Menu: Icon;
+  export const X: Icon;
+  export const RotateCcw: Icon;
+  export const User: Icon;
+  export const Search: Icon;
+  export const RefreshCw: Icon;
+  export const ExternalLink: Icon;
+  export const Calendar: Icon;
+  export const CalendarCheck: Icon;
+  export const Filter: Icon;
+  export const SlidersHorizontal: Icon;
+  export const Globe: Icon;
+}

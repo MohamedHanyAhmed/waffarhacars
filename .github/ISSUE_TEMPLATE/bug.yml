@@ -1,0 +1,51 @@
+name: Bug report
+description: Report a reproducible product or operational defect
+title: "[Bug] "
+labels: ["bug", "needs-triage"]
+body:
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options:
+        - S0 - safety, security, widespread financial integrity
+        - S1 - blocked transaction, wrong payment/voucher/refund/settlement
+        - S2 - major degraded journey with workaround
+        - S3 - minor defect
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction and environment
+      description: Use synthetic identifiers; never paste secrets, OTPs, payment data or unnecessary personal data.
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Customer, provider, financial and data impact
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Safe evidence
+      description: Correlation IDs, sanitized logs/screenshots and approximate times. Redact personal data.
+  - type: textarea
+    id: containment
+    attributes:
+      label: Containment or rollback
+      description: Feature flag, provider/offer pause, reconciliation or other immediate safe action.

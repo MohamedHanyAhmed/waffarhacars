@@ -1,0 +1,11 @@
+node_modules/
+.next/
+dist/
+build/
+test-results/
+playwright-report/
+package-lock.json
+artifacts/
+*.png
+*.jpg
+*.jpeg

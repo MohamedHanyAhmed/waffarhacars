@@ -1,0 +1,66 @@
+name: Product slice
+description: Propose one shaped, reviewable product outcome
+title: "[Slice] "
+labels: ["product-slice", "needs-triage"]
+body:
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Problem and outcome
+      description: Who has the problem, what happens today, and what observable result should change?
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and non-scope
+      description: State both what is included and explicitly excluded.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Numbered, externally observable and testable criteria, including failure cases.
+      placeholder: "AC1. Given ... when ... then ..."
+    validations:
+      required: true
+  - type: textarea
+    id: states
+    attributes:
+      label: States and invariants
+      description: Domain transitions, exactly-once rules, permissions and concurrency concerns.
+    validations:
+      required: true
+  - type: textarea
+    id: ux
+    attributes:
+      label: UX and localization
+      description: Screens/breadboard, loading/empty/error, Arabic RTL, English LTR and accessibility.
+    validations:
+      required: true
+  - type: textarea
+    id: data
+    attributes:
+      label: Data, analytics and privacy
+      description: Events/metrics, personal data, retention, external processors and audit requirements.
+    validations:
+      required: true
+  - type: textarea
+    id: delivery
+    attributes:
+      label: Dependencies, migration and rollback
+      description: Prerequisites, rollout/flag, migration/backfill and recovery plan.
+    validations:
+      required: true
+  - type: checkboxes
+    id: readiness
+    attributes:
+      label: Readiness
+      options:
+        - label: Product owner has reviewed scope and non-scope
+          required: true
+        - label: Material legal, financial, security and operations questions are resolved or named
+          required: true
+        - label: A human engineering reviewer is assigned
+          required: true
