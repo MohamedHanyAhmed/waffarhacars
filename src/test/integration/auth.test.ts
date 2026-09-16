@@ -23,9 +23,6 @@ describe("Real PostgreSQL 17 Better Auth Database Session Integration Suite", ()
   const testAuth = createTestAuth({
     baseURL: "http://localhost:3000",
     secret: TEST_SECRET,
-    advanced: {
-      disableOriginCheck: false,
-    },
   });
 
   beforeAll(async () => {
@@ -260,6 +257,15 @@ describe("Real PostgreSQL 17 Better Auth Database Session Integration Suite", ()
     const { email, password, name } = generateRandomTestUser();
     await testAuth.api.signUpEmail({ body: { email, password, name } });
 
+    // Auth instance with explicit origin checking enabled
+    const originAuth = createTestAuth({
+      baseURL: "http://localhost:3000",
+      secret: TEST_SECRET,
+      advanced: {
+        disableOriginCheck: false,
+      },
+    });
+
     // Request with untrusted origin
     const untrustedReq = new Request("http://localhost:3000/api/auth/sign-in/email", {
       method: "POST",
@@ -270,7 +276,7 @@ describe("Real PostgreSQL 17 Better Auth Database Session Integration Suite", ()
       body: JSON.stringify({ email, password }),
     });
 
-    const untrustedRes = await testAuth.handler(untrustedReq);
+    const untrustedRes = await originAuth.handler(untrustedReq);
     expect([403, 400]).toContain(untrustedRes.status);
 
     // Request with trusted origin
@@ -283,7 +289,7 @@ describe("Real PostgreSQL 17 Better Auth Database Session Integration Suite", ()
       body: JSON.stringify({ email, password }),
     });
 
-    const trustedRes = await testAuth.handler(trustedReq);
+    const trustedRes = await originAuth.handler(trustedReq);
     expect(trustedRes.status).toBe(200);
   });
 
