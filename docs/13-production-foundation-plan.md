@@ -429,7 +429,7 @@ graph TD
 - **Schema Changes:** Baseline reviewed initial migration. No premature application tables.
 - **API Contracts:** `/api/live` (liveness) and `/api/ready` (readiness).
 - **Test Strategy:** Automated integration tests verifying container startup, schema migration, connection pool recovery, and sanitized probe responses.
-- **Rollback Plan:** Standard git revert; migrations include backward-compatible `DOWN` procedures.
+- **Rollback & Migration Policy:** Standard git revert for application code. Database schema changes adhere strictly to the expand/contract pattern with forward-fix as the default operational recovery path; `prisma migrate resolve` is utilized solely for unblocking failed migrations, while verified hosting provider backups and Point-In-Time Recovery (PITR) govern destructive disaster recovery (no automatic general-purpose `DOWN` procedure guarantee).
 
 ### PR 2: Identity, Sessions, MFA & RBAC
 
@@ -477,7 +477,7 @@ When authorized to initiate PR 1, the following files will be introduced or modi
 1. `prisma.config.ts`: Modern Prisma 7 TypeScript configuration.
 2. `prisma/schema.prisma`: Initial baseline schema configuring generator, PostgreSQL provider, and connection URLs.
 3. `prisma/migrations/.gitkeep`: Preserves migrations directory in version control. The baseline schema in PR 1 is deliberately model-free (no synthetic dummy or healthcheck tables), so the first genuine domain SQL migrations arrive in PR 2.
-4. `docker-compose.test.yml`: Ephemeral PostgreSQL 17 test container for local development and CI execution.
+4. `docker-compose.test.yml`: Ephemeral PostgreSQL 17 test container for local development (`npm run db:test:up`).
 5. `src/lib/db.ts`: Robust Prisma client singleton with connection pooling limits.
 6. `src/lib/env.ts`: Zod environment schema validating `DATABASE_URL` and `APP_DATA_BACKEND`.
 7. `src/app/api/live/route.ts`: Sanitized liveness probe.
@@ -490,7 +490,7 @@ When authorized to initiate PR 1, the following files will be introduced or modi
 11. `package.json`: Adding Prisma 7 dependencies (`@prisma/client`, `prisma`) and migration scripts.
 12. `package-lock.json`: Clean lockfile update with zero vulnerabilities.
 13. `tsconfig.json`: Path mappings for generated Prisma client if needed.
-14. `.github/workflows/ci.yml`: Adding test PostgreSQL container service and migration verification steps.
+14. `.github/workflows/ci.yml`: Integrating pinned PostgreSQL 17 (`postgres:17.11-alpine3.24`) as a native GitHub Actions service container and adding migration verification steps.
 15. `.env.example`: Documenting PostgreSQL connection strings and `APP_DATA_BACKEND`.
 16. `README.md`: Updating prerequisites and database setup instructions.
 

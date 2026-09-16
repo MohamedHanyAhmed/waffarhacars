@@ -69,6 +69,17 @@ Accessed 13 September 2026 unless noted. Public product observations can change.
 48. IETF. “[RFC 7807: Problem Details for HTTP APIs](https://datatracker.ietf.org/doc/html/rfc7807).” Accessed 16 September 2026. Used for standardized error response schemas.
 49. IETF. “[RFC 9562: Universally Unique Identifiers (UUIDs)](https://datatracker.ietf.org/doc/html/rfc9562).” Accessed 16 September 2026. Used for UUID standards.
 
+## Identity, authentication, MFA, and security architecture references
+
+50. Next.js Documentation. “[Authentication in Next.js](https://nextjs.org/docs/app/building-your-application/authentication).” Accessed 16 September 2026. Used for server-side session verification, Route Handler auth patterns, and Server Action security boundaries.
+51. Better Auth Documentation. “[Better Auth Documentation](https://www.better-auth.com/docs).” Accessed 16 September 2026. Used for Next.js 16 App Router integration, Prisma 7 adapter, session lifecycle management, and official plugin specifications (`phoneNumber`, `twoFactor`).
+52. Auth.js Documentation. “[Auth.js Documentation](https://authjs.dev).” Accessed 16 September 2026. Used for architectural comparison, session handling, and Prisma adapter analysis.
+53. OWASP. “[Authentication Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html).” Accessed 16 September 2026. Used for multi-factor authentication, credential handling, and generic failure responses.
+54. OWASP. “[Session Management Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html).” Accessed 16 September 2026. Used for cookie flags (`HttpOnly`, `Secure`, `SameSite`), session revocation, idle timeouts, and fixation countermeasures.
+55. OWASP. “[Authorization Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html).” Accessed 16 September 2026. Used for deny-by-default access control, server-side data access layer (DAL) enforcement, and prevention of IDOR.
+56. NIST. “[NIST SP 800-63B-4 Digital Identity Guidelines: Authentication and Lifecycle Management](https://pages.nist.gov/800-63-4/sp800-63b.html).” Accessed 16 September 2026. Used for Authenticator Assurance Levels (AAL), classification of out-of-band SMS OTP as restricted, and multi-factor authenticator independence rules.
+57. libphonenumber-js. “[libphonenumber-js](https://gitlab.com/catamphetamine/libphonenumber-js).” Accessed 16 September 2026. Used for robust, maintained phone number parsing, Egyptian national format validation (`+20` mobile prefixes), and E.164 canonicalization.
+
 ## Evidence limitations
 
 - Public pages expose workflows, not Waffarha's actual system topology or database schema.
