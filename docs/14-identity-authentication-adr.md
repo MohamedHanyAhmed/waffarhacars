@@ -1,23 +1,23 @@
 # ADR 14: Identity, Authentication, Sessions, MFA & Authorization Architecture
 
-**Document ID:** `docs/14-identity-authentication-adr.md`
-**Status:** PROPOSED (Architecture Decision Gate)
-**Date:** 2026-09-16
-**Evaluated Foundation:** Better Auth `1.7.5` (MIT License)
-**Target Runtime:** Node.js 24 LTS, Next.js 16.3.5 (App Router), Prisma 7.10.0, PostgreSQL 17.11
-**Decision Driver:** Decompose oversized PR 2 into small, reviewable implementation PRs while establishing an evidence-backed authentication and authorization architecture for the Cairo marketplace.
+- **Status:** PROPOSED (UNDER ARCHITECTURAL REVIEW)
+- **Date:** 16 September 2026
+- **Authors:** WaffarhaCars Core Architecture Team
+- **Target Systems:** Next.js 16.3.5 App Router, Node.js 24 LTS, PostgreSQL 17.11, Prisma 7.10.0 (`@prisma/adapter-pg`)
+- **Primary Upstream Dependency:** `better-auth@1.7.5` (MIT License)
+- **Supersedes:** Monolithic PR 2 Scope
 
 ---
 
 ## 1. Decision Statement & Library Security Policy
 
-**We recommend [Better Auth](https://www.better-auth.com) (evaluated at pinned release `1.7.5`) as the core authentication foundation for WaffarhaCars**, supplemented by a **domain-owned, server-side Data Access Layer (DAL) for granular authorization**, and an **internal pluggable OTP Transport Adapter** for Egyptian mobile authentication.
+WaffarhaCars adopts **`better-auth@1.7.5`** as its authentication foundation for both consumer mobile-first OTP authentication and internal staff credential/MFA authentication. Authentication primitives (passwords, tokens, verification challenges, and database sessions) are managed by Better Auth in the application's primary PostgreSQL 17 database. Authorization primitives (actor roles, staff permissions, multi-branch scoping, maker-checker governance, and object-level authorization) are strictly owned by a WaffarhaCars server-side Data Access Layer (DAL).
 
 ### 1.1 Evaluated Version & Compatibility Baseline:
 
-- **Evaluated Version:** `better-auth@1.7.5` (latest release on 1.7.x line).
-- **License:** **MIT License** (permissive open source; not "source-available").
-- **Runtime Compatibility:** Verified compatible with Node.js 24 LTS native ESM, Next.js 16.3.5 App Router Route Handlers, and Prisma 7.10.0 with PostgreSQL driver adapters (`@prisma/adapter-pg`).
+- **Evaluated Version:** `better-auth@1.7.5` (pinned exact release on the 1.7.x line).
+- **License:** **MIT License** (permissive open source; unrestricted self-hosted commercial use).
+- **Target Runtime Compatibility:** Target compatibility to be proven in PR 2A (Node.js 24 LTS native ESM, Next.js 16.3.5 App Router Route Handlers, and Prisma 7.10.0 with `@prisma/adapter-pg`). Architectural suitability is provisionally accepted pending an installed prototype, CLI-generated schema, clean build, and PostgreSQL 17.11 integration tests passing in PR 2A.
 
 ### 1.2 Upstream Maintenance & Security Vulnerability Policy:
 
@@ -31,41 +31,41 @@
 
 ## 2. Actor and Authentication Matrix
 
-WaffarhaCars serves distinct operational actors across consumer, provider, and internal organizational boundaries. Session timeouts are **proposed pilot defaults** established to balance user convenience against operational risk:
+WaffarhaCars serves distinct operational actors across consumer, provider, and internal organizational boundaries. All session timeout durations listed below are **proposed pilot defaults pending founder approval**:
 
-| Actor                         | Primary Authentication                | Required Second Factor                        | Session Duration (Proposed Pilot Default) | Idle Timeout (Proposed Pilot Default) | Reauthentication Triggers                                      | Account Recovery Method                                                     | Initial Provisioning                                                  | Risk Basis & Operational Context                                                                                                           |
-| :---------------------------- | :------------------------------------ | :-------------------------------------------- | :---------------------------------------- | :------------------------------------ | :------------------------------------------------------------- | :-------------------------------------------------------------------------- | :-------------------------------------------------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------- |
-| **Anonymous Visitor**         | None (Public Browsing)                | None                                          | N/A                                       | N/A                                   | N/A                                                            | N/A                                                                         | N/A                                                                   | Unauthenticated catalog browsing. Zero access to personal data, reservations, or internal tools.                                           |
-| **Customer / Car Owner**      | Egyptian Mobile OTP (`+20`)           | None (SMS OTP is restricted primary factor)   | 30 Days (Absolute)                        | 7 Days (Idle)                         | Reservation cancellation; Profile phone change                 | Re-verification of new mobile number via live OTP challenge                 | Self-service on-demand upon first reservation booking                 | Low administrative privilege; convenience-first consumer flow. 7-day idle timeout prevents repeat logins on personal mobile devices.       |
-| **Provider Workshop Worker**  | Egyptian Mobile OTP (`+20`)           | None (Pilot baseline)                         | 12 Hours (Absolute)                       | 2 Hours (Idle)                        | Daily shift start; Sensitive check-in dispute                  | Provider Manager / Internal Ops manual verification                         | Pre-provisioned by Provider Manager or Ops; invited via mobile number | High device sharing risk on workshop floor. Strict 2-hour idle timeout and 12-hour shift limit prevent session hijacking across shifts.    |
-| **Provider Workshop Manager** | Egyptian Mobile OTP (`+20`)           | Optional TOTP (Pilot); Mandatory (Post-Pilot) | 12 Hours (Absolute)                       | 2 Hours (Idle)                        | Worker invitation; Staff assignment changes                    | Internal Ops identity proofing and verification                             | Provisioned during merchant onboarding by WaffarhaCars Ops            | Access to branch commission summaries. Payout/bank details cannot be modified via self-service in pilot (restricted to Ops maker-checker). |
-| **Internal Sales Staff**      | Work Email + Password                 | Mandatory TOTP (RFC 6238)                     | 10 Hours (Absolute)                       | 1 Hour (Idle)                         | Draft offer commercial submission                              | Single-use encrypted backup codes or two-person Admin reset                 | Provisioned by Platform Admin / HR during onboarding                  | Segregation of duties (Maker role). 1-hour idle timeout protects unattended corporate workstations.                                        |
-| **Internal Operations Staff** | Work Email + Password                 | Mandatory TOTP (RFC 6238)                     | 10 Hours (Absolute)                       | 1 Hour (Idle)                         | Offer approval (Checker); Commission dispute adjustment        | Single-use encrypted backup codes or two-person Admin reset                 | Provisioned by Platform Admin during onboarding                       | Highest operational impact (Checker role). Approvals require fresh active session and mandatory MFA.                                       |
-| **Internal Finance Staff**    | Work Email + Password                 | Mandatory TOTP (RFC 6238)                     | 8 Hours (Absolute)                        | 30 Minutes (Idle)                     | Merchant payout batch generation                               | Single-use encrypted backup codes or two-person Admin reset                 | Provisioned by Platform Admin during onboarding                       | Direct financial impact. 30-minute idle timeout reduces unattended workstation exposure.                                                   |
-| **Platform Administrator**    | Work Email + Password (Passkey-ready) | Mandatory TOTP + Backup Codes                 | 4 Hours (Absolute)                        | 15 Minutes (Idle)                     | Role escalation; System configuration changes; Staff MFA reset | Offline break-glass procedure (Managing Director / Founder manual sign-off) | Seeded via secure environment orchestration at platform deployment    | Total system authority. Minimum session duration (4 hours) and aggressive idle timeout (15 minutes).                                       |
+| Actor                         | Primary Authentication         | Required Second Factor                                   | Session Duration (Proposed Pilot Default - Absolute Cap) | Idle Timeout (Proposed Pilot Default - Idle Limit) | Reauthentication Triggers                                      | Account Recovery Method                                                                                                                                                  | Initial Provisioning                                                         | Risk Basis & Operational Context                                                                                                           |
+| :---------------------------- | :----------------------------- | :------------------------------------------------------- | :------------------------------------------------------- | :------------------------------------------------- | :------------------------------------------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :--------------------------------------------------------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------- |
+| **Anonymous Visitor**         | None (Public Browsing)         | None                                                     | N/A                                                      | N/A                                                | N/A                                                            | N/A                                                                                                                                                                      | N/A                                                                          | Unauthenticated catalog browsing. Zero access to personal data, reservations, or internal tools.                                           |
+| **Customer / Car Owner**      | Egyptian Mobile OTP (`+20`)    | None (SMS OTP is restricted out-of-band primary factor)  | 30 Days (Absolute)                                       | 7 Days (Idle)                                      | Reservation cancellation; Profile phone change                 | Phone change requires active fresh session + new-phone OTP; without active session, manual Support/Ops identity proofing (new-phone OTP alone never recovers an account) | Self-service on-demand upon first reservation booking                        | Low administrative privilege; convenience-first consumer flow. 7-day idle timeout prevents repeat logins on personal mobile devices.       |
+| **Provider Workshop Worker**  | Egyptian Mobile OTP (`+20`)    | None (Pilot baseline; note: onboarding deferred to PR 3) | 12 Hours (Absolute)                                      | 2 Hours (Idle)                                     | Daily shift start; Sensitive check-in dispute                  | Provider Manager / Internal Ops manual verification                                                                                                                      | Pre-provisioned by Provider Manager or Ops; invited via mobile number (PR 3) | High device sharing risk on workshop floor. Strict 2-hour idle timeout and 12-hour shift limit prevent session hijacking across shifts.    |
+| **Provider Workshop Manager** | Egyptian Mobile OTP (`+20`)    | Optional TOTP (Pilot); Mandatory (Post-Pilot)            | 12 Hours (Absolute)                                      | 2 Hours (Idle)                                     | Worker invitation; Staff assignment changes                    | Internal Ops identity proofing and verification                                                                                                                          | Provisioned during merchant onboarding by WaffarhaCars Ops (PR 3)            | Access to branch commission summaries. Payout/bank details cannot be modified via self-service in pilot (restricted to Ops maker-checker). |
+| **Internal Sales Staff**      | Work Email + Password (scrypt) | Mandatory TOTP (RFC 6238)                                | 10 Hours (Absolute)                                      | 1 Hour (Idle)                                      | Draft offer commercial submission                              | Single-use encrypted backup codes or two-person Admin reset                                                                                                              | Provisioned by Platform Admin / HR during onboarding (PR 2C)                 | Segregation of duties (Maker role). 1-hour idle timeout protects unattended corporate workstations.                                        |
+| **Internal Operations Staff** | Work Email + Password (scrypt) | Mandatory TOTP (RFC 6238)                                | 10 Hours (Absolute)                                      | 1 Hour (Idle)                                      | Offer approval (Checker); Commission dispute adjustment        | Single-use encrypted backup codes or two-person Admin reset                                                                                                              | Provisioned by Platform Admin during onboarding (PR 2C)                      | Highest operational impact (Checker role). Approvals require fresh active session and mandatory MFA.                                       |
+| **Internal Finance Staff**    | Work Email + Password (scrypt) | Mandatory TOTP (RFC 6238)                                | 8 Hours (Absolute)                                       | 30 Minutes (Idle)                                  | Merchant payout batch generation                               | Single-use encrypted backup codes or two-person Admin reset                                                                                                              | Provisioned by Platform Admin during onboarding (PR 2C)                      | Direct financial impact. 30-minute idle timeout reduces unattended workstation exposure.                                                   |
+| **Platform Administrator**    | Work Email + Password (scrypt) | Mandatory TOTP + Encrypted Backup Codes                  | 4 Hours (Absolute)                                       | 15 Minutes (Idle)                                  | Role escalation; System configuration changes; Staff MFA reset | Offline break-glass procedure (Managing Director / Founder manual sign-off)                                                                                              | Seeded via secure environment orchestration at platform deployment           | Total system authority. Minimum session duration (4 hours) and aggressive idle timeout (15 minutes).                                       |
 
 ---
 
 ## 3. Library Comparison Decision Matrix
 
-| Evaluation Dimension                | Better Auth (1.7.5)                                                              | Auth.js (NextAuth v5)                                                              | Fully Custom Auth                                                             | External Managed IdP (Clerk / Auth0 / Supabase)                               |
-| :---------------------------------- | :------------------------------------------------------------------------------- | :--------------------------------------------------------------------------------- | :---------------------------------------------------------------------------- | :---------------------------------------------------------------------------- |
-| **Next.js 16 App Router Support**   | Native Route Handler and Server Action integration                               | Supported via `next-auth` beta handlers                                            | Requires custom middleware and session wrappers                               | Supported via vendor Next.js SDKs                                             |
-| **Prisma 7 & PostgreSQL 17**        | Native Prisma adapter supporting `@prisma/adapter-pg`                            | Supported via `@auth/prisma-adapter`                                               | Fully manual schema authoring and migrations                                  | External database or webhook synchronization required                         |
-| **Phone Number OTP Support**        | Official `phoneNumber` plugin with `sendOTP` hook                                | Not selected: equivalent native phone OTP support not established in this review   | Full control, but requires hand-rolling token crypto, expiry, and rate limits | Supported on select vendor tiers; proprietary SMS pipes                       |
-| **Email / Password Support**        | Built-in using native Node.js `scrypt` hasher                                    | Supported via Credentials provider                                                 | Must implement hashing, salt management, timing-safe checks                   | Built-in on vendor console                                                    |
-| **TOTP & Backup Codes**             | Official `twoFactor` plugin with encrypted secrets                               | Not selected: equivalent native TOTP plugin support not established in this review | High implementation and cryptographic audit burden                            | Built-in on vendor console                                                    |
-| **Database Sessions**               | Native PostgreSQL `session` table with unique tokens                             | Primarily JWT-oriented; database sessions have framework caveats                   | Custom table design required                                                  | Managed in vendor cloud; not local PostgreSQL                                 |
-| **Session Revocation**              | Built-in server-side revocation endpoints                                        | Limited out-of-the-box with JWTs                                                   | Must hand-roll revocation tokens and tracking tables                          | Supported via vendor management APIs                                          |
-| **Rate Limiting & Abuse Controls**  | Built-in storage-backed rate limiting                                            | Requires external Redis / Upstash integration                                      | Must implement sliding window rate limiters                                   | Built-in on vendor edge                                                       |
-| **Origin & Cookie Protections**     | Built-in Origin verification, Fetch Metadata headers, and `SameSite=Lax` cookies | Built-in CSRF protection                                                           | Vulnerable to subtle cookie attribute misconfigurations                       | Handled by vendor domain/cookies                                              |
-| **Account Linking**                 | Native User / Account model                                                      | Supported via adapter callbacks                                                    | Full control, high logic complexity                                           | Managed by vendor rules                                                       |
-| **Testability Without Sending SMS** | Native `testUtils({ captureOTP: true })` in test instances                       | Complex mocking of Credentials callbacks                                           | High testability, high code volume                                            | Requires third-party mocking or vendor sandbox                                |
-| **Vendor Lock-In**                  | Zero (MIT open source; self-hosted in PostgreSQL)                                | Zero (Open source)                                                                 | Zero                                                                          | Deferred: vendor lock-in and migration barriers require commercial evaluation |
-| **Operational Complexity**          | Low (Single library in application process)                                      | Moderate                                                                           | Very High (Ongoing maintenance of crypto and cookies)                         | Deferred: external webhook synchronization and drift management               |
-| **Schema Ownership**                | Complete (`prisma/schema.prisma` under git control)                              | Complete via Prisma adapter                                                        | Complete                                                                      | Fragmented across vendor cloud and local database                             |
-| **Egypt-First Mobile Experience**   | High (Headless API allows custom Arabic/English RTL screens)                     | Moderate (Headless)                                                                | High (Bespoke)                                                                | Often requires vendor hosted widgets or restricted UI customizability         |
-| **Commercial / Cost Status**        | Free (MIT License, $0 software fee)                                              | Free (Open source)                                                                 | Engineering build/maintenance cost                                            | Deferred: requires detailed commercial pricing review per MAU                 |
+| Evaluation Dimension                | Better Auth (1.7.5)                                                                                                  | Auth.js (NextAuth v5)                                                                                                          | Fully Custom Auth                                                                              | External Managed IdP (Clerk / Auth0 / Supabase)                                                                                |
+| :---------------------------------- | :------------------------------------------------------------------------------------------------------------------- | :----------------------------------------------------------------------------------------------------------------------------- | :--------------------------------------------------------------------------------------------- | :----------------------------------------------------------------------------------------------------------------------------- |
+| **Next.js 16 App Router Support**   | Native Route Handler and Server Action integration                                                                   | Supported via `next-auth` beta handlers                                                                                        | Requires custom middleware and session wrappers                                                | Supported via vendor Next.js SDKs                                                                                              |
+| **Prisma 7 & PostgreSQL 17**        | Native Prisma adapter supporting `@prisma/adapter-pg`                                                                | Supported via `@auth/prisma-adapter`                                                                                           | Fully manual schema authoring and migrations                                                   | User directory stored in vendor cloud; referencing user IDs in local models requires data synchronization                      |
+| **Phone Number OTP Support**        | Official `phoneNumber` plugin with `sendOTP` hook                                                                    | Not selected: equivalent native phone OTP support not established in this review                                               | Full control, but requires hand-rolling token crypto, expiry, and rate limits                  | Supported on select vendor tiers; proprietary SMS pipes                                                                        |
+| **Email / Password Support**        | Built-in using native Node.js `scrypt` hasher                                                                        | Supported via Credentials provider                                                                                             | Must implement hashing, salt management, timing-safe checks                                    | Built-in on vendor console                                                                                                     |
+| **TOTP & Backup Codes**             | Official `twoFactor` plugin with encrypted secrets                                                                   | Not selected: equivalent native TOTP plugin support not established in this review                                             | High implementation and cryptographic audit burden                                             | Built-in on vendor console                                                                                                     |
+| **Database Sessions**               | Native PostgreSQL `session` table with direct token lookup and server-side revocation                                | Supports database sessions via Prisma adapter or stateless JWTs; custom hooks required for granular database lifecycle control | Custom session table design, token rotation, and cleanup required                              | Session state held in vendor cloud; local verification relies on vendor JWTs or session introspection                          |
+| **Session Revocation**              | Built-in server-side revocation endpoints                                                                            | Limited out-of-the-box with JWTs                                                                                               | Must hand-roll revocation tokens and tracking tables                                           | Supported via vendor management APIs                                                                                           |
+| **Rate Limiting & Abuse Controls**  | Built-in storage-backed rate limiting (IP/endpoint based)                                                            | Requires external Redis / Upstash integration                                                                                  | Must implement sliding window rate limiters                                                    | Built-in on vendor edge                                                                                                        |
+| **Origin & Cookie Protections**     | Built-in Origin verification, Fetch Metadata headers, and `SameSite=Lax` cookies                                     | Built-in CSRF protection                                                                                                       | Vulnerable to subtle cookie attribute misconfigurations                                        | Handled by vendor domain/cookies                                                                                               |
+| **Account Linking**                 | Native User / Account model                                                                                          | Supported via adapter callbacks                                                                                                | Full control, high logic complexity                                                            | Managed by vendor rules                                                                                                        |
+| **Testability Without Sending SMS** | Native `testUtils({ captureOTP: true })` in test instances                                                           | Complex mocking of Credentials callbacks                                                                                       | High testability, high code volume                                                             | Requires third-party mocking or vendor sandbox                                                                                 |
+| **Vendor Independence & Licensing** | Self-hosted open-source library (MIT license); identity and sessions reside in local PostgreSQL database             | Self-hosted open-source library; identity data resides in local database via adapter                                           | Self-hosted proprietary application codebase                                                   | Third-party proprietary SaaS; user identities hosted in vendor cloud; export and migration workflows required if transitioning |
+| **Operational Complexity**          | Moderate: single library embedded within Next.js process; requires managing database migrations for generated tables | Moderate: embedded library; requires configuring custom credential shims for phone OTP                                         | Very High: ongoing maintenance of cryptographic routines, cookie flags, and session management | Moderate to High: external service dependency, network latency, webhook reconciliation, and vendor SDK versioning              |
+| **Schema Ownership**                | Complete (`prisma/schema.prisma` under git control)                                                                  | Complete via Prisma adapter                                                                                                    | Complete                                                                                       | Fragmented across vendor cloud and local database                                                                              |
+| **Egypt-First Mobile Experience**   | High (Headless API allows custom Arabic/English RTL screens)                                                         | Moderate (Headless)                                                                                                            | High (Bespoke)                                                                                 | Often requires vendor hosted widgets or restricted UI customizability                                                          |
+| **Commercial / Cost Status**        | Free (MIT License, $0 software fee)                                                                                  | Free (Open source)                                                                                                             | Engineering build/maintenance cost                                                             | Recurring monthly subscription fees based on MAU tiers                                                                         |
 
 ### Decision Summary:
 
@@ -80,7 +80,7 @@ WaffarhaCars serves distinct operational actors across consumer, provider, and i
 
 > [!IMPORTANT]
 > **Better Auth Generated Schema is the Authoritative Source of Truth:**
-> The tables and fields described below represent the architectural mapping. The **exact, authoritative Prisma schema is produced directly by Better Auth's schema generator (`npx @better-auth/cli generate`) in PR 2A**. Engineering will not manually guess or hand-craft library-owned fields.
+> The tables and fields described below represent the architectural mapping for **Better Auth 1.7.5**. The **exact, authoritative Prisma schema is produced directly by Better Auth's schema generator (`npx @better-auth/cli generate`) in PR 2A and PR 2C**. Engineering will not manually rename or hand-craft library-owned fields before running the generator.
 
 ### 4.1 PR 2A Schema Generation Workflow:
 
@@ -102,19 +102,34 @@ WaffarhaCars serves distinct operational actors across consumer, provider, and i
   ```
 - **Account Linking for Phone:** Phone authentication operates primarily via user record attributes and verification tokens; it does not automatically create an `Account` row with `providerId: "phone"` unless explicitly configured.
 - **Session Tokens:** Session tokens in the `session` table are stored as **unique lookup strings**, not cryptographic hashes. The session cookie holds the plain token matching the database key.
-- **Verification Values:** By default, values in the `verification` table are stored as plain or hashed strings depending on plugin options. PR 2B must verify the exact storage representation of OTP challenge values.
-- **Server-Owned Custom Fields:** To protect server-owned attributes like `isSuspended` from client tampering, they must be registered with `input: false` in Better Auth's schema configuration:
+- **Verification Records (No User Foreign Key):** Better Auth's `verification` table stores temporary challenge tokens indexed by `identifier` (e.g. canonical phone number or email) and `value`. **It does not maintain a foreign-key relationship to the `User` table**, allowing pre-registration challenges and anonymous OTP dispatch.
+- **Server-Owned Custom Fields:** To protect server-owned attributes from client tampering, they must be registered with `input: false` in Better Auth's schema configuration:
   ```typescript
   user: {
     additionalFields: {
       isSuspended: {
         type: "boolean",
         defaultValue: false,
-        input: false, // Prevents client from passing or mutating this field during registration/updates
+        input: false, // Server-owned; client cannot mutate during sign-up or updates
       },
     },
-  }
+  },
+  session: {
+    additionalFields: {
+      lastActivityAt: {
+        type: "date",
+        defaultValue: () => new Date(),
+        input: false, // Server-owned; updated boundedly to track idle timeouts
+      },
+      lastReauthenticatedAt: {
+        type: "date",
+        required: false,
+        input: false, // Server-owned; tracks step-up reauthentication timestamp
+      },
+    },
+  },
   ```
+- **Enforcement Boundary for `isSuspended`:** Better Auth does not natively block session resolution for suspended users. **Checking `user.isSuspended` and terminating session access is a WaffarhaCars-owned DAL enforcement rule** executed within the central session assertion helper (`assertAuthenticated`).
 
 ### 4.3 Proposed Schema Architecture:
 
@@ -122,7 +137,7 @@ WaffarhaCars serves distinct operational actors across consumer, provider, and i
 erDiagram
     User ||--o{ Session : "authenticates"
     User ||--o{ Account : "credentials"
-    User ||--o{ Verification : "temporary challenges"
+    User ||--o| TwoFactor : "two-factor authentication"
 
     User ||--o| CustomerProfile : "has"
     User ||--o{ InternalStaffMembership : "holds"
@@ -130,18 +145,28 @@ erDiagram
     User ||--o{ SecurityAuditEvent : "triggers"
 ```
 
+> [!NOTE]
+> `Verification` is an independent, identifier-based challenge table (`id`, `identifier`, `value`, `expiresAt`, `createdAt`, `updatedAt`) without a direct foreign key to `User`, as verified challenges may precede user creation.
+
 1. **Better Auth Generated Models (PR 2A & PR 2C):**
-   - `User`: `id`, `name`, `email`, `emailVerified`, `phoneNumber`, `phoneNumberVerified`, `image`, `isSuspended` (server-only), `twoFactorEnabled` (added by 2FA plugin), `createdAt`, `updatedAt`.
-   - `Session`: `id`, `userId`, `token`, `expiresAt`, `ipAddress`, `userAgent`, `createdAt`, `updatedAt`.
+   - `User`: `id`, `name`, `email`, `emailVerified`, `phoneNumber`, `phoneNumberVerified`, `image`, `isSuspended` (server-only, default false), `twoFactorEnabled` (boolean, default false, added by 2FA plugin), `createdAt`, `updatedAt`.
+   - `Session`: `id`, `userId`, `token`, `expiresAt`, `ipAddress`, `userAgent`, `lastActivityAt` (server-only), `lastReauthenticatedAt` (server-only, nullable), `createdAt`, `updatedAt`.
    - `Account`: `id`, `userId`, `accountId`, `providerId`, `password` (hashed via scrypt), `createdAt`, `updatedAt`.
    - `Verification`: `id`, `identifier`, `value`, `expiresAt`, `createdAt`, `updatedAt`.
-   - _Note on 2FA:_ Better Auth's `twoFactor` plugin adds `twoFactorSecret` and `twoFactorBackupCodes` directly to the `User` model (or dedicated model depending on generator version). Both fields are encrypted at rest using `BETTER_AUTH_SECRET`.
+   - `TwoFactor` (`twoFactor` table, PR 2C): Dedicated table generated by Better Auth 1.7.5 `twoFactor` plugin containing:
+     - `id` (string, primary key)
+     - `userId` (string, unique foreign key referencing `User.id`)
+     - `secret` (string, encrypted TOTP seed)
+     - `backupCodes` (string, encrypted serialized backup codes)
+     - `verified` (boolean, indicates completed enrollment)
+     - `failedVerificationCount` (integer, tracks consecutive failed 2FA challenges)
+     - `lockedUntil` (DateTime, nullable, second-factor lockout expiration timestamp)
 
 2. **WaffarhaCars Domain-Owned Models (PR 2B / 2C / 2D):**
-   - `CustomerProfile` (`customer_profiles`): `id`, `userId` (`UNIQUE`), `preferredLanguage` (`ar` | `en`), `notificationPreferences` (JSONB), `createdAt`, `updatedAt`.
-   - `InternalStaffMembership` (`internal_staff_memberships`): `id`, `userId` (`UNIQUE`), `department` (`SALES` | `OPERATIONS` | `FINANCE` | `ADMIN`), `employeeNumber` (`UNIQUE`), `isActive`, `hiredAt`.
-   - `InternalRoleAssignment` (`internal_role_assignments`): `id`, `staffMembershipId`, `role` (`SALES_AGENT` | `OPS_SUPERVISOR` | `FINANCE_OFFICER` | `PLATFORM_ADMIN`), `assignedAt`, `assignedBy`.
-   - `SecurityAuditEvent` (`security_audit_events`): `id`, `actorUserId` (Nullable), `eventType`, `targetEntity`, `ipAddress`, `metadata` (JSONB), `timestamp`.
+   - `CustomerProfile` (`customer_profiles`, PR 2B): `id`, `userId` (`UNIQUE`), `preferredLanguage` (`ar` | `en`), `notificationPreferences` (JSONB), `createdAt`, `updatedAt`.
+   - `InternalStaffMembership` (`internal_staff_memberships`, PR 2C): `id`, `userId` (`UNIQUE`), `department` (`SALES` | `OPERATIONS` | `FINANCE` | `ADMIN`), `employeeNumber` (`UNIQUE`), `isActive`, `hiredAt`.
+   - `InternalRoleAssignment` (`internal_role_assignments`, PR 2D): `id`, `staffMembershipId`, `role` (`SALES_AGENT` | `OPS_SUPERVISOR` | `FINANCE_OFFICER` | `PLATFORM_ADMIN`), `assignedAt`, `assignedBy`.
+   - `SecurityAuditEvent` (`security_audit_events`, PR 2D): `id`, `actorUserId` (Nullable), `eventType`, `targetEntity`, `ipAddress`, `metadata` (JSONB), `timestamp`.
 
 3. **Explicit Scope Exclusion:** Provider merchant organizations (`provider_organizations`), workshop locations (`provider_branches`), and staff branch assignments (`branch_assignments`) are **strictly deferred to PR 3**.
 
@@ -160,7 +185,7 @@ WaffarhaCars mandates **[`libphonenumber-js`](https://gitlab.com/catamphetamine/
 - **Allocation Blocks:** `010` (Vodafone), `011` (Etisalat), `012` (Orange), `015` (WE).
 - **Mobile Number Portability (MNP) Warning:** Initial prefix allocations identify format validity only. Because Egypt enforces Mobile Number Portability, **application logic must never use the prefix to infer the user's active mobile network operator**.
 - **Canonical Storage:** Serialized exclusively as E.164: `+201[0125]XXXXXXXX`.
-- **Masked Presentation:** `+20 10 •••• 1234`. Raw phone numbers must never be written to application logs.
+- **Masked Presentation:** `+20 10 **** 1234`. Raw phone numbers must never be written to application logs.
 
 ### 5.3 Better Auth Phone Sign-Up: Temporary Email Strategy
 
@@ -182,17 +207,23 @@ Better Auth's core user model requires an email address. For Egyptian consumers 
 
 ### 5.4 Phone-Number Change & Recycled-SIM Policy:
 
-- **Phone-Number Change Procedure:**
-  1. Caller must hold a fresh authenticated session (reauthenticated within the past 10 minutes).
-  2. Live OTP challenge must be successfully completed on the **new** phone number.
-  3. Upon successful verification, all other active sessions for the user are immediately revoked.
-  4. An audit event is recorded, and an alert is dispatched to any previously verified communication channel (such as email).
-- **Recycled-SIM Risk Analysis:** Egyptian telecom operators recycle inactive prepaid mobile numbers after extended dormancy (typically 90–180 days). If a previous customer abandons a number, a new subscriber receiving that SIM could theoretically authenticate via OTP into the previous owner's account.
+- **Strict Identity Recovery Rule:** **A new-phone OTP challenge alone must never recover or re-associate an existing account.** Associating a new mobile number with an existing identity is permitted only through verified workflows:
+  1. **Self-Service Phone Change (Active Session Required):**
+     - Caller must hold a fresh authenticated session (reauthenticated within the past 10 minutes).
+     - Confirmation with an existing secondary factor or password must be performed where configured.
+     - Live OTP verification must be successfully completed on the **new** mobile number.
+     - Upon successful verification, all other active sessions for the user are immediately revoked.
+     - A security audit event is recorded, and an alert is dispatched to any previously verified communication channel (such as verified email).
+  2. **Lost Phone / No Active Session (Manual Identity Proofing):**
+     - If a customer has lost access to their registered phone number and holds no active session, **automatic account linking to the new number is prohibited**.
+     - The customer must complete a documented manual identity proofing workflow managed by Operations/Support (verifying historical reservation details, vehicle identification, or payment instruments) before an administrator re-associates the profile.
+- **Recycled-SIM Risk Analysis:** In mobile-first markets like Egypt, prepaid mobile numbers that experience prolonged dormancy are eventually disconnected and recycled back into the operator pool. A new subscriber receiving a recycled SIM could theoretically authenticate via OTP into an account created by the previous owner.
+  - _Absence of Fixed Statutory Timeframe:_ Because Egyptian telecom recycling periods vary across operators, contract types, and regulatory churn policies, the architecture does not cite or assume an unverified fixed timeframe (e.g. 90–180 days).
   - _Compensating Controls:_
     - Inactive accounts past 180 days require profile re-confirmation upon first login.
-    - Historical reservation details in customer views display service descriptions and vehicle models without exposing full payment receipts or sensitive contact data.
-    - Sensitive account operations (such as viewing past invoices or modifying vehicles) require recent session activity.
-  - _Residual Risk Acceptance:_ Short of requiring national ID verification (which creates unacceptable onboarding friction for consumer discount bookings), OTP access to a recycled phone number represents an accepted residual risk of mobile-first authentication.
+    - Historical reservation views redact full payment instrument details, payment transaction IDs, and personal contact info.
+    - Sensitive account operations (such as reservation cancellations or profile changes) require fresh active session reauthentication.
+  - _Residual Risk Acceptance:_ Short of requiring national ID card verification (which creates unacceptable onboarding friction for discount automotive bookings), OTP access to a recycled phone number represents an accepted residual risk of mobile-first authentication.
 - **Provider Manager Financial Guard:** During the Cairo pilot, SMS-only authenticated workshop managers **are prohibited from modifying bank account or settlement payout details via self-service**. All payout modifications require an internal Operations maker-checker verification workflow.
 
 ---
@@ -205,52 +236,51 @@ Rather than building duplicate custom endpoints, WaffarhaCars leverages Better A
 Client (Browser)                           Next.js (Better Auth)              WaffarhaCars Transport Adapter           Domestic Gateway
      │                                               │                                      │                                 │
      │ ── 1. authClient.phoneNumber.sendOtp() ────>  │                                      │                                 │
-     │                                               │ [Generate OTP & Store Verification]  │                                 │
-     │                                               │ ── 2. sendOTP({ phone, code }) ────> │                                 │
-     │                                               │                                      │ ── 3. Dispatch SMS API ───────> │
-     │                                               │                                      │ <─ 4. Accepted (MessageId) ──── │
-     │                                               │ <─ 5. Return Transport Result ────── │                                 │
-     │ <─ 6. HTTP 200 (Challenge Sent) ────────────  │                                      │                                 │
+     │                                               │ [Generate Challenge & Store Record]  │                                 │
+     │                                               │ ── 2. Trigger non-awaited sendOTP ──>│                                 │
+     │ <─ 3. HTTP 200 (Challenge Accepted) ───────── │                                      │ ── 4. Dispatch SMS API ───────> │
+     │                                               │                                      │ <─ 5. Gateway Response ──────── │
      │                                               │                                      │                                 │
-     │ ── 7. authClient.phoneNumber.verify() ──────> │                                      │                                 │
-     │                                               │ [Verify & Consume Challenge]         │                                 │
-     │ <─ 8. Session Cookie Issued ───────────────── │                                      │                                 │
+     │ ── 6. authClient.phoneNumber.verify() ──────> │                                      │                                 │
+     │                                               │ [Atomically Consume Challenge]       │                                 │
+     │ <─ 7. Session Cookie Issued ───────────────── │                                      │                                 │
 ```
 
-### 6.1 Pluggable Transport Adapter Contract:
+### 6.1 Delivery Semantics & Anti-Abuse Controls:
 
-```typescript
-export interface OtpTransportResult {
-  accepted: boolean;
-  vendorMessageId?: string;
-  rejectionReason?: string;
-}
+- **Non-Awaited Dispatch & Response Semantics:** Official Better Auth documentation recommends not awaiting `sendOTP` within the HTTP request lifecycle to avoid response-time enumeration attacks. The public HTTP 200 response indicates only that the verification challenge was **accepted for processing**—not that the upstream SMS gateway or mobile handset has received it.
+- **Process Termination Resilience:** PR 2B must decide during implementation how background dispatch survives server process termination (evaluating provider-managed verification services like Twilio Verify / Infobip Verify versus a minimal durable delivery mechanism such as a lightweight queue). Unsafe, untracked fire-and-forget promises that crash silently or lose messages during container redeployments are strictly prohibited.
+- **Pluggable Transport Adapter Contract:**
+  ```typescript
+  export interface OtpTransportResult {
+    accepted: boolean;
+    vendorMessageId?: string;
+    rejectionReason?: string;
+  }
 
-export interface OtpTransportAdapter {
-  send(toCanonicalE164: string, code: string): Promise<OtpTransportResult>;
-}
-```
-
-- **Asynchronous Delivery Realism:** SMS transport is inherently asynchronous. The transport adapter returns whether the upstream gateway _accepted_ the message for delivery (`accepted: boolean`), not a synchronous guarantee that the handset received it (`delivered`).
-- **Configurable Pilot Defaults (Not Architectural Constants):**
-  - Code format: 6-digit numeric string.
-  - Challenge expiry: **180 seconds** (configurable pilot default).
-  - Maximum verification attempts: **3 attempts** per challenge before invalidation.
-  - Resend cooldown: **60 seconds** minimum between requests.
-- **Rate Limiting:** Multi-instance production deployments use database-backed storage for Better Auth's rate limiter.
+  export interface OtpTransportAdapter {
+    send(toCanonicalE164: string, code: string): Promise<OtpTransportResult>;
+  }
+  ```
+- **WaffarhaCars-Owned Rate Limiting & Cooldown:** Better Auth's general rate limiter is primarily IP/endpoint based and operates across fixed time windows; it does **not** provide a native per-phone sliding-window limiter.
+  - The 60-second per-phone resend cooldown and SMS-pumping defenses are **WaffarhaCars-owned controls**.
+  - WaffarhaCars implements an atomic database-backed throttle in PostgreSQL keyed by a domain-separated HMAC of the canonical E.164 phone number (`hmac_sha256(phone, salt)`), combined with IP-based rate limiting.
+  - **Public HTTP Endpoint Testing:** All rate-limiting and abuse-defense integration tests must exercise the public HTTP endpoint (`/api/auth/phone-number/send-otp`), because direct `auth.api` server calls bypass Better Auth's client-facing rate-limiting middleware.
 - **Test Harness Isolation:** Deterministic test capture is enabled exclusively in test environments using Better Auth's official `testUtils({ captureOTP: true })`. Production initialization asserts that test plugins are excluded and fails closed if `OTP_PROVIDER=mock`.
 
-### 6.2 PR 2B Concurrency Spike & Atomic Verification Requirement:
+### 6.2 PR 2B Concurrency Hard Gate & Atomic Verification Requirement:
 
-> [!WARNING]
-> **OTP Race Condition Spike Mandate:**
-> Official documentation notes that server-side OTP consumption does not automatically guarantee race condition prevention under rapid concurrent requests.
+> [!CAUTION]
+> **OTP Concurrency Hard Gate Mandate:**
+> Official Better Auth documentation notes that server-side OTP consumption does not automatically guarantee single-use enforcement under rapid concurrent requests unless the underlying verifier atomically consumes the challenge.
 >
-> **PR 2B must execute an explicit concurrency integration test:**
+> **PR 2B must execute a strict concurrency test gate:**
 >
-> - Submit two identical valid OTP verification requests simultaneously against the same challenge.
-> - Assert that **exactly one request succeeds in issuing a session**, while the competing request is rejected.
-> - If Better Auth's default verification handler permits a race condition, PR 2B must implement Better Auth's supported `verifyOTP` hook extension backed by a PostgreSQL row lock or atomic transaction before accepting the verification.
+> 1. Submit two identical valid OTP verification requests simultaneously against the same active challenge via the public HTTP endpoint.
+> 2. Assert that **exactly one request succeeds in issuing a session**, while the competing request is rejected.
+> 3. **If that test fails (i.e. race condition permits multiple sessions or double consumption), PR 2B is blocked immediately.**
+> 4. The engineering team must stop and author an ADR amendment choosing either a provider-managed atomic verification service or a fully specified atomic local verifier.
+> 5. No casual fallback implementation may be merged without proving atomic consumption and exactly-one-session behavior under concurrent load.
 
 ---
 
@@ -260,26 +290,32 @@ export interface OtpTransportAdapter {
 
 - **Storage:** Stored in the PostgreSQL `session` table.
 - **Token Format:** Better Auth stores an unhashed unique string token in the database and sets this value in an `HttpOnly`, `SameSite=Lax` cookie.
-- **Expiration Controls:** Better Auth provides `expiresIn` (session lifetime in seconds) and rolling `updateAge` (window after which user activity extends `expiresAt`).
+- **Expiration Controls:** Better Auth provides a single global `expiresIn` (session lifetime in seconds) and rolling `updateAge` (window after which user activity extends `expiresAt`). Better Auth does **not** natively support role-specific idle timeouts.
 - **Cookie Cache:** Better Auth supports an optional `cookieCache` storing signed session data in a client cookie. **In PR 2A, `cookieCache` is disabled** to guarantee that session revocation takes effect immediately against PostgreSQL without waiting for cookie cache expiration.
 
 ### 7.2 Session Capability-Gap Analysis:
 
-| Requirement                          | Better Auth Native (1.7.5)                    | WaffarhaCars Architecture                                 | Gap Resolution & Owning PR                                                  |
-| :----------------------------------- | :-------------------------------------------- | :-------------------------------------------------------- | :-------------------------------------------------------------------------- |
-| **Database Session Persistence**     | Native (`session` table in PostgreSQL)        | Direct PostgreSQL session store                           | **PR 2A:** Configured via Prisma adapter                                    |
-| **Immediate Server-Side Revocation** | Native (`revokeSession`, `revokeAllSessions`) | Instant session termination on logout/suspension          | **PR 2A:** Native API calls; `cookieCache` disabled                         |
-| **Rolling Session Refresh**          | Native (`updateAge` extends `expiresIn`)      | Extends active sessions on user interaction               | **PR 2A:** Configured pilot defaults                                        |
-| **Dual Idle vs. Absolute Timeouts**  | Single rolling `expiresAt` timestamp          | Two-tier timeout policy (idle + absolute cap)             | **PR 2D:** DAL verifies `session.createdAt` against absolute ceiling        |
-| **Actor-Specific Session Durations** | Uniform global `expiresIn`                    | Strict timeouts for staff vs. long sessions for customers | **PR 2C / 2D:** Staff layout and DAL assert stricter session freshness      |
-| **Sensitive Reauthentication Gate**  | Not automatic per endpoint                    | Step-up reauthentication for critical actions             | **PR 2D:** DAL asserts recent authentication timestamp on sensitive actions |
+| Requirement                          | Better Auth Native (1.7.5)                    | WaffarhaCars Architecture                                 | Gap Resolution & Owning PR                                                                                                                            |
+| :----------------------------------- | :-------------------------------------------- | :-------------------------------------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Database Session Persistence**     | Native (`session` table in PostgreSQL)        | Direct PostgreSQL session store                           | **PR 2A:** Configured via Prisma adapter                                                                                                              |
+| **Immediate Server-Side Revocation** | Native (`revokeSession`, `revokeAllSessions`) | Instant session termination on logout/suspension          | **PR 2A:** Native API calls; `cookieCache` disabled                                                                                                   |
+| **Global Session Ceiling**           | Native (`expiresIn`)                          | Platform outer boundary (e.g. 30 days)                    | **PR 2A:** Configured pilot default                                                                                                                   |
+| **Dual Idle vs. Absolute Timeouts**  | Single rolling `expiresAt` timestamp          | Two-tier timeout policy (idle + absolute cap)             | **PR 2A / 2D:** PR 2A adds server-owned `lastActivityAt`; PR 2D DAL verifies `createdAt` against absolute cap and `lastActivityAt` against idle limit |
+| **Actor-Specific Session Durations** | Uniform global `expiresIn`                    | Strict timeouts for staff vs. long sessions for customers | **PR 2D:** DAL asserts role-specific absolute caps and idle windows                                                                                   |
+| **Sensitive Reauthentication Gate**  | `freshAge` checks initial creation            | Step-up reauthentication for critical actions             | **PR 2A / 2D:** PR 2A adds server-owned `lastReauthenticatedAt`; PR 2D DAL asserts recent reauthentication timestamp                                  |
 
-### 7.3 Proposed Pilot Session Durations:
+### 7.3 Implementation Mechanism for Idle and Step-Up Timeouts:
 
-- **Customers:** `expiresIn: 30 days`, `updateAge: 24 hours`.
-- **Workshop Staff / Managers:** `expiresIn: 12 hours`, `updateAge: 1 hour`.
-- **Internal Staff (Sales/Ops/Finance):** `expiresIn: 8–10 hours`, DAL idle enforcement at 30–60 minutes.
-- **Platform Administrators:** `expiresIn: 4 hours`, DAL idle enforcement at 15 minutes.
+1. **Global Maximum Ceiling:** Better Auth's global `expiresIn` is configured to the maximum duration required by consumers (30 days).
+2. **Actor-Specific Absolute Caps:** Enforced server-side in the DAL (`assertAuthenticated`) by comparing `session.createdAt` against the role's absolute limit (e.g. 4 hours for Admin, 8–10 hours for Staff, 12 hours for Workshop Worker).
+3. **True Role-Specific Idle Limits:** True idle tracking requires a server-owned `lastActivityAt` timestamp registered on `Session` in PR 2A (`input: false`). The DAL verifies that `now - session.lastActivityAt < idleLimit`. To prevent database write amplification, `lastActivityAt` is updated in a bounded, throttled manner (e.g. at most once every 5 minutes during active requests). `updatedAt` and `updateAge` alone are not presented as reliable role-specific idle tracking.
+4. **Step-Up Reauthentication Assurance:** Sensitive mutations require a server-owned `lastReauthenticatedAt` timestamp on `Session` (registered in PR 2A with `input: false`). Better Auth's initial `createdAt` is not proof that a later step-up reauthentication occurred. The DAL enforces that sensitive actions (payout batch generation, role escalation, phone change) require `now - session.lastReauthenticatedAt < 10 minutes`.
+5. **Required Verification Tests in PR 2D:**
+   - Continuous user activity keeps session active within idle limits.
+   - Inactivity exceeding the actor's idle limit triggers session rejection and invalidation.
+   - Exceeding the actor's absolute ceiling terminates the session regardless of ongoing activity.
+   - Changing a user's role immediately applies the updated timeout limits.
+   - Performing step-up reauthentication refreshes `lastReauthenticatedAt` and unlocks sensitive actions.
 
 ---
 
@@ -287,19 +323,50 @@ export interface OtpTransportAdapter {
 
 ### 8.1 First Factor: Passwords via Default `scrypt`
 
-- Better Auth implements password hashing using Node.js's built-in, memory-hard **`scrypt`** algorithm by default.
-- **Pilot Decision:** WaffarhaCars will use Better Auth's default `scrypt` implementation. Custom Argon2id wrappers or native C++ compilation dependencies are rejected for the Cairo pilot to maintain cross-platform simplicity and avoid unnecessary cryptographic reimplementation.
-- **Password Policy:** Minimum 12 characters, enforced via Better Auth's `emailAndPassword.minPasswordLength: 12`.
+- **Password Policy:** Minimum 12 characters (NIST SP 800-63B compliant).
+- **Hashing Algorithm:** Managed by Better Auth's default password hasher using Node.js native `crypto.scrypt`.
+- **Brute-Force Protection:** Enforced via IP- and endpoint-based rate limiting. _Note on Account Lockout:_ Better Auth password sign-in does not natively lock user accounts after failed password attempts (only the `twoFactor` plugin tracks failed second-factor attempts). Full password account lockout is documented as a deferred requirement to be implemented via custom storage-backed throttling in PR 2C.
 
 ### 8.2 Second Factor: Mandatory TOTP via Official `twoFactor` Plugin
 
-- Internal staff accounts (`SALES`, `OPERATIONS`, `FINANCE`, `ADMIN`) require mandatory TOTP (RFC 6238).
-- **Cryptographic Storage:** Better Auth's `twoFactor` plugin encrypts TOTP secrets (`twoFactorSecret`) and backup codes (`twoFactorBackupCodes`) at rest using `BETTER_AUTH_SECRET`. Custom encryption wrappers (`MFA_ENCRYPTION_KEY`) are rejected as redundant.
-- **Backup Code Lifecycle:** Backup codes are single-use and encrypted. Upon successful consumption during recovery, the plugin removes the used code, preventing replay.
-- **Trusted Devices Disabled for Admin:** Better Auth's `trustDevice` feature **must be disabled (`trustDevice: false`) for internal staff** to prevent 30-day MFA bypasses on administrative consoles.
-- **Factor Independence Justification:**
-  - Password (Knowledge) + Authenticator App TOTP (Physical Possession) = **Valid Multi-Factor Authentication**.
-  - SMS OTP + App TOTP on the same phone represents two Possession factors sharing the same physical mobile device and does not satisfy two-factor independence under NIST SP 800-63B guidelines.
+Better Auth 1.7.5's official `twoFactor` plugin provides RFC 6238 TOTP and single-use backup codes.
+
+#### 1. Factual Schema for Better Auth 1.7.5:
+
+- `User` model gains `twoFactorEnabled` (boolean, default false).
+- Generated dedicated `twoFactor` table contains: `id`, `userId`, `secret`, `backupCodes`, `verified`, `failedVerificationCount`, and `lockedUntil`.
+- TOTP secrets (`secret`) and backup codes (`backupCodes`) are encrypted at rest using `BETTER_AUTH_SECRET`.
+- The pinned CLI generator output (`npx @better-auth/cli generate`) remains the final authority on Prisma definitions; fields must not be renamed prior to generation.
+
+#### 2. Trusted-Device Enforcement Policy:
+
+> [!IMPORTANT]
+> **Server-Side Enforcement of Trusted Devices:**
+> In Better Auth, `trustDevice` is a caller-controlled boolean parameter passed during TOTP verification (`authClient.twoFactor.verifyTOTP({ code, trustDevice: true })`). It is **not** a global configuration flag like `twoFactor({ trustDevice: false })`.
+>
+> **Enforceable Security Policy:**
+>
+> 1. Internal staff requests with `trustDevice: true` must be rejected or overridden server-side.
+> 2. PR 2C must identify and test the exact Better Auth server hook or boundary (e.g. pre-verification route hook or request interceptor) used to enforce this override.
+> 3. PR 2C must include a dedicated integration test that calls the public Better Auth verification endpoint directly with `trustDevice: true` for a staff user and proves that **no trusted-device bypass cookie is issued**.
+> 4. Relying on the client-side UI to pass `trustDevice: false` is strictly insufficient.
+> 5. If pinned Better Auth cannot enforce this safely server-side, PR 2C is blocked pending an ADR amendment.
+
+#### 3. Mandatory Staff-MFA Enrollment State Machine:
+
+Better Auth only challenges users who have successfully enabled 2FA (`twoFactorEnabled: true`). Un-enrolled staff would otherwise authenticate with password alone. The architecture mandates the following state machine:
+
+1. **Disable Public Staff Registration:** Public email/password self-registration is disabled. Staff accounts are provisioned exclusively through an authorized internal workflow (e.g. Platform Admin seed script creating `User` and `InternalStaffMembership`).
+2. **Initial Enrollment State:** Newly provisioned staff accounts have `User.twoFactorEnabled = false` and no verified `twoFactor` record.
+3. **Forced Setup Journey:** Upon initial password sign-in, the user's session is granted zero staff or administrative permissions. The session is strictly confined to the TOTP enrollment route (`/staff/mfa/enroll`).
+4. **DAL Privilege Block:** `twoFactorEnabled = false` or an unverified two-factor record (`twoFactor.verified = false`) must block **every staff privilege** in the DAL and route boundaries except the enrollment and recovery endpoints.
+5. **Authorization Requirement:** An active internal membership (`InternalStaffMembership.isActive = true`) plus verified TOTP enrollment (`User.twoFactorEnabled = true` AND `twoFactor.verified = true`) is strictly required before any staff authorization succeeds.
+6. **Direct SQL Mutation Prohibited:** Directly changing `twoFactorEnabled = true` in SQL is prohibited; the account must complete Better Auth's cryptographic setup flow so the secret and backup codes are properly initialized.
+7. **Native Endpoint vs. Wrapper:** The native Better Auth sign-in endpoint (`/api/auth/sign-in/email`) plus a staff UI is used. If a wrapper or dedicated Route Handler is retained, its security purpose must be documented, and the central DAL / middleware must guarantee that logging in via the native endpoint cannot bypass the mandatory TOTP requirement.
+
+#### 4. Factor Independence & Recovery:
+
+- **Factor Independence:** Password (Knowledge) + Authenticator App TOTP (Possession) satisfies two-factor independence under NIST SP 800-63B guidelines.
 - **Administrative Recovery:** If a staff member loses their authenticator app and backup codes, MFA reset requires a **two-person administrative rule** (written authorization from the Managing Director / Founder and technical execution by Platform Admin).
 
 ---
@@ -310,7 +377,10 @@ Authentication verifies identity; authorization determines object-level access p
 
 ### 9.1 Core Architectural Invariants:
 
-1. **Deny by Default:** Unauthenticated or unauthorized requests are rejected immediately with structured HTTP 403 Forbidden errors.
+1. **Structured HTTP Semantics:**
+   - **HTTP 401 Unauthorized:** Returned when authentication is missing, invalid, revoked, or expired.
+   - **HTTP 403 Forbidden:** Returned when an authenticated caller lacks required permissions, when a staff user has not completed mandatory TOTP enrollment, or when a user is suspended (`isSuspended: true`).
+   - **Object-Ownership Policy (403 vs. 404):** Object-ownership failures (such as a customer attempting to access another customer's reservation or a workshop accessing another branch's data) must follow the domain's documented 403/404 policy to avoid leaking whether private entities exist.
 2. **Centralized Data Access Layer (DAL):** Domain business logic resides in server-side repositories. Route Handlers and Server Actions must call DAL functions rather than querying Prisma models directly.
 3. **Zero Client Trust:** Route parameters (`userId`, `branchId`, `role`) provided in request bodies or query strings are untrusted. The DAL extracts caller identity and permissions strictly from the validated session.
 4. **Append-Oriented Security Audit Log:** Denial events, authentication failures, and privilege elevations are written to `security_audit_events`.
@@ -328,18 +398,17 @@ Authentication verifies identity; authorization determines object-level access p
 
 ## 10. Threat Modeling & Security Controls
 
-| Threat Scenario            | Attack Vector                                   | Prevention Controls                                                                                                                  | Detection Controls                             | Recovery Controls                                             |
-| :------------------------- | :---------------------------------------------- | :----------------------------------------------------------------------------------------------------------------------------------- | :--------------------------------------------- | :------------------------------------------------------------ |
-| **OTP Brute Force**        | Script guessing 6-digit codes                   | - Max 3 attempts per challenge<br>- 180s expiry<br>- IP and phone sliding rate limits                                                | Logged failed verification attempts            | Challenge destroyed on 3rd failure; 15-minute phone cooldown. |
-| **OTP Replay**             | Re-submitting previously used OTP               | - Atomic single-use consumption in database transaction                                                                              | Re-verification rejection                      | Zero session issued; challenge invalidated.                   |
-| **Account Enumeration**    | Probing phone numbers to discover users         | - Better Auth returns uniform challenge-sent responses<br>- Uniform response timing                                                  | Spikes in unique phone requests from single IP | IP rate limiting blocks automated sweeps.                     |
-| **Session Fixation**       | Forcing known session token on victim           | - Session rotation on login and MFA elevation                                                                                        | Session token mismatch detection               | Existing session destroyed; fresh token issued.               |
-| **Session Theft**          | Stealing session cookie via XSS / sniffing      | - `HttpOnly` cookies block JS access<br>- `Secure` flag forces HTTPS<br>- No tokens in `localStorage`                                | IP / User-Agent drift monitoring               | Immediate session revocation via Better Auth API.             |
-| **CSRF**                   | Cross-origin request forged by third-party site | - `SameSite=Lax` cookies<br>- Better Auth `Origin` validation against `trustedOrigins`<br>- Fetch Metadata (`Sec-Fetch-Site`) checks | Better Auth origin rejection logging           | Request rejected before reaching DAL.                         |
-| **Credential Stuffing**    | Automated login using leaked password lists     | - Mandatory TOTP for internal staff<br>- Built-in rate limiting on sign-in                                                           | Failed login spike monitoring                  | Account lockout after consecutive failed attempts.            |
-| **Client Role Tampering**  | Submitting `role: "ADMIN"` in request payload   | - Client inputs validated with Zod<br>- Authorization checked against server DB tables exclusively                                   | Zod schema rejection on unexpected fields      | Payload stripped; attempt logged to security audit log.       |
-| **Stolen Provider Device** | Tablet stolen while logged in                   | - 12-hour absolute shift limit<br>- 2-hour idle timeout                                                                              | Off-hours check-in alerts                      | Remote session revocation by Provider Manager / Ops.          |
-| **Concurrent OTP Race**    | Submitting valid OTP twice simultaneously       | - Transactional row lock on challenge verification record                                                                            | Idempotency violation detected                 | Exactly one request issues session; second request fails.     |
+| Threat Scenario                  | Attack Vector                                   | Prevention Controls                                                                                                                                                              | Detection Controls                                 | Recovery Controls                                                   |
+| :------------------------------- | :---------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :------------------------------------------------- | :------------------------------------------------------------------ |
+| **OTP Brute Force**              | Automated script guessing 6-digit codes         | - Max 3 attempts per challenge<br>- 180s expiry<br>- WaffarhaCars-owned atomic phone throttle keyed by `hmac_sha256(phone, salt)`<br>- IP-based rate limiting on public endpoint | Failed verification logging                        | Challenge destroyed on 3rd failure; 15-minute phone cooldown.       |
+| **OTP Replay**                   | Re-submitting previously used OTP               | - Atomic single-use consumption in database transaction                                                                                                                          | Re-verification rejection                          | Zero session issued; challenge invalidated.                         |
+| **Account Enumeration**          | Probing phone numbers to discover users         | - Generic acceptance responses (HTTP 200 means accepted for processing)<br>- Non-awaited asynchronous `sendOTP` dispatch                                                         | Spikes in unique phone requests from single IP     | IP rate limiting blocks automated sweeps.                           |
+| **Session Hijacking / Fixation** | Stealing cookie via XSS or sniffing             | - `HttpOnly`, `Secure`, `SameSite=Lax` cookies<br>- No tokens in `localStorage`<br>- Native database session lookup                                                              | Audit logging of unexpected authentication errors  | Immediate session revocation via Better Auth API (`revokeSession`). |
+| **CSRF**                         | Cross-origin request forged by third-party site | - `SameSite=Lax` cookies<br>- Better Auth `Origin` validation against `trustedOrigins`<br>- Fetch Metadata (`Sec-Fetch-Site`) checks                                             | Better Auth origin rejection logging               | Request rejected before reaching DAL.                               |
+| **Credential Stuffing (Staff)**  | Automated login using leaked password lists     | - Mandatory TOTP for internal staff<br>- Built-in rate limiting on sign-in endpoint<br>- Account lockout on second-factor failures                                               | Failed login attempt logging in security audit log | Administrative password reset and second-factor unlock.             |
+| **Client Role Tampering**        | Submitting `role: "ADMIN"` in request payload   | - Client inputs validated with Zod<br>- Authorization checked against server DB tables exclusively                                                                               | Zod schema rejection on unexpected fields          | Payload stripped; attempt logged to security audit log.             |
+| **Stolen Provider Device**       | Tablet stolen while logged in                   | - 12-hour absolute shift limit<br>- 2-hour idle timeout enforced server-side                                                                                                     | Session duration audit logging                     | Remote session revocation by Provider Manager / Ops.                |
+| **Concurrent OTP Race**          | Submitting valid OTP twice simultaneously       | - Concurrency test hard gate in PR 2B; requires atomic consumption verifier                                                                                                      | Duplicate session detection                        | Exactly one request issues session; competing request rejected.     |
 
 ---
 
@@ -360,51 +429,61 @@ graph LR
 
 ### PR 2A: Authentication Library Foundation, Generated Schema & Database Sessions
 
-- **Business Outcome:** Establish Better Auth 1.7.5 foundation, generated PostgreSQL session schema, secure cookie transport, and core user identity.
-- **Exact Schema Ownership:** Better Auth generated schema (`User`, `Session`, `Account`, `Verification`).
+- **Business Outcome:** Functional Better Auth core instance mounted in Next.js 16 App Router managing database sessions in PostgreSQL 17 via Prisma 7.
+- **Runtime Compatibility Proof:** Proves target compatibility of Node.js 24 LTS, Next.js 16.3.5, and Prisma 7.10.0 with `@prisma/adapter-pg` via working prototype, clean build, and PostgreSQL 17.11 integration tests.
+- **Exact Schema Ownership:**
+  - `User`: Base identity record with `isSuspended` registered with `input: false`.
+  - `Session`: Database sessions with `lastActivityAt` and `lastReauthenticatedAt` registered with `input: false`.
+  - `Account`: Credential accounts (scrypt passwords).
+  - `Verification`: Identifier-based challenge records without user foreign key.
 - **File-Level Scope:**
-  - `src/lib/auth.ts`: Better Auth server initialization with Prisma adapter and UUID generator.
-  - `src/lib/auth-client.ts`: Better Auth client instance.
-  - `src/app/api/auth/[...all]/route.ts`: App Router Route Handler mount.
-  - `prisma/schema.prisma`: Generated Better Auth models committed after CLI generation.
-  - `prisma/migrations/<timestamp>_auth_core/migration.sql`: Clean generated SQL migration.
+  - `package.json`: Pin `"better-auth": "1.7.5"`.
+  - `src/lib/auth.ts`: Better Auth instance configuration with `generateId: () => crypto.randomUUID()`, `cookieCache: { enabled: false }`, and Prisma adapter.
+  - `src/app/api/auth/[...all]/route.ts`: Better Auth App Router Route Handler.
+  - `prisma/schema.prisma`: Generated Better Auth models and `prisma migrate dev --create-only` migration.
 - **Security Invariants:**
-  - Pinned `"better-auth": "1.7.5"`.
-  - Cookies configured `HttpOnly`, `Secure` (production), `SameSite=Lax`.
-  - `cookieCache` disabled initially to ensure instant DB-backed session revocation.
-  - Zero tokens stored in `localStorage`.
+  - Tokens stored unhashed in database; matched via unique lookup string.
+  - Session cookie flags: `HttpOnly`, `Secure`, `SameSite=Lax`.
+  - `cookieCache` disabled to guarantee immediate server-side revocation.
+  - Origin verification enabled against configured `trustedOrigins`.
 - **Integration Tests:**
-  - User creation in PostgreSQL via Better Auth.
-  - Session creation, persistence, and verification.
-  - Session deletion on logout.
-  - `isSuspended=true` blocks active session resolution.
-- **Exclusions:** No SMS delivery, no staff TOTP UI, no domain tables.
-- **Rollback / Forward-Fix:** Forward-fix schema; standard git revert.
+  - Session creation, retrieval, and immediate server-side revocation against PostgreSQL 17.11.
+  - Unauthenticated access returns HTTP 401.
+  - Origin header validation rejecting untrusted origins.
+- **Exclusions:** No phone OTP flow; no staff UI; no TOTP plugin; no RBAC permissions.
 
 ---
 
 ### PR 2B: Phone Normalization, Mock Transport Adapter & Consumer OTP Flow
 
-- **Business Outcome:** Headless phone OTP authentication for consumers and workshop staff using Egyptian mobile numbers with pluggable transport adapter.
-- **Exact Schema Ownership:** `customer_profiles` (attached to `User`).
+- **Business Outcome:** Egyptian phone number canonicalization, pluggable OTP transport contract with test capture, and customer mobile login flow.
+- **Exact Schema Ownership:**
+  - `customer_profiles`: Consumer profile table linked 1:1 with `User.id`.
 - **File-Level Scope:**
-  - `src/lib/phone.ts`: Phone normalization and validation via `libphonenumber-js`.
-  - `src/lib/otp/adapter.ts`: Transport adapter interface (`send`).
-  - `src/lib/otp/mock-transport.ts`: Deterministic in-memory / local mock transport.
-  - `src/components/auth/PhoneLoginForm.tsx`: Accessible bilingual (AR/EN) phone login form.
+  - `src/lib/phone.ts`: `libphonenumber-js` wrapper for Egyptian mobile validation and E.164 normalization.
+  - `src/lib/otp/types.ts`: `OtpTransportAdapter` and `OtpTransportResult` interfaces.
+  - `src/lib/otp/mock-adapter.ts`: In-memory transport adapter with test capture.
+  - `src/lib/otp/throttle.ts`: WaffarhaCars-owned atomic database throttle keyed by `hmac_sha256(phone, salt)`.
+  - `src/lib/auth.ts`: Mount `phoneNumber` plugin with non-awaited `sendOTP` and `getTempEmail` hook.
+  - `src/app/[locale]/auth/login/page.tsx`: Consumer mobile OTP login interface (Arabic/English RTL).
 - **Security Invariants:**
-  - Canonical E.164 storage (`+201XXXXXXXXX`).
-  - Deterministic placeholder email strategy (`hmac@phone.waffarhacars.invalid`).
+  - Phone numbers strictly validated against Egyptian formats (`+201[0125]XXXXXXXX`).
+  - Public HTTP 200 response indicates challenge accepted for processing (non-awaited dispatch).
+  - 60-second resend cooldown and phone rate limiting enforced atomically in PostgreSQL.
   - Production fails closed if `OTP_PROVIDER=mock`.
   - 3 attempts, 180s expiry, 60s cooldown defaults.
   - Raw phone numbers excluded from application logs.
+- **Concurrency Test Hard Gate:**
+  - Public HTTP endpoint integration test submitting two concurrent verification requests against the same challenge.
+  - Exactly one session must be issued; competing request must fail.
+  - Failure halts PR 2B pending an ADR amendment for an atomic verifier.
 - **Integration Tests:**
   - Phone validation unit tests for Egyptian prefixes (010, 011, 012, 015) and rejection of invalid numbers.
-  - Concurrency spike test: concurrent submission of same valid OTP proves exactly one session issued.
-  - Rate limiting enforcement tests across IP and phone sliding windows.
+  - Public HTTP endpoint testing (`/api/auth/phone-number/send-otp`) for rate limiting and resend cooldown.
+  - Concurrency test proving single-use challenge consumption.
 - **E2E Tests:**
   - Customer phone OTP login journey in Arabic and English using mock transport.
-- **Exclusions:** No live SMS vendor SDKs; no staff portal views; no provider branch tables.
+- **Exclusions:** No live SMS vendor SDKs; no staff portal views; no provider branch tables or workshop worker onboarding (deferred to PR 3).
 
 ---
 
@@ -413,20 +492,25 @@ graph LR
 - **Business Outcome:** High-assurance authentication for internal staff with scrypt password hashing and mandatory Better Auth RFC 6238 TOTP.
 - **Exact Schema Ownership:**
   - `internal_staff_memberships`: Employee record and department mapping.
-  - Better Auth 2FA fields on `User` (`twoFactorEnabled`, `twoFactorSecret`, `twoFactorBackupCodes`).
+  - Better Auth 1.7.5 2FA fields: `User.twoFactorEnabled` (boolean) and dedicated `twoFactor` table (`id`, `userId`, `secret`, `backupCodes`, `verified`, `failedVerificationCount`, `lockedUntil`).
 - **File-Level Scope:**
-  - Better Auth `twoFactor` plugin configuration in `src/lib/auth.ts`.
-  - `src/app/api/v1/staff/auth/login/route.ts`: Staff credential login endpoint.
+  - `src/lib/auth.ts`: Mount `twoFactor` plugin with encrypted storage via `BETTER_AUTH_SECRET`.
+  - `src/lib/auth/trusted-device-guard.ts`: Server-side boundary overriding or rejecting `trustDevice: true` for staff.
+  - `src/app/api/v1/staff/auth/login/route.ts`: Staff login endpoint wrapper or UI integration.
   - `src/components/staff/TotpEnrollmentModal.tsx`: Staff TOTP enrollment interface.
 - **Security Invariants:**
+  - Public staff registration disabled; accounts provisioned via internal workflow.
   - Passwords hashed with native `scrypt` (minimum 12 characters).
-  - TOTP secrets and backup codes encrypted at rest by Better Auth using `BETTER_AUTH_SECRET`.
+  - Dedicated `twoFactor` table generated by Better Auth 1.7.5; fields not renamed prior to generation.
+  - TOTP secrets and backup codes encrypted at rest using `BETTER_AUTH_SECRET`.
   - Single-use backup codes removed upon consumption.
-  - `trustDevice: false` enforced for staff roles.
+  - **Server-Side Trusted Device Rejection:** Requests with `trustDevice: true` for staff are overridden or rejected server-side.
+  - **Mandatory Staff MFA State Machine:** `twoFactorEnabled: false` or unverified 2FA record blocks all staff privileges except enrollment route (`/staff/mfa/enroll`).
 - **Integration Tests:**
-  - Staff password authentication and rate-limited lockout.
+  - Staff password authentication and rate-limited invalid attempt handling.
   - TOTP secret generation, QR URI generation, and time-step verification.
-  - Backup code verification and single-use invalidation.
+  - Single-use backup code verification and consumption.
+  - Direct public Better Auth verification call with `trustDevice: true` asserts no bypass cookie is issued.
 - **E2E Tests:**
   - Staff login with email/password -> prompted for TOTP -> submits code -> access granted.
 - **Exclusions:** No offer maker-checker approval logic; no provider catalog.
@@ -435,7 +519,7 @@ graph LR
 
 ### PR 2D: Central Authorization DAL Primitives, Internal Roles & Security Audit Log
 
-- **Business Outcome:** Central server-side Data Access Layer enforcing deny-by-default primitives, internal staff role resolution, and security audit logging.
+- **Business Outcome:** Central server-side Data Access Layer enforcing deny-by-default primitives, internal staff role resolution, actor-specific session timeouts, and security audit logging.
 - **Exact Schema Ownership:**
   - `internal_role_assignments`: Role bindings for internal staff.
   - `security_audit_events`: Append-oriented security audit ledger.
@@ -444,13 +528,18 @@ graph LR
   - `src/lib/dal/permissions.ts`: Static permission catalog and role-to-permission mapping.
   - `src/lib/dal/audit.ts`: Bounded/deduplicated security audit logging helper.
 - **Security Invariants:**
-  - Deny by default: unauthenticated or unauthorized calls throw structured HTTP 403 errors.
+  - Structured HTTP semantics: unauthenticated calls throw HTTP 401; unauthorized calls or unverified MFA throw HTTP 403.
+  - Object-ownership checks follow documented 403 vs. 404 policy to prevent entity enumeration.
+  - User suspension (`isSuspended: true`) enforced in DAL, returning HTTP 403.
+  - Enforces actor-specific absolute session caps (using `session.createdAt`) and true idle limits (using server-owned `lastActivityAt`).
+  - Enforces sensitive step-up reauthentication (using server-owned `lastReauthenticatedAt`).
   - Client-submitted role or branch claims ignored; identity resolved strictly from session.
   - Audit log recording rate-limited against unauthenticated probes to prevent storage exhaustion.
   - Zero raw tokens or passwords in audit metadata.
 - **Integration Tests:**
   - Role-based permission checks for internal departments.
-  - Security audit event persistence on access denial.
+  - Session timeout tests: continuous activity extending session within idle limits; inactivity exceeding idle limit triggering rejection; absolute expiry terminating session; step-up authentication verification.
+  - Security audit event persistence on access denial with rate-limiting.
   - Generic protected fixture assertions.
 - **E2E Tests:**
   - Unauthorized navigation attempts to staff portal views blocked.
@@ -460,14 +549,14 @@ graph LR
 
 ## 12. Open Decisions Requiring Founder Approval
 
-| Decision Item                                    | Context & Trade-Offs                                                                                                      | Status                                                                                                                                                | Founder Action Required                                               |
-| :----------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------ | :---------------------------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------------------------------- |
-| **1. Live Egyptian OTP Gateway Selection**       | Domestic Egyptian gateways (e.g. Unifonic, Infobip, VictoryLink, CEQUENS) versus international aggregators (e.g. Twilio). | **Undecided.** Requires dedicated technical benchmark and commercial RFP.                                                                             | Authorize vendor evaluation benchmark for Egyptian SMS gateway.       |
-| **2. OTP Delivery Channel Strategy**             | Primary SMS versus WhatsApp Business API versus multi-channel fallback.                                                   | **Undecided.** Pilot baseline recommends SMS; WhatsApp fallback requires distinct commercial terms and template approval.                             | Decide whether WhatsApp Business API is required for the Cairo pilot. |
-| **3. Two-Person Staff MFA Reset Protocol**       | Recovery procedure when internal staff lose authenticator access and backup codes.                                        | **Recommended:** Two-person authorization (Managing Director / Founder manual sign-off + Platform Admin execution).                                   | Formally designate authorized recovery signatories.                   |
-| **4. Exact Production Session Timeouts**         | Balances customer convenience against unauthorized access on shared devices.                                              | **Proposed pilot defaults:** Customers (30d absolute / 7d idle); Workshop Staff (12h absolute / 2h idle); Ops/Finance (8–10h absolute / 30–60m idle). | Review and approve proposed pilot session timeout defaults.           |
-| **5. Passkey (FIDO2) Implementation Timeline**   | Phishing-resistant WebAuthn authentication for internal staff.                                                            | **Recommended:** Deploy passwords + TOTP for Cairo pilot (PR 2C); evaluate FIDO2 passkeys post-pilot.                                                 | Confirm passkey rollout milestone.                                    |
-| **6. Provider Workshop Manager MFA Requirement** | Workshop managers access financial settlement statements. Should TOTP be mandatory during the pilot?                      | **Recommended:** Optional SMS OTP for pilot to minimize merchant friction; mandatory TOTP post-pilot when self-service payouts launch.                | Decide whether merchant managers must use TOTP during the pilot.      |
+| Decision Item                                    | Context & Trade-Offs                                                                                                      | Status                                                                                                                                                                                             | Founder Action Required                                               |
+| :----------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------ | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------------------------------- |
+| **1. Live Egyptian OTP Gateway Selection**       | Domestic Egyptian gateways (e.g. Unifonic, Infobip, VictoryLink, CEQUENS) versus international aggregators (e.g. Twilio). | **Undecided.** Requires dedicated technical benchmark and commercial RFP.                                                                                                                          | Authorize vendor evaluation benchmark for Egyptian SMS gateway.       |
+| **2. OTP Delivery Channel Strategy**             | Primary SMS versus WhatsApp Business API versus multi-channel fallback.                                                   | **Undecided.** Pilot baseline recommends SMS; WhatsApp fallback requires distinct commercial terms and template approval.                                                                          | Decide whether WhatsApp Business API is required for the Cairo pilot. |
+| **3. Two-Person Staff MFA Reset Protocol**       | Recovery procedure when internal staff lose authenticator access and backup codes.                                        | **Recommended:** Two-person authorization (Managing Director / Founder manual sign-off + Platform Admin execution).                                                                                | Formally designate authorized recovery signatories.                   |
+| **4. Exact Production Session Timeouts**         | Balances customer convenience against unauthorized access on shared devices.                                              | **Proposed pilot defaults (Unapproved):** Customers (30d absolute / 7d idle); Workshop Staff (12h absolute / 2h idle); Ops/Finance (8–10h absolute / 30–60m idle); Admin (4h absolute / 15m idle). | Review and approve proposed pilot session timeout defaults.           |
+| **5. Passkey (FIDO2) Implementation Timeline**   | Phishing-resistant WebAuthn authentication for internal staff.                                                            | **Recommended:** Deploy passwords + TOTP for Cairo pilot (PR 2C); evaluate FIDO2 passkeys post-pilot.                                                                                              | Confirm passkey rollout milestone.                                    |
+| **6. Provider Workshop Manager MFA Requirement** | Workshop managers access financial settlement statements. Should TOTP be mandatory during the pilot?                      | **Recommended:** Optional SMS OTP for pilot to minimize merchant friction; mandatory TOTP post-pilot when self-service payouts launch.                                                             | Decide whether merchant managers must use TOTP during the pilot.      |
 
 ---
 
@@ -480,4 +569,5 @@ graph LR
 - **RFC 2606:** Reserved Top Level DNS Names (`.invalid` non-delivery domain).
 - **RFC 6238:** TOTP: Time-Based One-Time Password Algorithm.
 - **RFC 7807:** Problem Details for HTTP APIs (Sanitized structured errors).
+- **RFC 9562:** Universally Unique Identifiers (UUIDs).
 - **libphonenumber-js:** Maintained JavaScript library based on Google libphonenumber metadata.
