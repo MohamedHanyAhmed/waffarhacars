@@ -2,6 +2,7 @@ node_modules/
 .next/
 dist/
 build/
+src/generated/
 test-results/
 playwright-report/
 package-lock.json

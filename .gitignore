@@ -9,6 +9,9 @@ out/
 build/
 dist/
 
+# Generated code
+/src/generated/
+
 # Testing & Reports
 test-results/
 playwright-report/

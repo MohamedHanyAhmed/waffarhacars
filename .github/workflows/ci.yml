@@ -19,6 +19,27 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
+    services:
+      postgres:
+        image: postgres:17.11-alpine3.24
+        env:
+          POSTGRES_DB: waffarhacars_test
+          POSTGRES_USER: test_user
+          POSTGRES_PASSWORD: test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U test_user -d waffarhacars_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      APP_RUNTIME_PROFILE: showcase
+      APP_DATA_BACKEND: demo
+      DATABASE_URL: postgresql://test_user:test_password@localhost:5432/waffarhacars_test
+      DATABASE_DIRECT_URL: postgresql://test_user:test_password@localhost:5432/waffarhacars_test
+
     steps:
       - name: Checkout Repository
         # actions/checkout@v6.1.0
@@ -51,8 +72,31 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Unit Tests
+      - name: Unit Tests (Showcase / Demo)
         run: npm run test:unit
+        env:
+          APP_RUNTIME_PROFILE: showcase
+          APP_DATA_BACKEND: demo
+
+      - name: Prisma Schema Validation
+        run: npm run prisma:validate
+
+      - name: Prisma Client Generation
+        run: npm run prisma:generate
+
+      - name: Deploy Prisma Migrations (Baseline Verification)
+        run: npm run prisma:migrate:deploy
+
+      - name: Verify Prisma Migration Status
+        run: npm run prisma:migrate:status
+
+      - name: Real PostgreSQL Integration Tests
+        run: npm run test:integration
+        env:
+          APP_RUNTIME_PROFILE: showcase
+          APP_DATA_BACKEND: postgres
+          DATABASE_URL: postgresql://test_user:test_password@localhost:5432/waffarhacars_test
+          DATABASE_DIRECT_URL: postgresql://test_user:test_password@localhost:5432/waffarhacars_test
 
       - name: Production Build
         run: npm run build

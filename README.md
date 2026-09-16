@@ -71,6 +71,19 @@ This repository contains the interactive, responsive, bilingual showcase prototy
 
 - **Required Runtime**: Node.js 24 LTS (`>=24.0.0 <25.0.0`, `.nvmrc` and `.node-version` set to `24`)
 - **Package Manager**: npm pinned via the `packageManager` field in `package.json` (clean install via `npm ci`)
+- **Database (PostgreSQL 17)**: Official pinned image `postgres:17.11-alpine3.24` (disposable local container managed via `npm run db:test:up` and `npm run db:test:down`)
+
+### Database Foundation & Health Probes
+
+- **Start Local Test Database**: `npm run db:test:up` (launches health-checked PostgreSQL 17.11-alpine3.24 on port 5432)
+- **Stop & Clean Test Database**: `npm run db:test:down` (destroys local test container and volumes)
+- **Prisma Schema Validation**: `npm run prisma:validate` (validates `prisma/schema.prisma` without requiring database connection)
+- **Prisma Client Generation**: `npm run prisma:generate` (reproducibly generates client into `src/generated/prisma`)
+- **Deploy Migrations**: `npm run prisma:migrate:deploy` (executes declarative SQL migrations in production/CI via `DATABASE_DIRECT_URL`)
+- **Migration Status**: `npm run prisma:migrate:status` (inspects database schema vs migration ledger)
+- **Real PostgreSQL Integration Tests**: `npm run test:integration` (runs genuine Node.js integration tests against PostgreSQL 17)
+- **Liveness Probe**: `GET /api/live` (returns HTTP 200 `{ "status": "ok" }` with `Cache-Control: no-store`)
+- **Readiness Probe**: `GET /api/ready` (returns HTTP 200 `{ "status": "ready" }` or HTTP 503 `{ "status": "unavailable" }`)
 
 ### Separate Verification Commands
 
@@ -86,16 +99,22 @@ npm run lint
 # 3. TypeScript compiler type-check (zero type errors)
 npm run typecheck
 
-# 4. Run Vitest domain unit tests (Vitest 5: money, transitions, maker-checker, i18n parity, scenario lifecycle, process supervisor)
+# 4. Run Vitest domain unit tests (62 unit tests under JSDOM environment)
 npm run test:unit
 
-# 5. Build optimized production Next.js application (required before running E2E tests against production server)
+# 5. Validate Prisma schema syntax
+npm run prisma:validate
+
+# 6. Run real PostgreSQL integration tests (Node environment against PostgreSQL container)
+npm run test:integration
+
+# 7. Build optimized production Next.js application
 npm run build
 
-# 6. Run Playwright automated acceptance tests against hermetic production server (acceptance scenarios across Desktop and Mobile viewports, plus visual evidence screenshot capture)
+# 8. Run Playwright automated acceptance tests (21 tests across Desktop and Mobile viewports)
 npm run test:e2e
 
-# 7. Run complete verification pipeline in hermetic sequence (format -> lint -> typecheck -> unit tests -> build -> E2E)
+# 9. Run hermetic verification pipeline (format -> lint -> typecheck -> unit tests -> prisma validate -> build -> E2E)
 npm run verify
 ```
 

@@ -14,19 +14,20 @@
 
 The production backend requires type-safe query execution, checked-in SQL migrations, compile-time schema validation, and predictable connection pooling across Next.js Server Components and Route Handlers.
 
-- **Prisma 7 Selection:** Prisma 7 is the current stable, fully supported generation of Prisma ORM. It provides first-class TypeScript configuration, strict ESM alignment, and reliable PostgreSQL 17 dialect integration.
-- **Prisma 6 Evaluation:** Prisma 6 is approaching the end of its active security-maintenance window and relies on legacy configuration paradigms. It is not suitable for a new production financial system.
-- **Prisma 8 Evaluation:** Prisma 8 remains in release-candidate status and does not meet the stability criteria required for financial ledger applications.
-- **Decision:** Standardize on the **latest stable Prisma ORM 7 release**, pinned intentionally in `package.json` at implementation time.
+- **Prisma 7 Selection:** Prisma 7 is a deliberate, fully supported GA choice for this release. It provides first-class TypeScript configuration (`prisma.config.ts`), strict ESM alignment, and mature `@prisma/adapter-pg` driver adapter integration with PostgreSQL 17.
+- **Prisma 8 Status:** Prisma 8 is no longer a release candidate; however, Prisma 7 is chosen as the standardized, vetted foundation for this release to ensure operational stability, library compatibility, and predictable enterprise connection pooling.
+- **Model-Free Baseline (PR 1):** In PR 1, the schema is model-free to establish the database connection pool, health infrastructure, and migration toolchain without manufacturing synthetic tables (e.g. fake metadata or healthcheck tables). The first genuine domain migration is deferred until PR 2 when actual domain entities are introduced.
+- **No Automatic Rollback Safety:** Prisma Migrate does not provide automatic general-purpose schema rollbacks. All operational recoveries rely on forward-fixing with compensating migrations, strict expand/contract practices, or database Point-In-Time Recovery (PITR).
+- **Decision:** Standardize on **Prisma ORM 7.10.0** with `@prisma/adapter-pg` and `pg.Pool`, pinned intentionally in `package.json`.
 
 ### Prisma 7 Implementation Requirements
 
 1. **Native ESM:** The backend application and Prisma toolchain operate strictly in ECMAScript Modules mode (`"type": "module"`).
-2. **`prisma.config.ts` Configuration:** Adopt Prisma 7's TypeScript configuration standard (`prisma.config.ts`), replacing legacy `.env` magic loading with explicit schema path declaration, migrations directory mapping, and environment validation.
-3. **Explicit Environment Loading:** Database URLs (`DATABASE_URL`, `DATABASE_DIRECT_URL`) must be explicitly loaded and validated via Zod schemas at startup (`src/lib/env.ts`) rather than implicit runtime discovery.
-4. **Current Client Generator & Explicit Output Path:** Configure `generator client` with an explicit relative output destination (`output = "../src/generated/prisma"`) to ensure reproducible builds, eliminate node_modules resolution ambiguity, and support tree-shaking.
-5. **Checked-In SQL Migrations:** Schema changes must be developed using `prisma migrate dev` in local development, producing normal Prisma-generated timestamped migration directories (e.g., `prisma/migrations/<timestamp>_<migration_name>/migration.sql`) containing human-reviewed declarative SQL scripts. In test, staging, and production environments, migrations are applied strictly via `prisma migrate deploy`. Migrations are never executed implicitly during application startup.
-6. **Zero Preview Features:** The production schema must use only GA (General Availability) Prisma features. All `previewFeatures` flags are disallowed to prevent breaking behavioral changes during patch updates.
+2. **`prisma.config.ts` Configuration:** Adopt Prisma 7's TypeScript configuration standard (`prisma.config.ts`), using `process.env.DATABASE_DIRECT_URL` for migration operations.
+3. **Explicit Environment Loading:** Database URLs (`DATABASE_URL`, `DATABASE_DIRECT_URL`) must be explicitly loaded and validated via Zod schemas (`src/lib/env.ts`) with no silent defaults and generic secret-free error messages.
+4. **Current Client Generator & Explicit Output Path:** Configure `generator client` with an explicit output destination (`output = "../src/generated/prisma"`), ignored in version control and generated during setup/build.
+5. **Checked-In SQL Migrations & Immutability:** Schema changes are authored with `prisma migrate dev` producing immutable SQL migration files. In CI and production, migrations are executed strictly via `prisma migrate deploy`. Migrations are never executed implicitly during web application startup. `prisma db push` is strictly prohibited in deployment environments.
+6. **Zero Preview Features:** The production schema uses only GA (General Availability) Prisma features. All `previewFeatures` flags are disallowed.
 
 ---
 
@@ -36,14 +37,17 @@ The production backend requires type-safe query execution, checked-in SQL migrat
 
 Client-side environment variables (such as `NEXT_PUBLIC_*`) are transmitted to the browser and are untrusted. Under no circumstances may a client dictate or select its authoritative database backend.
 
-1. **Configuration Key:** Backend selection is governed strictly by the server-only environment variable:
+1. **Configuration Keys:** Environment profile and backend selection are governed strictly by server-only environment variables:
    ```bash
+   APP_RUNTIME_PROFILE=showcase|production
    APP_DATA_BACKEND=demo|postgres
    ```
 2. **Fail-Closed Production Invariant:**
-   - Development and showcase environments may explicitly configure `APP_DATA_BACKEND=demo`.
-   - Production environments (`NODE_ENV=production`) **must explicitly configure** `APP_DATA_BACKEND=postgres`.
-   - Application startup **fails immediately with a fatal exit code** if `NODE_ENV=production` and `APP_DATA_BACKEND` is missing, empty, or set to `demo`.
+   - Both `APP_RUNTIME_PROFILE` and `APP_DATA_BACKEND` must be explicitly declared (no silent defaults).
+   - Commercial deployment discriminator is `APP_RUNTIME_PROFILE` (never `NODE_ENV`).
+   - Showcase environments (`APP_RUNTIME_PROFILE=showcase`) may configure `APP_DATA_BACKEND=demo` or `APP_DATA_BACKEND=postgres`.
+   - Production environments (`APP_RUNTIME_PROFILE=production`) **must configure** `APP_DATA_BACKEND=postgres`.
+   - Backend initialization and readiness probes (`/api/ready`) **fail closed with a configuration error** if `APP_RUNTIME_PROFILE=production` and `APP_DATA_BACKEND` is set to `demo`.
    - When `APP_DATA_BACKEND=postgres`, Route Handlers instantiate production domain repositories backed by Prisma transactions and PostgreSQL 17. Demo endpoints, scenario controls, showcase fixtures, and localStorage adapters are completely excluded from and unreachable within the production deployment.
 3. **Showcase Isolation:** The existing interactive demo, localStorage persistence, and Playwright acceptance tests remain completely isolated and functional until production vertical slices replace them.
 
@@ -472,7 +476,7 @@ When authorized to initiate PR 1, the following files will be introduced or modi
 
 1. `prisma.config.ts`: Modern Prisma 7 TypeScript configuration.
 2. `prisma/schema.prisma`: Initial baseline schema configuring generator, PostgreSQL provider, and connection URLs.
-3. `prisma/migrations/<timestamp>_init/migration.sql`: Clean checked-in baseline SQL migration directory generated by the pinned Prisma CLI; its SQL must be reviewed before commit.
+3. `prisma/migrations/.gitkeep`: Preserves migrations directory in version control. The baseline schema in PR 1 is deliberately model-free (no synthetic dummy or healthcheck tables), so the first genuine domain SQL migrations arrive in PR 2.
 4. `docker-compose.test.yml`: Ephemeral PostgreSQL 17 test container for local development and CI execution.
 5. `src/lib/db.ts`: Robust Prisma client singleton with connection pooling limits.
 6. `src/lib/env.ts`: Zod environment schema validating `DATABASE_URL` and `APP_DATA_BACKEND`.
@@ -498,3 +502,19 @@ When authorized to initiate PR 1, the following files will be introduced or modi
 2. **Staff Identity Provider:** Approval of phone OTP + TOTP MFA for internal staff versus federated Google Workspace SSO.
 3. **Formal Corporate Licensing:** Final approval of the source-available license notice by legal counsel.
 4. **Primary Cloud Hosting Target:** Selection of the cloud provider based on the completed 9-point latency and compliance matrix.
+
+---
+
+## 15. Dependency Security Overrides
+
+To ensure a zero-vulnerability security posture across production and development dependency trees (`npm audit --omit=dev` and `npm audit`), explicit overrides are configured in `package.json`:
+
+1. **`deepmerge-ts` (`8.0.2` overriding `^7.1.3`):**
+   - **Vulnerability Remediated:** Prototype pollution vulnerability (GHSA-ggr8-5vv4-36mx / CVE-2024-51752).
+   - **Upstream Origin:** Transitive dependency pulled via tooling / testing packages.
+   - **Cross-Major Risk Assessment:** Upgraded across a major version boundary (`7.x` -> `8.x`). Full test suites (`test:unit`, `test:integration`, and Playwright E2E) verify compatibility without regressions or runtime breakages.
+
+2. **`mysql2` (`3.24.4` overriding `^3.9.0`):**
+   - **Vulnerability Remediated:** Remote Code Execution and prototype pollution vulnerabilities (GHSA-3f6p-5ww8-9rcr, GHSA-rgwj-5xj2-c3m3).
+   - **Upstream Origin:** Transitive dependency from database tooling.
+   - **Risk Assessment:** WaffarhaCars runtime and testing infrastructure targets PostgreSQL 17 exclusively; MySQL drivers are not utilized in application runtime paths. The override neutralizes security scanners and npm audit findings safely.
