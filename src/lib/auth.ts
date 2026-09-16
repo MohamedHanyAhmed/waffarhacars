@@ -73,12 +73,6 @@ export function getAuthOptions(overrides: Partial<BetterAuthOptions> = {}): Bett
     database: prismaAdapter(prismaProxy, {
       provider: "postgresql",
     }),
-    advanced: {
-      database: {
-        generateId: "uuid",
-      },
-      useSecureCookies: runtimeProfile === "production",
-    },
     session: {
       cookieCache: {
         enabled: false,
@@ -126,6 +120,14 @@ export function getAuthOptions(overrides: Partial<BetterAuthOptions> = {}): Bett
       },
     },
     ...overrides,
+    advanced: {
+      useSecureCookies: runtimeProfile === "production",
+      ...overrides.advanced,
+      database: {
+        generateId: "uuid",
+        ...overrides.advanced?.database,
+      },
+    },
   };
 }
 
