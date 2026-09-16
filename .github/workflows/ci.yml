@@ -39,6 +39,8 @@ jobs:
       APP_DATA_BACKEND: demo
       DATABASE_URL: postgresql://test_user:test_password@localhost:5432/waffarhacars_test
       DATABASE_DIRECT_URL: postgresql://test_user:test_password@localhost:5432/waffarhacars_test
+      BETTER_AUTH_SECRET: ci-non-production-test-secret-at-least-32-chars-long
+      BETTER_AUTH_URL: http://localhost:3000
 
     steps:
       - name: Checkout Repository
@@ -81,6 +83,9 @@ jobs:
       - name: Prisma Schema Validation
         run: npm run prisma:validate
 
+      - name: Better Auth Schema Drift Check
+        run: npm run auth:schema:check
+
       - name: Prisma Client Generation
         run: npm run prisma:generate
 
@@ -97,6 +102,8 @@ jobs:
           APP_DATA_BACKEND: postgres
           DATABASE_URL: postgresql://test_user:test_password@localhost:5432/waffarhacars_test
           DATABASE_DIRECT_URL: postgresql://test_user:test_password@localhost:5432/waffarhacars_test
+          BETTER_AUTH_SECRET: ci-non-production-test-secret-at-least-32-chars-long
+          BETTER_AUTH_URL: http://localhost:3000
 
       - name: Production Build
         run: npm run build

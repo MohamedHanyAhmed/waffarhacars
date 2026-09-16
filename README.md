@@ -82,8 +82,11 @@ This repository contains the interactive, responsive, bilingual showcase prototy
 - **Deploy Migrations**: `npm run prisma:migrate:deploy` (executes declarative SQL migrations in production/CI via `DATABASE_DIRECT_URL`)
 - **Migration Status**: `npm run prisma:migrate:status` (inspects database schema vs migration ledger)
 - **Real PostgreSQL Integration Tests**: `npm run test:integration` (runs genuine Node.js integration tests against PostgreSQL 17)
+- **Better Auth Schema Generation**: `npm run auth:schema:generate` (generates Prisma schema models deterministically via pinned `auth@1.7.5` CLI)
+- **Better Auth Schema Drift Check**: `npm run auth:schema:check` (verifies zero schema drift against committed `prisma/schema.prisma`)
 - **Liveness Probe**: `GET /api/live` (returns HTTP 200 `{ "status": "ok" }` with `Cache-Control: no-store`)
 - **Readiness Probe**: `GET /api/ready` (returns HTTP 200 `{ "status": "ready" }` or HTTP 503 `{ "status": "unavailable" }`)
+- **Protected Session Probe**: `GET /api/auth/probe` (returns RFC 7807 401 Problem Details when unauthenticated, or 200 `{ "authenticated": true }` when session is valid)
 
 ### Separate Verification Commands
 

@@ -24,7 +24,7 @@ WaffarhaCars adopts **`better-auth@1.7.5`** as its leading provisional authentic
 1. **Supported Version Constraint:** Better Auth's official maintenance policy explicitly supports only the **`latest`** release line. Upstream security fixes and patches are applied exclusively to current releases.
 2. **Mandatory Pre-Install Review of Security Advisories:** Before introducing or bumping Better Auth dependencies, the engineering team must review published [GitHub Security Advisories](https://github.com/better-auth/better-auth/security/policy) for the package.
 3. **Exact-Version Pinning:** Better Auth and its subpackages must be pinned to exact versions in `package.json` (e.g. `"better-auth": "1.7.5"`, avoiding `^` or `~` semver ranges) to ensure deterministic builds and audit integrity.
-4. **Dependabot & Security Upgrade Protocol:** Automated dependency updates must be reviewed promptly. Because Better Auth generates and manages database schema structures, **every minor or major upgrade requires re-running schema generation (`npx @better-auth/cli generate`), reviewing the resulting Prisma schema diff, and generating an explicit migration via `prisma migrate dev --create-only`**.
+4. **Dependabot & Security Upgrade Protocol:** Automated dependency updates must be reviewed promptly. Because Better Auth generates and manages database schema structures, **every minor or major upgrade requires re-running schema generation (`auth generate` via pinned `auth@1.7.5`), reviewing the resulting Prisma schema diff, and generating an explicit migration via `prisma migrate dev --create-only`**.
 5. **Security Posture Realism:** Package maturity does not eliminate vulnerability risk. Better Auth is an actively evolving open-source framework with past security advisories (such as origin verification and session handling edge cases). Adopting Better Auth requires prompt, reviewed handling of security releases rather than assuming passive immunity.
 
 ---
@@ -80,13 +80,13 @@ WaffarhaCars serves distinct operational actors across consumer, provider, and i
 
 > [!IMPORTANT]
 > **Better Auth Generated Schema is the Authoritative Source of Truth:**
-> The tables and fields described below represent the architectural mapping for **Better Auth 1.7.5**. The **exact, authoritative Prisma schema is produced directly by Better Auth's schema generator (`npx @better-auth/cli generate`) in PR 2A and PR 2C**. Engineering will not manually rename or hand-craft library-owned fields, defaults, indexes, or constraints before running the generator.
+> The tables and fields described below represent the architectural mapping for **Better Auth 1.7.5**. The **exact, authoritative Prisma schema is produced directly by Better Auth's schema generator (`auth generate` via pinned `auth@1.7.5`) in PR 2A and PR 2C**. Engineering will not manually rename or hand-craft library-owned fields, defaults, indexes, or constraints before running the generator.
 
 ### 4.1 PR 2A Schema Generation Workflow:
 
 1. Pin the reviewed version: `"better-auth": "1.7.5"` in `package.json`.
 2. Author minimal configuration in `src/lib/auth.ts` defining plugins and adapters.
-3. Run Better Auth CLI generator: `npx @better-auth/cli generate`.
+3. Run Better Auth CLI generator: `npm run auth:schema:generate` (or `npx auth generate`).
 4. Review the generated Prisma model definitions against architectural requirements.
 5. Generate the database migration via `npx prisma migrate dev --create-only --name auth_core`.
 6. Review the resulting SQL script in `prisma/migrations/`.
@@ -351,7 +351,7 @@ Better Auth 1.7.5's official `twoFactor` plugin provides RFC 6238 TOTP and singl
 - `User` model gains `twoFactorEnabled` (boolean, default false).
 - Generated dedicated `twoFactor` table contains: `id`, `userId` (foreign key referencing `User.id`; exact constraints determined by pinned CLI output), `secret`, `backupCodes`, `verified` (exact default determined by CLI output), `failedVerificationCount` (exact default determined by CLI output), and `lockedUntil`.
 - TOTP secrets (`secret`) and backup codes (`backupCodes`) are encrypted at rest using `BETTER_AUTH_SECRET`.
-- The pinned CLI generator output (`npx @better-auth/cli generate`) remains the final authority on Prisma definitions; fields must not be renamed prior to generation.
+- The pinned CLI generator output (`auth generate` via pinned `auth@1.7.5`) remains the final authority on Prisma definitions; fields must not be renamed prior to generation.
 
 #### 2. Trusted-Device Enforcement Policy:
 
