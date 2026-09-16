@@ -71,11 +71,11 @@ This repository contains the interactive, responsive, bilingual showcase prototy
 
 - **Required Runtime**: Node.js 24 LTS (`>=24.0.0 <25.0.0`, `.nvmrc` and `.node-version` set to `24`)
 - **Package Manager**: npm pinned via the `packageManager` field in `package.json` (clean install via `npm ci`)
-- **Database (PostgreSQL 17)**: Official pinned image `postgres:17.4-alpine` (disposable local container managed via `npm run db:test:up` and `npm run db:test:down`)
+- **Database (PostgreSQL 17)**: Official pinned image `postgres:17.11-alpine3.24` (disposable local container managed via `npm run db:test:up` and `npm run db:test:down`)
 
 ### Database Foundation & Health Probes
 
-- **Start Local Test Database**: `npm run db:test:up` (launches health-checked PostgreSQL 17.4-alpine on port 5432)
+- **Start Local Test Database**: `npm run db:test:up` (launches health-checked PostgreSQL 17.11-alpine3.24 on port 5432)
 - **Stop & Clean Test Database**: `npm run db:test:down` (destroys local test container and volumes)
 - **Prisma Schema Validation**: `npm run prisma:validate` (validates `prisma/schema.prisma` without requiring database connection)
 - **Prisma Client Generation**: `npm run prisma:generate` (reproducibly generates client into `src/generated/prisma`)

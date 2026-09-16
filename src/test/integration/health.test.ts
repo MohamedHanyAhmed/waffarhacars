@@ -25,9 +25,10 @@ describe("Real PostgreSQL 17 Integration & Health Infrastructure Suite", () => {
       if (res.rows[0]?.probe === 1) {
         isDbReachable = true;
       }
-      await probe.end();
     } catch {
       isDbReachable = false;
+    } finally {
+      await probe.end().catch(() => {});
     }
   });
 
@@ -54,9 +55,7 @@ describe("Real PostgreSQL 17 Integration & Health Infrastructure Suite", () => {
 
   it("proves Prisma connects to real PostgreSQL and executes a raw query", async () => {
     if (!isDbReachable) {
-      throw new Error(
-        `PostgreSQL 17 is not reachable at ${DEFAULT_TEST_DB_URL}. Run 'npm run db:test:up' before executing integration tests.`
-      );
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
     }
 
     const prisma = getPrisma();
@@ -69,9 +68,7 @@ describe("Real PostgreSQL 17 Integration & Health Infrastructure Suite", () => {
 
   it("proves /api/ready returns 200 with status ready through actual Prisma SELECT 1", async () => {
     if (!isDbReachable) {
-      throw new Error(
-        `PostgreSQL 17 is not reachable at ${DEFAULT_TEST_DB_URL}. Run 'npm run db:test:up' before executing integration tests.`
-      );
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
     }
 
     const response = await readyHandler();
@@ -128,9 +125,7 @@ describe("Real PostgreSQL 17 Integration & Health Infrastructure Suite", () => {
 
   it("proves real connection termination via pg_terminate_backend and subsequent pool recovery", async () => {
     if (!isDbReachable) {
-      throw new Error(
-        `PostgreSQL 17 is not reachable at ${DEFAULT_TEST_DB_URL}. Run 'npm run db:test:up' before executing integration tests.`
-      );
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
     }
 
     const pool = getPool();
@@ -164,9 +159,7 @@ describe("Real PostgreSQL 17 Integration & Health Infrastructure Suite", () => {
 
   it("proves repeated real readiness probes remain within configured connection bounds", async () => {
     if (!isDbReachable) {
-      throw new Error(
-        `PostgreSQL 17 is not reachable at ${DEFAULT_TEST_DB_URL}. Run 'npm run db:test:up' before executing integration tests.`
-      );
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
     }
 
     process.env.DATABASE_POOL_MAX = "5";

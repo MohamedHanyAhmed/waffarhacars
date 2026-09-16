@@ -1,6 +1,6 @@
 services:
   postgres-test:
-    image: postgres:17.4-alpine
+    image: postgres:17.11-alpine3.24
     environment:
       POSTGRES_DB: waffarhacars_test
       POSTGRES_USER: test_user

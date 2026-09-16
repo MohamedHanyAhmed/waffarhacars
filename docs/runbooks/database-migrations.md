@@ -56,7 +56,7 @@ Developers manage a local, disposable PostgreSQL 17 container using dedicated np
   npm run db:test:up
   ```
 
-  _(Launches PostgreSQL 17.4-alpine in background, waiting until healthy on port 5432.)_
+  _(Launches PostgreSQL 17.11-alpine3.24 in background, waiting until healthy on port 5432.)_
 
 - **Stop and wipe test database:**
   ```bash
@@ -80,8 +80,12 @@ When adding or altering models in development:
    - Prisma compares the schema against the shadow database.
    - Generates a new timestamped migration directory under `prisma/migrations/` containing `migration.sql`.
    - Applies the SQL migration to your local database.
-   - Executes `prisma generate` to update `src/generated/prisma`.
-4. Review the generated SQL script manually before committing.
+4. In Prisma 7, `prisma migrate dev` does not automatically execute client generation. Run:
+   ```bash
+   npm run prisma:generate
+   ```
+   to update `src/generated/prisma`.
+5. Review the generated SQL script manually before committing.
 
 > [!WARNING]
 > **Prohibition of `prisma db push` for Deployments:**
@@ -100,7 +104,7 @@ The CI pipeline executes the following sequential database verification steps:
 1. `npm run prisma:validate` — Verifies schema syntax and constraints.
 2. `npm run prisma:generate` — Generates Prisma Client into `src/generated/prisma`.
 3. `npm run prisma:migrate:deploy` — Applies any pending migrations recorded in `prisma/migrations/`.
-4. `npm run prisma:migrate:status` — Verifies that all migrations are recorded as applied in `_prisma_migrations` and no schema drift exists.
+4. `npm run prisma:migrate:status` — Compares the local `prisma/migrations/` migration ledger against the database `_prisma_migrations` tracking table to verify all migrations are recorded as applied. (Note: `migrate status` validates migration ledger synchronization, not manual live schema drift).
 5. `npm run test:integration` — Executes real Node.js integration tests against the live PostgreSQL 17 container.
 
 ### 4.2 Production Deployment Command
@@ -120,7 +124,7 @@ DATABASE_DIRECT_URL="<direct-connection-string>" npm run prisma:migrate:deploy
 Once a migration file in `prisma/migrations/<timestamp>_<name>/migration.sql` has been merged into `main` or applied to staging/production, **it is immutable**.
 
 - Never edit, rename, or re-order committed migration files.
-- Modifying a committed migration changes its SHA-256 checksum, causing Prisma Migrate to detect a checksum mismatch error (`P3008: The migration has been modified`) and halt all future deployments.
+- Modifying a committed migration changes its SHA-256 checksum, causing Prisma Migrate to detect a checksum mismatch error and halt all future deployments.
 
 ### 5.2 Expand / Contract Pattern (Zero-Downtime Schema Changes)
 
@@ -183,10 +187,13 @@ If `prisma migrate deploy` fails mid-execution (e.g. DDL timeout, lock acquisiti
 
 Automated backups and Point-In-Time Recovery (PITR) are **deployment prerequisites, not assumed features**. Before executing any major migration in staging or production:
 
-1. **Verify Backup Recency:** Confirm that an automated backup or continuous WAL archive completed within the last 15 minutes.
-2. **Snapshot Creation:** For high-risk schema operations (e.g. index rebuilds, column type alterations), trigger a manual on-demand snapshot prior to triggering `prisma migrate deploy`.
+1. **Explicit Provider Backup Verification:** Verify directly via the cloud or database hosting provider console / API that an automated snapshot or continuous WAL archive is active, healthy, and retrievable. Do not proceed based on unverified time assumptions.
+2. **On-Demand Snapshot Creation:** For high-risk schema operations (e.g. index rebuilds, column type alterations, table partitioning), trigger an explicit on-demand snapshot prior to invoking `prisma migrate deploy`.
 
 ### 7.2 Restoration Ownership & Point-In-Time Recovery (PITR)
 
-- **Infrastructure Responsibility:** The Database Reliability / Infrastructure team owns automated backup verification, WAL retention policies, and restoring PostgreSQL database instances from PITR snapshots.
-- **Application Responsibility:** The Application Engineering team owns schema forward-fixing, running data consistency verification scripts, and executing post-restoration health checks (`/api/live` and `/api/ready`).
+In our lean startup operating model, operational responsibilities are structured across verified roles:
+
+- **Hosting Provider:** Delivers continuous WAL archiving, automated snapshot storage, and physical database instance failover mechanisms.
+- **Deployment Owner:** Verifies backup viability before deploying schema changes, triggers manual pre-migration snapshots, and initiates PITR restore procedures via the hosting provider console when catastrophic failure occurs.
+- **Application Maintainer:** Owns schema forward-fixing, data consistency verification, and ensuring post-restoration health checks (`/api/live` and `/api/ready`) pass before routing production traffic.

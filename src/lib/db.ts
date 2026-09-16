@@ -29,7 +29,7 @@ export function createDbContext(env: ServerEnv): DbContext {
   // Handle errors on idle clients so they do not bubble as unhandled exceptions.
   // node-postgres automatically evicts the terminated client from the pool.
   pool.on("error", (_err) => {
-    // Expected when idle backend connections are terminated by database administrator
+    console.error("[Database Pool] Idle client connection terminated. Discarded.");
   });
 
   const adapter = new PrismaPg(pool);
