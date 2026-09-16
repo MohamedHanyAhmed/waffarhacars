@@ -11,7 +11,7 @@ const DEFAULT_TEST_DB_URL =
   process.env.DATABASE_URL ||
   "postgresql://test_user:test_password@localhost:5432/waffarhacars_test";
 
-const TEST_SECRET = "waffarhacars-integration-test-secret-at-least-32-chars";
+const TEST_SECRET = auth.options.secret;
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 describe("Real PostgreSQL 17 Better Auth Database Session Integration Suite", () => {
@@ -23,6 +23,9 @@ describe("Real PostgreSQL 17 Better Auth Database Session Integration Suite", ()
   const testAuth = createTestAuth({
     baseURL: "http://localhost:3000",
     secret: TEST_SECRET,
+    advanced: {
+      disableOriginCheck: false,
+    },
   });
 
   beforeAll(async () => {
