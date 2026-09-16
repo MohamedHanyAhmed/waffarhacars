@@ -3,40 +3,52 @@ import { prismaAdapter } from "@better-auth/prisma-adapter";
 import type { PrismaClient } from "@/generated/prisma/client";
 // Defer resolution of ./db until runtime execution so CLI schema generation
 // does not trigger Next.js 'server-only' package restrictions.
-let cachedPrisma: PrismaClient | null = null;
 async function resolvePrisma(): Promise<PrismaClient> {
-  if (!cachedPrisma) {
-    const { getPrisma } = await import("./db");
-    cachedPrisma = getPrisma();
-  }
-  return cachedPrisma;
+  const { getPrisma } = await import("./db");
+  return getPrisma();
 }
 
 const prismaProxy = new Proxy({} as PrismaClient, {
   get(_target, prop) {
-    if (!cachedPrisma) {
-      return new Proxy(
-        {},
-        {
-          get(_subTarget, subProp) {
-            return async (...args: unknown[]) => {
-              const client = await resolvePrisma();
-              const clientRecord = client as unknown as Record<
-                string | symbol,
-                Record<string | symbol, unknown>
-              >;
-              const model = clientRecord[prop];
-              const targetFn = model?.[subProp];
-              if (typeof targetFn === "function") {
-                return Reflect.apply(targetFn, model, args);
-              }
-              return targetFn;
-            };
-          },
-        }
-      );
+    if (prop === "then" || prop === "_runtimeDataModel") {
+      return undefined;
     }
-    return (cachedPrisma as unknown as Record<string | symbol, unknown>)[prop];
+
+    if (typeof prop === "string" && prop.startsWith("$")) {
+      return async (...args: unknown[]) => {
+        const client = await resolvePrisma();
+        const clientRecord = client as unknown as Record<string | symbol, unknown>;
+        const fn = clientRecord[prop];
+        if (typeof fn === "function") {
+          return Reflect.apply(fn, client, args);
+        }
+        return fn;
+      };
+    }
+
+    return new Proxy(
+      {},
+      {
+        get(_subTarget, subProp) {
+          if (subProp === "then") {
+            return undefined;
+          }
+          return async (...args: unknown[]) => {
+            const client = await resolvePrisma();
+            const clientRecord = client as unknown as Record<
+              string | symbol,
+              Record<string | symbol, unknown>
+            >;
+            const model = clientRecord[prop];
+            const targetFn = model?.[subProp];
+            if (typeof targetFn === "function") {
+              return Reflect.apply(targetFn, model, args);
+            }
+            return targetFn;
+          };
+        },
+      }
+    );
   },
 });
 

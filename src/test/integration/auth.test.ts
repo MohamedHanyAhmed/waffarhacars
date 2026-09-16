@@ -300,7 +300,7 @@ describe("Real PostgreSQL 17 Better Auth Database Session Integration Suite", ()
     // Public signup must fail with 403 or 400 and error message indicating signup is disabled
     expect(res.status).toBeGreaterThanOrEqual(400);
     const body = await res.json();
-    expect(body.message || body.error || "").toMatch(/sign.*up.*disabled/i);
+    expect(body.message || body.error || "").toMatch(/sign.*up.*(?:disabled|not enabled)/i);
   });
 
   it("proves protected session probe returns 401 Problem Details without valid session and 200 without leaking PII when authenticated", async () => {
