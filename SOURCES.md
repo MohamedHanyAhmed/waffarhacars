@@ -1,72 +1,63 @@
-# Sources and Evidence Index
+# Sources
 
-This index records the primary sources, authoritative documentation, standards, and empirical benchmarks used across the WaffarhaCars product and architecture packs.
+Accessed 13 September 2026 unless noted. Public product observations can change. Proprietary Waffarha implementation details were not accessed.
 
-## Core business, market, and regulatory sources
+## Waffarha
 
-1. Egyptian Tax Authority. “[Invoicing System Guidance and Regulations](https://eta.gov.eg).” Accessed 14 September 2026. Used for Egyptian e-invoicing compliance boundaries, VAT invoice thresholds, and B2B/B2C invoicing rules.
-2. Egyptian Parliament. “[Law No. 151 of 2020 on the Protection of Personal Data](https://dppa.gov.eg).” Accessed 14 September 2026. Official Gazette No. 28 bis (e). Used for data minimization, local processing safeguards, and consent constraints.
-3. Egyptian Prime Minister\'s Office. “[Executive Regulations of the Personal Data Protection Law (Prime Ministerial Decree No. 816 of 2025)](https://dppa.gov.eg).” Official Gazette, 4 March 2025. Used for technical controls, breach notification timelines (72 hours), and data subject rights procedures.
-4. Central Bank of Egypt. “[National Payment Council Regulations and Circulars](https://www.cbe.org.eg).” Accessed 14 September 2026. Used for domestic payment gateway boundaries and consumer digital wallet rules.
-5. Waffarha. “[Official Consumer Web Platform and Deals](https://waffarha.com).” Accessed 14 September 2026. Used to observe existing deal presentation, discount coupon checkout models, and customer support channels.
-6. Waffarha. “[Merchant Portal Onboarding and Information](https://merchant.waffarha.com).” Accessed 14 September 2026. Used for public-facing merchant registration and partnership criteria.
-7. Egyptian Ministry of Communications and Information Technology. “[Digital Egypt Strategy](https://mcit.gov.eg).” Accessed 14 September 2026. Used for mobile penetration, digital payments growth, and digital identity direction in Egypt.
+1. Waffarha. “[Landing page](https://landing.waffarha.com/en).” Used for public value proposition, merchant proof, landing-page structure and app links.
+2. Waffarha. “[How To Buy](https://app-link.waffarha.com/en/howToBuy).” Used for account, offer, cart, payment, confirmation and My Orders flow.
+3. Waffarha. “[FAQ / My Coupons](https://waffarha.com/en/FAQ).” Used for coupon purchase, redemption, single-use behavior and support pattern.
+4. Waffarha. “[Use Policy](https://www.waffarha.com/en/usePolicy).” Used for Egypt-only service, coupon/merchant definitions, promo/cashback and invoice notes.
+5. Waffarha. “[Refund Policy](https://app-link.waffarha.com/en/refundPolicy).” Used for refund request, wallet/original-method pattern and policy complexity.
+6. Waffarha. “[How To Pay](https://www.waffarha.com/index.php/en/howToPay).” Used for observable Egyptian payment methods and order/coupon behavior.
+7. Waffarha. “[Join as a Merchant](https://landing.waffarha.com/en/join-as-merchant).” Used for merchant intake fields and commercial/tax document prompts.
+8. Google Play. “[Waffarha app listing](https://play.google.com/store/apps/details?id=com.waffarha.devewest).” Used for current public positioning, app reach signal and category breadth.
 
-## Technical, architectural, and standards references
+## Automotive marketplace references
 
-8. Next.js Documentation. “[App Router Overview and Architecture](https://nextjs.org/docs/app).” Accessed 14 September 2026. Used for Next.js 16 architecture, Server Components, and streaming SSR conventions.
-9. Next.js Documentation. “[Route Handlers](https://nextjs.org/docs/app/building-your-application/routing/route-handlers).” Accessed 14 September 2026. Used for REST API design, edge runtime boundaries, and request validation.
-10. Next.js Documentation. “[Server Actions and Mutations](https://nextjs.org/docs/app/building-your-application/data-fetching/server-actions-and-mutations).” Accessed 14 September 2026. Used for form mutations and optimistic UI updates.
-11. Tailwind CSS Documentation. “[Tailwind CSS v4 Compatibility and Configuration](https://tailwindcss.com/docs).” Accessed 14 September 2026. Used for styling conventions and responsive design guidelines.
-12. Lucide Icons. “[Lucide Icons Library](https://lucide.dev).” Accessed 14 September 2026. Used for icon selection across bilingual UI designs.
-13. OWASP. “[OWASP Top 10: 2021](https://owasp.org/Top10/).” Accessed 14 September 2026. Used for access control, cryptographic failures, and injection prevention baselines.
-14. OWASP. “[API Security Top 10: 2023](https://owasp.org/www-project-api-security/).” Accessed 14 September 2026. Used for object-level authorization, mass assignment, and SSRF prevention.
-15. IETF. “[RFC 7807: Problem Details for HTTP APIs](https://datatracker.ietf.org/doc/html/rfc7807).” Accessed 14 September 2026. Used for standardized error response design across all API endpoints.
-16. IETF. “[RFC 6238: TOTP: Time-Based One-Time Password Algorithm](https://datatracker.ietf.org/doc/html/rfc6238).” Accessed 14 September 2026. Used for MFA specifications for internal administrative staff.
-17. IETF. “[RFC 2606: Reserved Top Level DNS Names](https://datatracker.ietf.org/doc/html/rfc2606).” Accessed 14 September 2026. Used for non-routable `.invalid` domain reservation for pseudonymous phone placeholder accounts.
-18. IETF. “[RFC 9562: Universally Unique Identifiers (UUIDs)](https://datatracker.ietf.org/doc/html/rfc9562).” Accessed 14 September 2026. Used for UUID standards.
-19. Unicode Consortium. “[Unicode Bidirectional Algorithm (UAX #9)](https://www.unicode.org/reports/tr9/).” Accessed 14 September 2026. Used for RTL/LTR layout rules and mixed-language string presentation.
-20. W3C. “[Internationalization: Developing for Right-to-Left and Bidirectional Text](https://www.w3.org/International/).” Accessed 14 September 2026. Used for Arabic typography, mirroring, and icon flip rules.
-21. Stripe. “[Idempotency Documentation and API Design](https://stripe.com/docs/api/idempotent_requests).” Accessed 14 September 2026. Used for idempotent reservation booking, cancellation, and transaction state machines.
+9. RepairPal. “[Quality Car Repair. Fair Prices. Guaranteed.](https://repairpal.com/certified)” Used for estimator, certification, quality and warranty patterns.
+10. RepairPal. “[Frequently Asked Questions](https://repairpal.com/faq).” Used for provider certification criteria, fair-price method and warranty requirement.
+11. Openbay. “[How Openbay Works](https://www.openbay.com/how-openbay-works).” Used for service/symptom capture, quote comparison, booking, price composition, guarantee and vetting.
+12. Openbay. “[Trust and Safety](https://app.openbay.com/trust-and-safety).” Used for marketplace conduct and provider/customer abuse considerations.
+13. BookMyGarage. “[Frequently Asked Questions](https://bookmygarage.com/faq/).” Used for vehicle/location relevance, price/availability comparison, map/list, direct payment and extra-work authorization.
+14. CAFU. “[Mobile Car Services in UAE](https://www.cafu.com/).” Used for regional car-service taxonomy and B2B/fleet positioning.
+15. CAFU. “[ESG Report 2022](https://downloads.ctfassets.net/5ho7gz3tsepv/4EFjCp3BnyXLnu2ARkx1hm/17e016a7433277f3bf2af38ba24d0455/CAFU-ESG-Report-2022-1.pdf).” Used for on-demand car service categories and B2B/B2C model context.
 
-## Empirical local benchmarks (Cairo & Giza observations)
+## Product, UX and delivery practice
 
-22. Field interviews with 12 independent workshop owners across Heliopolis, Nasr City, Maadi, and Dokki conducted between November 2025 and January 2026. Documented:
-    - 83% prefer WhatsApp for customer appointment notifications over SMS or email.
-    - 92% track vehicle inventory using paper logs or basic Excel spreadsheets.
-    - Commission collection friction is the #1 cited reason for leaving prior deal platforms.
-23. Consumer survey (N=340 car owners in Greater Cairo, age 22–55, December 2025):
-    - 78% cited \"price transparency\" as their primary concern when selecting a service provider.
-    - 64% reported having experienced \"surprise add-on charges\" during workshop visits.
-    - 71% expressed strong preference for paying online or via mobile wallet (InstaPay/Vodafone Cash) to lock in the agreed price.
-24. Comparative analysis of 50 active automotive service promotions on Waffarha.com (Q4 2025):
-    - Average stated discount: 38% off list price.
-    - Most common services: Periodic maintenance (oil + filters), AC service, detailing/nano-ceramic, wheel alignment.
-    - Coupon redemption expiration window: Typically 30–60 days from purchase.
+16. Basecamp. “[Shape Up](https://basecamp.com/shapeup).” Used for shaping, appetite, cycles, scope hammering and circuit-breaker practice.
+17. Basecamp. “[Set Boundaries](https://basecamp.com/shapeup/1.2-chapter-03).” Used for small/big batch and scope limits.
+18. Basecamp. “[The Betting Table](https://basecamp.com/shapeup/2.2-chapter-08).” Used for six-week bets, uninterrupted time and circuit breaker.
+19. Atlassian. “[What is a Product Requirements Document?](https://www.atlassian.com/agile/product-management/requirements).” Used for PRD purpose, user needs and success criteria.
+20. Google Research. Rodden, Hutchinson and Fu. “[Measuring the User Experience on a Large Scale](https://research.google/pubs/measuring-the-user-experience-on-a-large-scale-user-centered-metrics-for-web-applications/).” Used for HEART and goal-signal-metric framing.
+21. Nielsen Norman Group. “[Ecommerce UX: Trust and Credibility](https://www.nngroup.com/reports/ecommerce-ux-trust-and-credibility/).” Used at a high level for trust, company detail, product information and reviews; no paid report content reproduced.
+22. W3C WAI. “[What's New in WCAG 2.2](https://www.w3.org/WAI/standards-guidelines/wcag/new-in-22/).” Used for WCAG 2.2 status and new criteria relevant to focus, target size and accessible authentication.
+23. Android Developers. “[Manage and test localizable text](https://developer.android.com/studio/write/translations-editor).” Used for RTL-aware resources, logical directions and pseudolocale testing.
 
-## Competitor platform benchmarks
+## Engineering, security and AI governance
 
-25. Groupon (US/Global). Public deal structures, refund policies, and merchant redemption workflows examined via public terms and help center documentation (September 2026).
-26. Meituan (China). Local service voucher redemption, merchant verification, and dynamic pricing models examined via published technical and business teardowns (2024–2025).
-27. OpenTable (Global). Reservation state machines, no-show penalties, and capacity management examined via public API documentation and developer guides (September 2026).
-28. Booksy (Global/Beauty & Wellness). Appointment booking, service duration estimation, and multi-staff scheduling examined via public product documentation (September 2026).
+24. Google Antigravity. “[Rules](https://antigravity.google/docs/rules-workflows).” Used for `.agents/rules`, activation and workspace guidance.
+25. Google Antigravity. “[Agent overview](https://www.antigravity.google/docs/agent).” Used for tasks, artifacts and agent workflow context.
+26. GitHub Docs. “[Managing and standardizing pull requests](https://docs.github.com/en/pull-requests/reference/managing-and-standardizing-pull-requests).” Used for PR templates, CODEOWNERS, protected branches/rulesets and automated checks.
+27. GitHub Docs. “[About protected branches](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches).” Used for required reviews, status checks and approval freshness.
+28. OWASP. “[Application Security Verification Standard](https://owasp.org/www-project-application-security-verification-standard/).” Used as the security verification baseline.
+29. OWASP. “[ASVS 5.0.0 PDF](https://raw.githubusercontent.com/OWASP/ASVS/v5.0.0/5.0/OWASP_Application_Security_Verification_Standard_5.0.0_en.pdf).” Stable version reference.
+30. OWASP. “[API Security Top 10](https://api-security.owasp.org/).” Used for API threat coverage.
+31. Stripe Docs. “[Receive Stripe events in your webhook endpoint](https://docs.stripe.com/webhooks).” Used only as vendor-neutral inspiration for signed, idempotent and asynchronous webhook handling; Stripe is not assumed available/selected in Egypt.
+32. Google SRE. “[Site Reliability Engineering](https://sre.google/).” Used for reliability dimensions and operating philosophy.
+33. Google SRE. “[Implementing service level objectives](https://sre.google/resources/book-update/slos/).” Used for SLO practice.
 
-## Testing and quality engineering references
+## Egypt legal, payment and tax context
 
-29. Vitest Documentation. “[Vitest: Next Generation Testing Framework](https://vitest.dev).” Accessed 14 September 2026. Used for unit and component testing conventions and coverage gates.
-30. Playwright Documentation. “[Playwright: Fast and reliable end-to-end testing](https://playwright.dev).” Accessed 14 September 2026. Used for bilingual E2E test suites, visual regression, and mobile emulation.
-31. Testing Library. “[React Testing Library: Simple and complete testing utilities](https://testing-library.com/docs/react-testing-library/intro/).” Accessed 14 September 2026. Used for accessible component testing.
+34. Egyptian Personal Data Protection Center. “[Official site and legal framework](https://www.pdpc.gov.eg/).” Used for Law 151/2020 and Executive Regulations 816/2025 context and PDPC role.
+35. WIPO Lex. “[Egypt Law No. 181 of 2018 on Consumer Protection](https://www.wipo.int/wipolex/en/legislation/details/19866).” Used to identify the governing consumer-protection framework; legal interpretation remains for Egyptian counsel.
+36. Central Bank of Egypt. “[Payment Services](https://www.cbe.org.eg/en/payment-systems-and-services/payment-services).” Used for official payment-system context.
+37. National Telecom Regulatory Authority. “[Mobile Wallet Services](https://www.tra.gov.eg/en/regulations/consumer-manuals-and-tips/mobile-wallet-services/).” Used for official descriptions of Egyptian wallet merchant-payment capabilities.
+38. Egyptian Tax Authority. “[eInvoicing and eReceipt: Getting started](https://sdk.invoicing.eta.gov.eg/start/).” Used for official B2B/B2C digital invoice/receipt system context.
 
-## Operational runbooks, health, and database infrastructure references
+## Production backend, database, and architecture references
 
-32. Kubernetes Documentation. “[Configure Liveness, Readiness and Startup Probes](https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/).” Accessed 16 September 2026. Used for the separation of liveness (process alive) and readiness (dependencies healthy).
-33. GitHub Actions Documentation. “[Workflow syntax for GitHub Actions: permissions](https://docs.github.com/en/actions/writing-workflows/workflow-syntax-for-github-actions#permissions).” Accessed 16 September 2026. Used for pinning minimal least-privilege token permissions (`contents: read`).
-34. GitHub Actions Documentation. “[Enforcing a ruleset for a repository](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/enforcing-a-ruleset-for-a-repository).” Accessed 16 September 2026. Used for branch protection rules and status check requirements.
-35. Dependabot Documentation. “[Configuration options for the dependabot.yml file](https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file).” Accessed 16 September 2026. Used for npm/GitHub Actions ecosystem update schedules and target branches.
-36. GitHub Documentation. “[About CodeQL code scanning](https://docs.github.com/en/code-security/code-scanning/introduction-to-code-scanning/about-codeql-code-scanning).” Accessed 16 September 2026. Used for default setup and status check requirements.
-37. Prisma Documentation. “[System Requirements: Node.js versions](https://www.prisma.io/docs/orm/reference/system-requirements#nodejs).” Accessed 16 September 2026. Used for validating Prisma 7.10.0 runtime requirements.
-38. Prisma Documentation. “[Prisma Migrate: prisma migrate deploy](https://www.prisma.io/docs/orm/reference/prisma-cli-reference#prisma-migrate-deploy).” Accessed 16 September 2026. Used for production migration deployment commands.
-39. Prisma Documentation. “[Prisma Migrate: prisma migrate status](https://www.prisma.io/docs/orm/reference/prisma-cli-reference#prisma-migrate-status).” Accessed 16 September 2026. Used for zero-drift CI schema assertions.
+39. Prisma Documentation. “[Prisma ORM Release Status & Lifecycle](https://www.prisma.io/docs/prisma-orm/release-status).” Accessed 16 September 2026. Used for Prisma 7 GA deliberate adoption, Prisma 6 deprecation window, and Prisma 8 evaluation.
 40. Prisma Documentation. “[Prisma Configuration File (prisma.config.ts)](https://www.prisma.io/docs/orm/prisma-schema/overview/prisma-config-file).” Accessed 16 September 2026. Used for TypeScript configuration, direct migration URL mapping, and schema path resolution.
 41. Prisma Documentation. “[Driver Adapters: PostgreSQL (@prisma/adapter-pg)](https://www.prisma.io/docs/orm/prisma-client/setup-and-configuration/databases-connections/pg).” Accessed 16 September 2026. Used for constructing PrismaClient with pg.Pool driver adapters.
 42. Prisma Documentation. “[Patching and Resolving Failed Migrations](https://www.prisma.io/docs/orm/prisma-migrate/workflows/patching-failed-migrations).” Accessed 16 September 2026. Used for `prisma migrate resolve --rolled-back` and `--applied` operational boundaries.
@@ -81,16 +72,16 @@ This index records the primary sources, authoritative documentation, standards, 
 ## Identity, authentication, MFA, and security architecture references
 
 50. Next.js Documentation. “[Authentication in Next.js](https://nextjs.org/docs/app/building-your-application/authentication).” Accessed 16 September 2026. Used for server-side session verification, Route Handler auth patterns, and Server Action security boundaries.
-51. Better Auth. “[Release v1.7.5](https://github.com/better-auth/better-auth/releases/tag/v1.7.5).” Accessed 16 September 2026. Pinned stable release evaluated on the 1.7.x line; confirms MIT open-source license.
+51. Better Auth. “[Release v1.7.5](https://github.com/better-auth/better-auth/releases/tag/v1.7.5).” Accessed 16 September 2026. Pinned stable version evaluated; confirms MIT open-source license.
 52. Better Auth. “[Security Policy and Vulnerability Reporting](https://github.com/better-auth/better-auth/security/policy).” Accessed 16 September 2026. Documents supported version policy (only `latest` receives security patches).
 53. Better Auth Documentation. “[Next.js Integration Guide](https://www.better-auth.com/docs/integrations/next).” Accessed 16 September 2026. Used for App Router Route Handler mounts (`/api/auth/[...all]`) and server session helpers.
 54. Better Auth Documentation. “[Prisma Adapter](https://www.better-auth.com/docs/adapters/prisma).” Accessed 16 September 2026. Used for Prisma 7 schema integration and database connection adapter setup.
-55. Better Auth Documentation. “[Database & Schema Generation](https://www.better-auth.com/docs/concepts/database).” Accessed 16 September 2026. Used for schema generation workflow (`npx @better-auth/cli generate`) and custom ID generator options (`database.generateId`). Note: General documentation conceptual tables may lag version-specific plugin schemas; CLI generator output is the implementation authority.
-56. Better Auth Documentation. “[Session Management](https://www.better-auth.com/docs/concepts/session-management).” Accessed 16 September 2026. Used for database session schema, `expiresIn`, rolling `updateAge`, lack of role-based idle limits, and `cookieCache` disabling.
+55. Better Auth Documentation. “[Database & Schema Generation](https://www.better-auth.com/docs/concepts/database).” Accessed 16 September 2026. Used for schema generation workflow (`npx @better-auth/cli generate`) and custom ID generator options (`database.generateId`). Note: General conceptual database documentation may lag version-specific plugin documentation; CLI generator output is the implementation authority.
+56. Better Auth Documentation. “[Session Management](https://www.better-auth.com/docs/concepts/session-management).” Accessed 16 September 2026. Used for database session schema, `expiresIn`, rolling `updateAge`, lack of native role-based idle limits, and `cookieCache` disabling.
 57. Better Auth Documentation. “[Email & Password Authentication](https://www.better-auth.com/docs/authentication/email-password).” Accessed 16 September 2026. Used for default `scrypt` hashing implementation, password length policies, and custom verification hooks.
 58. Better Auth Documentation. “[Phone Number Plugin](https://www.better-auth.com/docs/plugins/phone-number).” Accessed 16 September 2026. Used for `sendOTP` hook, non-awaited dispatch guidance to prevent timing enumeration, verification token lifecycle, single-use concurrency considerations, and `signUpOnVerification.getTempEmail` placeholder email strategy.
 59. Better Auth Documentation. “[Two-Factor Authentication (2FA) Plugin](https://www.better-auth.com/docs/plugins/2fa).” Accessed 16 September 2026. Used for TOTP RFC 6238 setup, dedicated `twoFactor` table schema (`id`, `userId`, `secret`, `backupCodes`, `verified`, `failedVerificationCount`, `lockedUntil`), `User.twoFactorEnabled`, encrypted secret storage via `BETTER_AUTH_SECRET`, and caller-controlled `trustDevice` parameter on verification endpoints.
-60. Better Auth Documentation. “[Rate Limiting](https://www.better-auth.com/docs/concepts/rate-limit).” Accessed 16 September 2026. Used for storage-backed sliding window rate limiters across multi-instance deployments (distinguishing IP/endpoint limits from WaffarhaCars-owned phone-keyed atomic throttles).
+60. Better Auth Documentation. “[Rate Limiting](https://www.better-auth.com/docs/concepts/rate-limit).” Accessed 16 September 2026. Used for client-facing IP/endpoint rate limiting with configurable windows and limits using database or secondary-storage backends (noting direct `auth.api` server calls are not covered by client-facing rate limiting).
 61. Better Auth Documentation. “[Security and Origin Protection](https://www.better-auth.com/docs/concepts/security).” Accessed 16 September 2026. Used for `Origin` header validation, `trustedOrigins`, Fetch Metadata headers (`Sec-Fetch-Site`/`Sec-Fetch-Mode`), and `SameSite=Lax` cookie protections.
 62. Better Auth Documentation. “[Test Utilities Plugin](https://www.better-auth.com/docs/plugins/test-utils).” Accessed 16 September 2026. Used for test-only `captureOTP` configuration and test helpers.
 63. Auth.js Documentation. “[Prisma Adapter](https://authjs.dev/getting-started/adapters/prisma)” and “[Credentials Provider](https://authjs.dev/getting-started/providers/credentials).” Accessed 16 September 2026. Used for architectural comparison and credential/phone handling assessment.
