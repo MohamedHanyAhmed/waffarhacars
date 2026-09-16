@@ -71,6 +71,15 @@ This repository contains the interactive, responsive, bilingual showcase prototy
 
 - **Required Runtime**: Node.js 24 LTS (`>=24.0.0 <25.0.0`, `.nvmrc` and `.node-version` set to `24`)
 - **Package Manager**: npm pinned via the `packageManager` field in `package.json` (clean install via `npm ci`)
+- **Database (Optional for local PostgreSQL testing)**: PostgreSQL 17 (disposable local instance available via `docker compose -f docker-compose.test.yml up -d`)
+
+### Database Foundation & Health Probes
+
+- **Prisma Client Generation**: `npm run prisma:generate` (reproducibly generates client into `src/generated/prisma`)
+- **Migration Status**: `npm run prisma:migrate:status` (inspects database schema vs migrations)
+- **Deploy Migrations**: `npm run prisma:migrate:deploy` (executes declarative SQL migrations in production/CI)
+- **Liveness Probe**: `GET /api/live` (returns HTTP 200 `{ "status": "ok" }` with `Cache-Control: no-store`)
+- **Readiness Probe**: `GET /api/ready` (returns HTTP 200 `{ "status": "ready" }` or HTTP 503 `{ "status": "unavailable" }`)
 
 ### Separate Verification Commands
 
