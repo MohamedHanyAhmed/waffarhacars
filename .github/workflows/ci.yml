@@ -72,11 +72,11 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Verify Prisma Migration Status
-        run: npm run prisma:migrate:status
-
       - name: Deploy Prisma Migrations (Baseline Verification)
         run: npm run prisma:migrate:deploy
+
+      - name: Verify Prisma Migration Status
+        run: npm run prisma:migrate:status
 
       - name: Unit & Integration Tests
         run: npm run test:unit
