@@ -26,6 +26,12 @@ export function createDbContext(env: ServerEnv): DbContext {
     statement_timeout: env.DATABASE_STATEMENT_TIMEOUT_MS,
   });
 
+  // Handle errors on idle clients so they do not bubble as unhandled exceptions.
+  // node-postgres automatically evicts the terminated client from the pool.
+  pool.on("error", (_err) => {
+    // Expected when idle backend connections are terminated by database administrator
+  });
+
   const adapter = new PrismaPg(pool);
   const prisma = new PrismaClient({
     adapter,

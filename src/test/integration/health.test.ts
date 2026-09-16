@@ -151,6 +151,9 @@ describe("Real PostgreSQL 17 Integration & Health Infrastructure Suite", () => {
     expect(termRes.rows[0].terminated).toBe(true);
     await admin.end();
 
+    // Allow socket to receive termination signal and trigger pool eviction
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
     // 3. Prove that the application pool detects the terminated backend and recovers seamlessly
     const prisma = getPrisma();
     const recoveredResult = await prisma.$queryRaw<
