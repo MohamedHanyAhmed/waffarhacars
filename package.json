@@ -2,23 +2,28 @@
   "name": "waffarhacars-demo",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "postinstall": "prisma generate",
     "dev": "next dev",
     "build": "prisma generate && next build",
     "start": "next start",
+    "prisma:validate": "prisma validate",
     "prisma:generate": "prisma generate",
     "prisma:migrate:status": "prisma migrate status",
     "prisma:migrate:deploy": "prisma migrate deploy",
+    "db:test:up": "docker compose -f docker-compose.test.yml up -d --wait",
+    "db:test:down": "docker compose -f docker-compose.test.yml down -v",
     "format:check": "prettier --check .",
     "format": "prettier --write .",
-    "lint": "eslint \"src/**/*.{ts,tsx}\" \"scripts/**/*.{js,mjs}\" \"eslint.config.mjs\" \"next.config.mjs\" \"playwright.config.ts\" \"vitest.config.mts\" --max-warnings=0",
+    "lint": "eslint \"src/**/*.{ts,tsx}\" \"scripts/**/*.{js,mjs}\" \"eslint.config.mjs\" \"next.config.mjs\" \"playwright.config.ts\" \"vitest.config.mts\" \"vitest.integration.config.mts\" --max-warnings=0",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:unit": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.mts",
     "test:watch": "vitest",
     "test:e2e": "node scripts/run-e2e.mjs",
-    "verify": "npm run format:check && npm run lint && npm run typecheck && npm run test:unit && npm run build && npm run test:e2e"
+    "verify": "npm run format:check && npm run lint && npm run typecheck && npm run test:unit && npm run prisma:validate && npm run build && npm run test:e2e"
   },
   "dependencies": {
     "@prisma/adapter-pg": "7.10.0",
@@ -29,6 +34,7 @@
     "pg": "8.23.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "server-only": "^0.0.1",
     "tailwind-merge": "^2.5.5",
     "zod": "3.24.2"
   },

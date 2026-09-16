@@ -3,6 +3,7 @@ import { getServerEnv } from "@/lib/env";
 import { getPrisma } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
 
 export async function GET() {
   try {

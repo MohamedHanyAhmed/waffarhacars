@@ -1,12 +1,8 @@
+import "server-only";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@/generated/prisma/client";
 import pg from "pg";
 import { getServerEnv, type ServerEnv } from "./env";
-
-// Server-only runtime safeguard (bypassed in vitest jsdom environment)
-if (typeof window !== "undefined" && !process.env.VITEST) {
-  throw new Error("Database client cannot be used on the client side.");
-}
 
 export interface DbContext {
   prisma: PrismaClient;

@@ -57,10 +57,17 @@ Accessed 13 September 2026 unless noted. Public product observations can change.
 
 ## Production backend, database, and architecture references
 
-39. Prisma Documentation. “[Prisma ORM Release Status](https://www.prisma.io/docs/prisma-orm/release-status).” Accessed 14 September 2026. Used for Prisma 7 GA lifecycle, Prisma 6 security-maintenance window, and Prisma 8 RC evaluation.
-40. PostgreSQL Global Development Group. “[PostgreSQL 17 Documentation](https://www.postgresql.org/docs/17/).” Accessed 14 September 2026. Used for ACID transaction isolation, row-level locking (`FOR UPDATE`), and JSONB operators.
-41. IETF. “[RFC 7807: Problem Details for HTTP APIs](https://datatracker.ietf.org/doc/html/rfc7807).” Accessed 14 September 2026. Used for standardized error response schemas.
-42. IETF. “[RFC 9562: Universally Unique Identifiers (UUIDs)](https://datatracker.ietf.org/doc/html/rfc9562).” Accessed 14 September 2026. Used for UUID standards.
+39. Prisma Documentation. “[Prisma ORM Release Status & Lifecycle](https://www.prisma.io/docs/prisma-orm/release-status).” Accessed 16 September 2026. Used for Prisma 7 GA deliberate adoption, Prisma 6 deprecation window, and Prisma 8 evaluation.
+40. Prisma Documentation. “[Prisma Configuration File (prisma.config.ts)](https://www.prisma.io/docs/orm/prisma-schema/overview/prisma-config-file).” Accessed 16 September 2026. Used for TypeScript configuration, direct migration URL mapping, and schema path resolution.
+41. Prisma Documentation. “[Driver Adapters: PostgreSQL (@prisma/adapter-pg)](https://www.prisma.io/docs/orm/prisma-client/setup-and-configuration/databases-connections/pg).” Accessed 16 September 2026. Used for constructing PrismaClient with pg.Pool driver adapters.
+42. Prisma Documentation. “[Patching and Resolving Failed Migrations](https://www.prisma.io/docs/orm/prisma-migrate/workflows/patching-failed-migrations).” Accessed 16 September 2026. Used for `prisma migrate resolve --rolled-back` and `--applied` operational boundaries.
+43. Docker Official Images. “[PostgreSQL Official Image Repository](https://hub.docker.com/_/postgres).” Accessed 16 September 2026. Used for pinning the verified `postgres:17.4-alpine` image locally and in CI.
+44. GitHub Actions Documentation. “[About Service Containers](https://docs.github.com/en/actions/use-cases-and-examples/using-containerized-services/about-service-containers).” Accessed 16 September 2026. Used for CI PostgreSQL 17 health-checked service configuration.
+45. node-postgres. “[pg.Pool API and Client Lifecycle](https://node-postgres.com/apis/pool).” Accessed 16 September 2026. Used for bounded connection pool configuration, backend error recovery, and graceful shutdown.
+46. Next.js Documentation. “[Route Handlers and Server-Only Boundaries](https://nextjs.org/docs/app/building-your-application/routing/route-handlers).” Accessed 16 September 2026. Used for `nodejs` runtime declaration and server-only security isolation.
+47. PostgreSQL Global Development Group. “[PostgreSQL 17 Documentation](https://www.postgresql.org/docs/17/).” Accessed 16 September 2026. Used for ACID transaction isolation, row-level locking (`FOR UPDATE`), and JSONB operators.
+48. IETF. “[RFC 7807: Problem Details for HTTP APIs](https://datatracker.ietf.org/doc/html/rfc7807).” Accessed 16 September 2026. Used for standardized error response schemas.
+49. IETF. “[RFC 9562: Universally Unique Identifiers (UUIDs)](https://datatracker.ietf.org/doc/html/rfc9562).” Accessed 16 September 2026. Used for UUID standards.
 
 ## Evidence limitations
 
