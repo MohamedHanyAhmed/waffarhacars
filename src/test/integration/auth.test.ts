@@ -16,6 +16,49 @@ const DEFAULT_TEST_DB_URL =
 const TEST_SECRET = "test-secret-at-least-32-characters-long-12345";
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+interface ParsedCookie {
+  name: string;
+  value: string;
+  isHttpOnly: boolean;
+  isSecure: boolean;
+  sameSite?: string;
+  path?: string;
+}
+
+function parseSetCookie(headerValue: string): ParsedCookie {
+  const parts = headerValue.split(";").map((p) => p.trim());
+  const [name, ...valParts] = parts[0].split("=");
+  const value = valParts.join("=");
+
+  let isHttpOnly = false;
+  let isSecure = false;
+  let sameSite: string | undefined;
+  let path: string | undefined;
+
+  for (let i = 1; i < parts.length; i++) {
+    const part = parts[i];
+    const lower = part.toLowerCase();
+    if (lower === "httponly") {
+      isHttpOnly = true;
+    } else if (lower === "secure") {
+      isSecure = true;
+    } else if (lower.startsWith("samesite=")) {
+      sameSite = part.split("=")[1];
+    } else if (lower.startsWith("path=")) {
+      path = part.split("=")[1];
+    }
+  }
+
+  return {
+    name,
+    value,
+    isHttpOnly,
+    isSecure,
+    sameSite,
+    path,
+  };
+}
+
 describe("Real PostgreSQL 17 Better Auth Database Session Integration Suite", () => {
   let isDbReachable = false;
   const originalEnv = { ...process.env };
@@ -165,7 +208,7 @@ describe("Real PostgreSQL 17 Better Auth Database Session Integration Suite", ()
     expect(latestSession.lastReauthenticatedAt).toBeNull();
   });
 
-  it("proves cookie assertions: HttpOnly, SameSite=Lax, Path=/, and Secure flag in production", async () => {
+  it("proves two independent sign-ins create two distinct sessions and verifies database uniqueness", async () => {
     if (!isDbReachable) {
       throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
     }
@@ -173,19 +216,94 @@ describe("Real PostgreSQL 17 Better Auth Database Session Integration Suite", ()
     const { email, password, name } = generateRandomTestUser();
     await testAuth.api.signUpEmail({ body: { email, password, name } });
 
-    // Non-production sign-in response
+    const prisma = getPrisma();
+    const dbUser = await prisma.user.findUnique({ where: { email } });
+    expect(dbUser).not.toBeNull();
+
+    // Baseline session count before explicit sign-ins
+    const countBaseline = await prisma.session.count({ where: { userId: dbUser!.id } });
+
+    // First independent sign-in
+    const signInRes1 = await testAuth.api.signInEmail({
+      body: { email, password },
+      asResponse: true,
+    });
+    expect(signInRes1.status).toBe(200);
+
+    const countAfterFirst = await prisma.session.count({ where: { userId: dbUser!.id } });
+    expect(countAfterFirst - countBaseline).toBe(1);
+
+    // Second independent sign-in
+    const signInRes2 = await testAuth.api.signInEmail({
+      body: { email, password },
+      asResponse: true,
+    });
+    expect(signInRes2.status).toBe(200);
+
+    const countAfterSecond = await prisma.session.count({ where: { userId: dbUser!.id } });
+    expect(countAfterSecond - countAfterFirst).toBe(1);
+
+    // Retrieve both created sessions from PostgreSQL
+    const sessions = await prisma.session.findMany({
+      where: { userId: dbUser!.id },
+      orderBy: { createdAt: "asc" },
+    });
+    expect(sessions.length - countBaseline).toBe(2);
+
+    const session1 = sessions[sessions.length - 2];
+    const session2 = sessions[sessions.length - 1];
+
+    // Assert UUID format
+    expect(UUID_REGEX.test(session1.id)).toBe(true);
+    expect(UUID_REGEX.test(session2.id)).toBe(true);
+    expect(session1.id).not.toBe(session2.id);
+
+    // Assert the two session tokens are strictly different
+    expect(session1.token).toBeDefined();
+    expect(session2.token).toBeDefined();
+    expect(session1.token).not.toBe(session2.token);
+    expect(session1.token.length).toBeGreaterThanOrEqual(20);
+    expect(session2.token.length).toBeGreaterThanOrEqual(20);
+
+    // Assert database uniqueness invariant: attempting to insert duplicate token throws unique constraint error
+    await expect(
+      prisma.session.create({
+        data: {
+          id: crypto.randomUUID(),
+          token: session1.token,
+          userId: dbUser!.id,
+          expiresAt: new Date(Date.now() + 86400000),
+          lastActivityAt: new Date(),
+        },
+      })
+    ).rejects.toThrow();
+  });
+
+  it("proves structural cookie assertions: HttpOnly, SameSite=Lax, Path=/, Secure=false in dev, Secure=true in prod", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+
+    const { email, password, name } = generateRandomTestUser();
+    await testAuth.api.signUpEmail({ body: { email, password, name } });
+
+    // 1. Non-production / development sign-in
     const devSignInRes = await testAuth.api.signInEmail({
       body: { email, password },
       asResponse: true,
     });
 
-    const setCookie = devSignInRes.headers.get("set-cookie") || "";
-    expect(setCookie).toContain("better-auth.session_token=");
-    expect(setCookie.toLowerCase()).toContain("httponly");
-    expect(setCookie.toLowerCase()).toContain("samesite=lax");
-    expect(setCookie.toLowerCase()).toContain("path=/");
+    const devSetCookie = devSignInRes.headers.get("set-cookie") || "";
+    const parsedDevCookie = parseSetCookie(devSetCookie);
 
-    // Production auth instance with useSecureCookies enabled
+    expect(parsedDevCookie.name).toBe("better-auth.session_token");
+    expect(parsedDevCookie.value).toBeTruthy();
+    expect(parsedDevCookie.isHttpOnly).toBe(true);
+    expect(parsedDevCookie.isSecure).toBe(false); // Secure=false in development
+    expect(parsedDevCookie.sameSite?.toLowerCase()).toBe("lax");
+    expect(parsedDevCookie.path).toBe("/");
+
+    // 2. Production auth instance with useSecureCookies enabled
     const prodAuth = createTestAuth({
       baseURL: "https://waffarhacars.com",
       secret: TEST_SECRET,
@@ -200,7 +318,14 @@ describe("Real PostgreSQL 17 Better Auth Database Session Integration Suite", ()
     });
 
     const prodSetCookie = prodSignInRes.headers.get("set-cookie") || "";
-    expect(prodSetCookie.toLowerCase()).toContain("secure");
+    const parsedProdCookie = parseSetCookie(prodSetCookie);
+
+    expect(parsedProdCookie.name).toBe("better-auth.session_token");
+    expect(parsedProdCookie.value).toBeTruthy();
+    expect(parsedProdCookie.isHttpOnly).toBe(true);
+    expect(parsedProdCookie.isSecure).toBe(true); // Secure=true in production
+    expect(parsedProdCookie.sameSite?.toLowerCase()).toBe("lax");
+    expect(parsedProdCookie.path).toBe("/");
   });
 
   it("proves session retrieval succeeds using cookie and fails immediately upon revocation (cookie cache disabled)", async () => {
@@ -363,7 +488,7 @@ describe("Real PostgreSQL 17 Better Auth Database Session Integration Suite", ()
     expect(trustedRes.status).toBe(200);
   });
 
-  it("proves browser-facing sign-in JSON response strips session tokens while preserving HttpOnly Set-Cookie", async () => {
+  it("proves browser-facing sign-in JSON strips session tokens, body does not contain DB token, and preserved cookie authenticates", async () => {
     if (!isDbReachable) {
       throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
     }
@@ -384,17 +509,42 @@ describe("Real PostgreSQL 17 Better Auth Database Session Integration Suite", ()
     expect(res.status).toBe(200);
 
     const setCookie = res.headers.get("set-cookie") || "";
-    expect(setCookie).toContain("better-auth.session_token=");
-    expect(setCookie.toLowerCase()).toContain("httponly");
-    expect(setCookie.toLowerCase()).toContain("samesite=lax");
+    const parsedCookie = parseSetCookie(setCookie);
+    expect(parsedCookie.name).toBe("better-auth.session_token");
+    expect(parsedCookie.isHttpOnly).toBe(true);
+    expect(parsedCookie.isSecure).toBe(false);
+    expect(parsedCookie.sameSite?.toLowerCase()).toBe("lax");
 
-    const body = await res.json();
-    expect(body).toBeDefined();
+    // Retrieve database session row from PostgreSQL
+    const prisma = getPrisma();
+    const dbSession = await prisma.session.findUnique({
+      where: { token: parsedCookie.value },
+    });
+    expect(dbSession).not.toBeNull();
+    const realDbToken = dbSession!.token;
+
+    // Verify response body JSON
+    const bodyText = await res.text();
+    const body = JSON.parse(bodyText);
+
+    // 1. Neither token nor session.token present in parsed JSON
     expect(body.token).toBeUndefined();
     if (body.session) {
       expect(body.session.token).toBeUndefined();
     }
     expect(body.user?.email).toBe(email);
+
+    // 2. Serialized body does not contain the actual PostgreSQL session token
+    expect(bodyText).not.toContain(realDbToken);
+
+    // 3. Authentication using the preserved cookie still succeeds on session probe
+    const probeReq = new NextRequest("http://localhost:3000/api/auth/probe", {
+      headers: { cookie: `better-auth.session_token=${realDbToken}` },
+    });
+    const probeRes = await probeHandler(probeReq);
+    expect(probeRes.status).toBe(200);
+    const probeJson = await probeRes.json();
+    expect(probeJson).toEqual({ authenticated: true });
   });
 
   it("proves public email signup is strictly rejected against the production-mounted auth instance", async () => {

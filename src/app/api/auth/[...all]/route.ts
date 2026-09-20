@@ -1,5 +1,6 @@
 import { getAuth } from "@/lib/auth";
 import { getServerEnv } from "@/lib/env";
+import { sanitizeAuthResponse } from "@/lib/auth-response-sanitizer";
 import type { NextRequest } from "next/server";
 
 export async function handleAuth(req: NextRequest): Promise<Response> {
@@ -29,37 +30,17 @@ export async function handleAuth(req: NextRequest): Promise<Response> {
   try {
     const auth = getAuth();
     const res = await auth.handler(req);
-    const headers = new Headers(res.headers);
-    if (!headers.has("Cache-Control")) {
+    const sanitized = await sanitizeAuthResponse(req, res);
+    if (!sanitized.headers.has("Cache-Control")) {
+      const headers = new Headers(sanitized.headers);
       headers.set("Cache-Control", "no-store");
+      return new Response(sanitized.body, {
+        status: sanitized.status,
+        statusText: sanitized.statusText,
+        headers,
+      });
     }
-
-    const contentType = headers.get("content-type") || "";
-    if (contentType.includes("application/json")) {
-      const data = await res.json();
-      if (data && typeof data === "object") {
-        // Strip session tokens from browser-facing sign-in JSON while preserving HttpOnly Set-Cookie
-        if (req.url.includes("/sign-in")) {
-          if ("token" in data) {
-            delete data.token;
-          }
-          if (data.session && typeof data.session === "object" && "token" in data.session) {
-            delete data.session.token;
-          }
-        }
-        return Response.json(data, {
-          status: res.status,
-          statusText: res.statusText,
-          headers,
-        });
-      }
-    }
-
-    return new Response(res.body, {
-      status: res.status,
-      statusText: res.statusText,
-      headers,
-    });
+    return sanitized;
   } catch {
     return Response.json(
       { error: "Authentication service error" },

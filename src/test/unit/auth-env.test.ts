@@ -254,6 +254,45 @@ describe("Server Auth Environment Validation", () => {
     ).toThrow("Configuration error: Trusted origin must use HTTPS in production.");
   });
 
+  it("fails when AUTH_TRUSTED_ORIGINS contains https://localhost in production", () => {
+    expect(() =>
+      validateServerEnv({
+        APP_RUNTIME_PROFILE: "production",
+        APP_DATA_BACKEND: "postgres",
+        DATABASE_URL: VALID_POSTGRES_URL,
+        BETTER_AUTH_SECRET: VALID_PROD_SECRET,
+        BETTER_AUTH_URL: "https://waffarhacars.com",
+        AUTH_TRUSTED_ORIGINS: "https://localhost",
+      })
+    ).toThrow("Configuration error: Trusted origin cannot use localhost in production.");
+  });
+
+  it("fails when AUTH_TRUSTED_ORIGINS contains https://127.0.0.1 in production", () => {
+    expect(() =>
+      validateServerEnv({
+        APP_RUNTIME_PROFILE: "production",
+        APP_DATA_BACKEND: "postgres",
+        DATABASE_URL: VALID_POSTGRES_URL,
+        BETTER_AUTH_SECRET: VALID_PROD_SECRET,
+        BETTER_AUTH_URL: "https://waffarhacars.com",
+        AUTH_TRUSTED_ORIGINS: "https://127.0.0.1",
+      })
+    ).toThrow("Configuration error: Trusted origin cannot use localhost in production.");
+  });
+
+  it("fails when AUTH_TRUSTED_ORIGINS contains an HTTPS .local hostname in production", () => {
+    expect(() =>
+      validateServerEnv({
+        APP_RUNTIME_PROFILE: "production",
+        APP_DATA_BACKEND: "postgres",
+        DATABASE_URL: VALID_POSTGRES_URL,
+        BETTER_AUTH_SECRET: VALID_PROD_SECRET,
+        BETTER_AUTH_URL: "https://waffarhacars.com",
+        AUTH_TRUSTED_ORIGINS: "https://admin.waffarhacars.local",
+      })
+    ).toThrow("Configuration error: Trusted origin cannot use localhost in production.");
+  });
+
   it("fails when AUTH_TRUSTED_ORIGINS contains sub-paths or query parameters", () => {
     expect(() =>
       validateServerEnv({

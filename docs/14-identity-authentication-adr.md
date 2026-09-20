@@ -88,7 +88,7 @@ WaffarhaCars serves distinct operational actors across consumer, provider, and i
 2. Author minimal configuration in `src/lib/auth.ts` defining plugins and adapters.
 3. Run Better Auth CLI generator: `npm run auth:schema:generate` (or `npx auth generate`).
 4. Review the generated Prisma model definitions against architectural requirements.
-5. Generate the database migration: For the initial baseline migration from the model-free schema, generate the SQL script using `prisma migrate diff --from-empty --to-schema-datamodel prisma/schema.prisma --script`. For subsequent schema evolution, generate migrations via `prisma migrate dev --create-only`.
+5. Generate the database migration: For the initial baseline migration from the model-free schema, generate the SQL script using `prisma migrate diff --from-empty --to-schema prisma/schema.prisma --script --output prisma/migrations/20260916205319_auth_core/migration.sql`. For subsequent schema evolution, generate migrations via `prisma migrate dev --create-only`.
 6. Review the resulting SQL script in `prisma/migrations/`.
 7. Commit the reviewed schema and migration.
 
@@ -461,7 +461,7 @@ graph LR
   - `package.json`: Pin `"better-auth": "1.7.5"`.
   - `src/lib/auth.ts`: Better Auth instance configuration with `generateId: () => crypto.randomUUID()`, `cookieCache: { enabled: false }`, and Prisma adapter.
   - `src/app/api/auth/[...all]/route.ts`: Better Auth App Router Route Handler.
-  - `prisma/schema.prisma`: Generated Better Auth models and initial migration generated using `prisma migrate diff --from-empty`.
+  - `prisma/schema.prisma`: Generated Better Auth models and initial migration generated using `prisma migrate diff --from-empty --to-schema prisma/schema.prisma --script --output prisma/migrations/20260916205319_auth_core/migration.sql`.
 - **Security Invariants:**
   - Tokens stored unhashed in database; matched via unique lookup string.
   - Session cookie flags: `HttpOnly`, `Secure`, `SameSite=Lax`.

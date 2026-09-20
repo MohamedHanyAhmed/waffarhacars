@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { getAuthOptions, getAuth, resetAuth } from "@/lib/auth";
+import { schemaOptions } from "@/lib/auth.schema";
+import { authCoreOptions } from "@/lib/auth-core-options";
 import { createTestAuth } from "@/test/support/test-auth";
 import { GET as authGet, POST as authPost } from "@/app/api/auth/[...all]/route";
 import { GET as probeGet } from "@/app/api/auth/probe/route";
@@ -79,6 +81,31 @@ describe("Better Auth Server Configuration and Security Invariants", () => {
   it("provides an isolated test auth instance with signup explicitly enabled from test support", () => {
     const testAuth = createTestAuth();
     expect(testAuth.options.emailAndPassword?.disableSignUp).toBe(false);
+  });
+
+  it("proves schema-generation and runtime configurations use identical User/Session field definitions and UUID policy from shared core", () => {
+    const runtimeOptions = getAuthOptions();
+
+    // User field definitions match exactly
+    expect(runtimeOptions.user?.additionalFields).toEqual(schemaOptions.user?.additionalFields);
+    expect(runtimeOptions.user?.additionalFields).toEqual(authCoreOptions.user.additionalFields);
+
+    // Session field definitions match exactly
+    expect(runtimeOptions.session?.additionalFields).toEqual(
+      schemaOptions.session?.additionalFields
+    );
+    expect(runtimeOptions.session?.additionalFields).toEqual(
+      authCoreOptions.session.additionalFields
+    );
+
+    // UUID generation policy matches exactly
+    expect(runtimeOptions.advanced?.database?.generateId).toEqual(
+      schemaOptions.advanced?.database?.generateId
+    );
+    expect(runtimeOptions.advanced?.database?.generateId).toEqual(
+      authCoreOptions.advanced.database.generateId
+    );
+    expect(runtimeOptions.advanced?.database?.generateId).toBe("uuid");
   });
 });
 

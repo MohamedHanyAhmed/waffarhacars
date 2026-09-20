@@ -1,7 +1,9 @@
 import { betterAuth, type BetterAuthOptions } from "better-auth";
+import { authCoreOptions } from "./auth-core-options";
 
 /**
  * Pure schema configuration used strictly for Better Auth CLI schema generation.
+ * Reuses the single source of truth authCoreOptions.
  * Contains no runtime database imports, no server-only dependencies,
  * and no production environment secret dependencies.
  */
@@ -9,32 +11,13 @@ export const schemaOptions: BetterAuthOptions = {
   baseURL: "http://localhost:3000",
   secret: "schema-generation-placeholder-secret-at-least-32-chars",
   user: {
-    additionalFields: {
-      isSuspended: {
-        type: "boolean",
-        defaultValue: false,
-        input: false,
-      },
-    },
+    ...authCoreOptions.user,
   },
   session: {
-    additionalFields: {
-      lastActivityAt: {
-        type: "date",
-        input: false,
-        required: true,
-      },
-      lastReauthenticatedAt: {
-        type: "date",
-        input: false,
-        required: false,
-      },
-    },
+    ...authCoreOptions.session,
   },
   advanced: {
-    database: {
-      generateId: "uuid",
-    },
+    ...authCoreOptions.advanced,
   },
 };
 

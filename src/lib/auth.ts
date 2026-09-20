@@ -3,6 +3,7 @@ import { betterAuth, type BetterAuthOptions } from "better-auth";
 import { prismaAdapter } from "@better-auth/prisma-adapter";
 import { getPrisma } from "./db";
 import { getServerEnv } from "./env";
+import { authCoreOptions } from "./auth-core-options";
 
 let cachedAuth: ReturnType<typeof betterAuth> | null = null;
 
@@ -19,36 +20,17 @@ export function getAuthOptions(overrides: Partial<BetterAuthOptions> = {}): Bett
       provider: "postgresql",
     }),
     advanced: {
-      database: {
-        generateId: "uuid",
-      },
+      ...authCoreOptions.advanced,
       useSecureCookies: env.APP_RUNTIME_PROFILE === "production",
     },
     session: {
       cookieCache: {
         enabled: false,
       },
-      additionalFields: {
-        lastActivityAt: {
-          type: "date",
-          input: false,
-          required: true,
-        },
-        lastReauthenticatedAt: {
-          type: "date",
-          input: false,
-          required: false,
-        },
-      },
+      ...authCoreOptions.session,
     },
     user: {
-      additionalFields: {
-        isSuspended: {
-          type: "boolean",
-          defaultValue: false,
-          input: false,
-        },
-      },
+      ...authCoreOptions.user,
     },
     emailAndPassword: {
       enabled: true,
