@@ -1,4 +1,4 @@
-import { auth } from "@/lib/auth";
+import { getAuth } from "@/lib/auth";
 import { getServerEnv } from "@/lib/env";
 import type { NextRequest } from "next/server";
 
@@ -43,6 +43,7 @@ export async function GET(req: NextRequest): Promise<Response> {
   }
 
   try {
+    const auth = getAuth();
     const session = await auth.api.getSession({
       headers: req.headers,
     });

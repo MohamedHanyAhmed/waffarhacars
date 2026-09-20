@@ -1,11 +1,23 @@
-import { describe, it, expect } from "vitest";
-import { getAuthOptions, createTestAuth } from "@/lib/auth";
+import { describe, it, expect, beforeEach } from "vitest";
+import { getAuthOptions, getAuth, resetAuth } from "@/lib/auth";
+import { createTestAuth } from "@/test/support/test-auth";
 import { GET as authGet, POST as authPost } from "@/app/api/auth/[...all]/route";
 import { GET as probeGet } from "@/app/api/auth/probe/route";
 import { resetServerEnvCache } from "@/lib/env";
 import { NextRequest } from "next/server";
 
 describe("Better Auth Server Configuration and Security Invariants", () => {
+  beforeEach(() => {
+    process.env.APP_RUNTIME_PROFILE = "showcase";
+    process.env.APP_DATA_BACKEND = "postgres";
+    process.env.DATABASE_URL =
+      "postgresql://test_user:test_password@localhost:5432/waffarhacars_test";
+    process.env.BETTER_AUTH_SECRET = "dev-secret-at-least-32-chars-long-with-entropy-12345";
+    process.env.BETTER_AUTH_URL = "http://localhost:3000";
+    resetServerEnvCache();
+    resetAuth();
+  });
+
   it("strictly disables public email/password signup in production-mounted options", () => {
     const options = getAuthOptions();
     expect(options.emailAndPassword?.enabled).toBe(true);
@@ -49,7 +61,22 @@ describe("Better Auth Server Configuration and Security Invariants", () => {
     expect(options.advanced?.database?.generateId).toBe("uuid");
   });
 
-  it("provides an isolated test auth instance with signup explicitly enabled", () => {
+  it("fails closed when BETTER_AUTH_SECRET is missing with no fallback runtime secret", () => {
+    delete process.env.BETTER_AUTH_SECRET;
+    resetServerEnvCache();
+    resetAuth();
+    expect(() => getAuthOptions()).toThrow(
+      "Configuration error: BETTER_AUTH_SECRET is required when using postgres backend."
+    );
+  });
+
+  it("lazily initializes and returns singleton auth instance via getAuth()", () => {
+    const auth1 = getAuth();
+    const auth2 = getAuth();
+    expect(auth1).toBe(auth2);
+  });
+
+  it("provides an isolated test auth instance with signup explicitly enabled from test support", () => {
     const testAuth = createTestAuth();
     expect(testAuth.options.emailAndPassword?.disableSignUp).toBe(false);
   });

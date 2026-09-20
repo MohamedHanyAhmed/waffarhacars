@@ -1,8 +1,8 @@
-import { auth } from "@/lib/auth";
+import { getAuth } from "@/lib/auth";
 import { getServerEnv } from "@/lib/env";
 import type { NextRequest } from "next/server";
 
-async function handleAuth(req: NextRequest): Promise<Response> {
+export async function handleAuth(req: NextRequest): Promise<Response> {
   let env;
   try {
     env = getServerEnv();
@@ -27,11 +27,34 @@ async function handleAuth(req: NextRequest): Promise<Response> {
   }
 
   try {
+    const auth = getAuth();
     const res = await auth.handler(req);
     const headers = new Headers(res.headers);
     if (!headers.has("Cache-Control")) {
       headers.set("Cache-Control", "no-store");
     }
+
+    const contentType = headers.get("content-type") || "";
+    if (contentType.includes("application/json")) {
+      const data = await res.json();
+      if (data && typeof data === "object") {
+        // Strip session tokens from browser-facing sign-in JSON while preserving HttpOnly Set-Cookie
+        if (req.url.includes("/sign-in")) {
+          if ("token" in data) {
+            delete data.token;
+          }
+          if (data.session && typeof data.session === "object" && "token" in data.session) {
+            delete data.session.token;
+          }
+        }
+        return Response.json(data, {
+          status: res.status,
+          statusText: res.statusText,
+          headers,
+        });
+      }
+    }
+
     return new Response(res.body, {
       status: res.status,
       statusText: res.statusText,

@@ -40,54 +40,66 @@ export interface ServerEnv {
 
 let cachedEnv: ServerEnv | null = null;
 
-function validateAuthUrl(rawUrl: string, profile: AppRuntimeProfile): URL {
+function validateOriginUrl(
+  rawUrl: string,
+  profile: AppRuntimeProfile,
+  label: string = "origin"
+): URL {
+  if (rawUrl.includes("*")) {
+    throw new Error("Configuration error: Wildcard origins are not permitted.");
+  }
+
   let parsed: URL;
   try {
     parsed = new URL(rawUrl);
   } catch {
-    throw new Error("Configuration error: BETTER_AUTH_URL must be a valid absolute URL.");
+    throw new Error(`Configuration error: ${label} must be a valid absolute URL.`);
   }
 
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    throw new Error("Configuration error: BETTER_AUTH_URL must use http or https protocol.");
+    throw new Error(`Configuration error: ${label} must use http or https protocol.`);
   }
 
   if (parsed.username || parsed.password) {
-    throw new Error("Configuration error: BETTER_AUTH_URL must not contain credentials.");
+    throw new Error(`Configuration error: ${label} must not contain credentials.`);
   }
 
   if (parsed.search || parsed.searchParams.size > 0) {
-    throw new Error("Configuration error: BETTER_AUTH_URL must not contain query parameters.");
+    throw new Error(`Configuration error: ${label} must not contain query parameters.`);
   }
 
   if (parsed.hash) {
-    throw new Error("Configuration error: BETTER_AUTH_URL must not contain a URL fragment.");
+    throw new Error(`Configuration error: ${label} must not contain a URL fragment.`);
   }
 
   if (parsed.pathname !== "" && parsed.pathname !== "/") {
-    throw new Error("Configuration error: BETTER_AUTH_URL must not contain a sub-path.");
+    throw new Error(`Configuration error: ${label} must not contain a sub-path.`);
   }
 
   if (profile === "production") {
     if (parsed.protocol !== "https:") {
-      throw new Error("Configuration error: BETTER_AUTH_URL must use HTTPS in production.");
+      throw new Error(`Configuration error: ${label} must use HTTPS in production.`);
     }
     const host = parsed.hostname.toLowerCase();
     if (host === "localhost" || host === "127.0.0.1" || host === "::1" || host.endsWith(".local")) {
-      throw new Error("Configuration error: BETTER_AUTH_URL cannot use localhost in production.");
+      throw new Error(`Configuration error: ${label} cannot use localhost in production.`);
     }
   } else {
     if (parsed.protocol === "http:") {
       const host = parsed.hostname.toLowerCase();
       if (host !== "localhost" && host !== "127.0.0.1" && host !== "::1") {
         throw new Error(
-          "Configuration error: HTTP BETTER_AUTH_URL is only permitted on localhost outside production."
+          `Configuration error: HTTP ${label} is only permitted on localhost outside production.`
         );
       }
     }
   }
 
   return parsed;
+}
+
+function validateAuthUrl(rawUrl: string, profile: AppRuntimeProfile): URL {
+  return validateOriginUrl(rawUrl, profile, "BETTER_AUTH_URL");
 }
 
 function validateAuthSecret(secret: string, profile: AppRuntimeProfile): void {
@@ -184,30 +196,9 @@ export function validateServerEnv(
       .map((s) => s.trim())
       .filter(Boolean);
     for (const originStr of split) {
-      if (originStr === "*") {
-        throw new Error("Configuration error: Wildcard origins are not permitted.");
-      }
-      try {
-        const u = new URL(originStr);
-        if (u.protocol !== "https:" && u.protocol !== "http:") {
-          throw new Error("Configuration error: Trusted origin must use http or https.");
-        }
-        if (data.APP_RUNTIME_PROFILE === "production" && u.protocol !== "https:") {
-          throw new Error("Configuration error: Trusted origin must use HTTPS in production.");
-        }
-        if (u.origin !== originStr.replace(/\/$/, "")) {
-          throw new Error(
-            "Configuration error: Trusted origin must be a root origin with no path or query."
-          );
-        }
-        if (!trustedOrigins.includes(u.origin)) {
-          trustedOrigins.push(u.origin);
-        }
-      } catch (err: unknown) {
-        if (err instanceof Error && err.message.startsWith("Configuration error:")) {
-          throw err;
-        }
-        throw new Error("Configuration error: Invalid trusted origin format.");
+      const parsedOrigin = validateOriginUrl(originStr, data.APP_RUNTIME_PROFILE, "Trusted origin");
+      if (!trustedOrigins.includes(parsedOrigin.origin)) {
+        trustedOrigins.push(parsedOrigin.origin);
       }
     }
   }

@@ -226,6 +226,71 @@ describe("Server Auth Environment Validation", () => {
     ]);
   });
 
+  it("fails when AUTH_TRUSTED_ORIGINS contains a non-local HTTP URL outside production", () => {
+    expect(() =>
+      validateServerEnv({
+        APP_RUNTIME_PROFILE: "showcase",
+        APP_DATA_BACKEND: "postgres",
+        DATABASE_URL: VALID_POSTGRES_URL,
+        BETTER_AUTH_SECRET: VALID_DEV_SECRET,
+        BETTER_AUTH_URL: "http://localhost:3000",
+        AUTH_TRUSTED_ORIGINS: "http://remote-site.com",
+      })
+    ).toThrow(
+      "Configuration error: HTTP Trusted origin is only permitted on localhost outside production."
+    );
+  });
+
+  it("fails when AUTH_TRUSTED_ORIGINS contains an HTTP URL in production", () => {
+    expect(() =>
+      validateServerEnv({
+        APP_RUNTIME_PROFILE: "production",
+        APP_DATA_BACKEND: "postgres",
+        DATABASE_URL: VALID_POSTGRES_URL,
+        BETTER_AUTH_SECRET: VALID_PROD_SECRET,
+        BETTER_AUTH_URL: "https://waffarhacars.com",
+        AUTH_TRUSTED_ORIGINS: "http://admin.waffarhacars.com",
+      })
+    ).toThrow("Configuration error: Trusted origin must use HTTPS in production.");
+  });
+
+  it("fails when AUTH_TRUSTED_ORIGINS contains sub-paths or query parameters", () => {
+    expect(() =>
+      validateServerEnv({
+        APP_RUNTIME_PROFILE: "showcase",
+        APP_DATA_BACKEND: "postgres",
+        DATABASE_URL: VALID_POSTGRES_URL,
+        BETTER_AUTH_SECRET: VALID_DEV_SECRET,
+        BETTER_AUTH_URL: "http://localhost:3000",
+        AUTH_TRUSTED_ORIGINS: "https://admin.waffarhacars.com/subpath",
+      })
+    ).toThrow("Configuration error: Trusted origin must not contain a sub-path.");
+
+    expect(() =>
+      validateServerEnv({
+        APP_RUNTIME_PROFILE: "showcase",
+        APP_DATA_BACKEND: "postgres",
+        DATABASE_URL: VALID_POSTGRES_URL,
+        BETTER_AUTH_SECRET: VALID_DEV_SECRET,
+        BETTER_AUTH_URL: "http://localhost:3000",
+        AUTH_TRUSTED_ORIGINS: "https://admin.waffarhacars.com?param=val",
+      })
+    ).toThrow("Configuration error: Trusted origin must not contain query parameters.");
+  });
+
+  it("fails when AUTH_TRUSTED_ORIGINS contains credentials", () => {
+    expect(() =>
+      validateServerEnv({
+        APP_RUNTIME_PROFILE: "showcase",
+        APP_DATA_BACKEND: "postgres",
+        DATABASE_URL: VALID_POSTGRES_URL,
+        BETTER_AUTH_SECRET: VALID_DEV_SECRET,
+        BETTER_AUTH_URL: "http://localhost:3000",
+        AUTH_TRUSTED_ORIGINS: "https://user:pass@admin.waffarhacars.com",
+      })
+    ).toThrow("Configuration error: Trusted origin must not contain credentials.");
+  });
+
   it("sanitizes errors and never prints secrets in error messages", () => {
     const sensitiveSecret = "sensitive-super-secret-key-12345-never-leak";
     try {

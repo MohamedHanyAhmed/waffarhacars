@@ -2,16 +2,18 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from
 import pg from "pg";
 import crypto from "node:crypto";
 import { getPrisma, disconnectDb } from "@/lib/db";
-import { auth, createTestAuth } from "@/lib/auth";
+import { getAuth, resetAuth } from "@/lib/auth";
+import { createTestAuth } from "@/test/support/test-auth";
 import { resetServerEnvCache } from "@/lib/env";
 import { GET as probeHandler } from "@/app/api/auth/probe/route";
+import { handleAuth } from "@/app/api/auth/[...all]/route";
 import { NextRequest } from "next/server";
 
 const DEFAULT_TEST_DB_URL =
   process.env.DATABASE_URL ||
   "postgresql://test_user:test_password@localhost:5432/waffarhacars_test";
 
-const TEST_SECRET = auth.options.secret;
+const TEST_SECRET = "test-secret-at-least-32-characters-long-12345";
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 describe("Real PostgreSQL 17 Better Auth Database Session Integration Suite", () => {
@@ -45,6 +47,7 @@ describe("Real PostgreSQL 17 Better Auth Database Session Integration Suite", ()
 
   beforeEach(() => {
     resetServerEnvCache();
+    resetAuth();
     process.env = { ...originalEnv };
     process.env.APP_RUNTIME_PROFILE = "showcase";
     process.env.APP_DATA_BACKEND = "postgres";
@@ -75,12 +78,14 @@ describe("Real PostgreSQL 17 Better Auth Database Session Integration Suite", ()
       createdUserEmails.length = 0;
     }
     await disconnectDb();
+    resetAuth();
     resetServerEnvCache();
     process.env = { ...originalEnv };
   });
 
   afterAll(async () => {
     await disconnectDb();
+    resetAuth();
     resetServerEnvCache();
     process.env = originalEnv;
   });
@@ -133,6 +138,12 @@ describe("Real PostgreSQL 17 Better Auth Database Session Integration Suite", ()
     const { email, password, name } = generateRandomTestUser();
     await testAuth.api.signUpEmail({ body: { email, password, name } });
 
+    const prisma = getPrisma();
+    const dbUser = await prisma.user.findUnique({ where: { email } });
+    expect(dbUser).not.toBeNull();
+
+    const preSignInCount = await prisma.session.count({ where: { userId: dbUser!.id } });
+
     const signInRes = await testAuth.api.signInEmail({
       body: { email, password },
       asResponse: true,
@@ -140,13 +151,12 @@ describe("Real PostgreSQL 17 Better Auth Database Session Integration Suite", ()
 
     expect(signInRes.status).toBe(200);
 
-    const prisma = getPrisma();
-    const dbUser = await prisma.user.findUnique({ where: { email } });
-    expect(dbUser).not.toBeNull();
-
-    const sessions = await prisma.session.findMany({ where: { userId: dbUser!.id } });
-    expect(sessions.length).toBeGreaterThanOrEqual(1);
-    const latestSession = sessions[sessions.length - 1];
+    const postSignInSessions = await prisma.session.findMany({
+      where: { userId: dbUser!.id },
+      orderBy: { createdAt: "asc" },
+    });
+    expect(postSignInSessions.length - preSignInCount).toBe(1);
+    const latestSession = postSignInSessions[postSignInSessions.length - 1];
 
     expect(UUID_REGEX.test(latestSession.id)).toBe(true);
     expect(latestSession.token).toBeDefined();
@@ -249,7 +259,62 @@ describe("Real PostgreSQL 17 Better Auth Database Session Integration Suite", ()
     expect(res).toBeNull();
   });
 
-  it("proves untrusted Origin is rejected and configured trusted Origin is accepted", async () => {
+  it("proves a genuinely expired database session in PostgreSQL is rejected by both session lookup and probe", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+
+    const { email, password, name } = generateRandomTestUser();
+    await testAuth.api.signUpEmail({ body: { email, password, name } });
+
+    const signInRes = await testAuth.api.signInEmail({
+      body: { email, password },
+      asResponse: true,
+    });
+
+    const setCookie = signInRes.headers.get("set-cookie") || "";
+    const cookieHeader = setCookie.split(";")[0]; // "better-auth.session_token=..."
+
+    // Confirm session is initially valid
+    const initialSession = await testAuth.api.getSession({
+      headers: new Headers({ cookie: cookieHeader }),
+    });
+    expect(initialSession).not.toBeNull();
+    const token = initialSession!.session.token;
+
+    // Mutate the session in real PostgreSQL to expire in the past
+    const prisma = getPrisma();
+    await prisma.session.update({
+      where: { token },
+      data: {
+        expiresAt: new Date(Date.now() - 24 * 60 * 60 * 1000),
+      },
+    });
+
+    // 1. Better Auth session retrieval must reject the expired session row
+    const expiredSessionRes = await testAuth.api.getSession({
+      headers: new Headers({ cookie: cookieHeader }),
+    });
+    expect(expiredSessionRes).toBeNull();
+
+    // 2. Protected probe endpoint must return 401 Problem Details
+    const probeReq = new NextRequest("http://localhost:3000/api/auth/probe", {
+      headers: { cookie: cookieHeader },
+    });
+    const probeRes = await probeHandler(probeReq);
+    expect(probeRes.status).toBe(401);
+    expect(probeRes.headers.get("Content-Type")).toBe("application/problem+json");
+
+    const problemJson = await probeRes.json();
+    expect(problemJson).toMatchObject({
+      type: "https://waffarhacars.com/errors/unauthorized",
+      status: 401,
+      title: "Unauthorized",
+      detail: "Authentication required",
+    });
+  });
+
+  it("proves untrusted Origin is rejected with exact INVALID_ORIGIN and configured trusted Origin is accepted", async () => {
     if (!isDbReachable) {
       throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
     }
@@ -277,7 +342,12 @@ describe("Real PostgreSQL 17 Better Auth Database Session Integration Suite", ()
     });
 
     const untrustedRes = await originAuth.handler(untrustedReq);
-    expect([403, 400]).toContain(untrustedRes.status);
+    expect(untrustedRes.status).toBe(403);
+    const untrustedBody = await untrustedRes.json();
+    expect(untrustedBody).toEqual({
+      code: "INVALID_ORIGIN",
+      message: "Invalid origin",
+    });
 
     // Request with trusted origin
     const trustedReq = new Request("http://localhost:3000/api/auth/sign-in/email", {
@@ -293,6 +363,40 @@ describe("Real PostgreSQL 17 Better Auth Database Session Integration Suite", ()
     expect(trustedRes.status).toBe(200);
   });
 
+  it("proves browser-facing sign-in JSON response strips session tokens while preserving HttpOnly Set-Cookie", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+
+    const { email, password, name } = generateRandomTestUser();
+    await testAuth.api.signUpEmail({ body: { email, password, name } });
+
+    const req = new NextRequest("http://localhost:3000/api/auth/sign-in/email", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: "http://localhost:3000",
+      },
+      body: JSON.stringify({ email, password }),
+    });
+
+    const res = await handleAuth(req);
+    expect(res.status).toBe(200);
+
+    const setCookie = res.headers.get("set-cookie") || "";
+    expect(setCookie).toContain("better-auth.session_token=");
+    expect(setCookie.toLowerCase()).toContain("httponly");
+    expect(setCookie.toLowerCase()).toContain("samesite=lax");
+
+    const body = await res.json();
+    expect(body).toBeDefined();
+    expect(body.token).toBeUndefined();
+    if (body.session) {
+      expect(body.session.token).toBeUndefined();
+    }
+    expect(body.user?.email).toBe(email);
+  });
+
   it("proves public email signup is strictly rejected against the production-mounted auth instance", async () => {
     if (!isDbReachable) {
       throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
@@ -301,7 +405,7 @@ describe("Real PostgreSQL 17 Better Auth Database Session Integration Suite", ()
     const { email, password, name } = generateRandomTestUser();
 
     // Attempting signup against the production auth instance (which has disableSignUp: true)
-    const res = await auth.api.signUpEmail({
+    const res = await getAuth().api.signUpEmail({
       body: { email, password, name },
       asResponse: true,
     });

@@ -12,7 +12,7 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate:status": "prisma migrate status",
     "prisma:migrate:deploy": "prisma migrate deploy",
-    "auth:schema:generate": "auth generate --config src/lib/auth.ts --output prisma/schema.prisma -y",
+    "auth:schema:generate": "node node_modules/auth/dist/index.mjs generate --config src/lib/auth.schema.ts --output prisma/schema.prisma --adapter prisma --dialect postgresql -y",
     "auth:schema:check": "node scripts/check-auth-schema.mjs",
     "db:test:up": "docker compose -f docker-compose.test.yml up -d --wait",
     "db:test:down": "docker compose -f docker-compose.test.yml down -v",
