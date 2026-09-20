@@ -385,7 +385,7 @@ describe("Real PostgreSQL 17 Egyptian Customer Mobile OTP & Concurrency Integrat
     expect(failedRows.length).toBe(1);
   });
 
-  it("8. proves thrown SMS provider error is caught, returns 502 and marks challenge DELIVERY_FAILED", async () => {
+  it("8. proves thrown SMS provider network error is caught, returns 502 and marks challenge DELIVERY_UNKNOWN", async () => {
     if (!isDbReachable) {
       throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
     }
@@ -406,10 +406,10 @@ describe("Real PostgreSQL 17 Egyptian Customer Mobile OTP & Concurrency Integrat
 
     const prisma = getPrisma();
     const lookup = computePhoneLookupHash(phone, TEST_LOOKUP_KEY);
-    const failedRows = await prisma.otpChallenge.findMany({
-      where: { phoneLookupHash: lookup, status: OtpChallengeStatus.DELIVERY_FAILED },
+    const unknownRows = await prisma.otpChallenge.findMany({
+      where: { phoneLookupHash: lookup, status: OtpChallengeStatus.DELIVERY_UNKNOWN },
     });
-    expect(failedRows.length).toBe(1);
+    expect(unknownRows.length).toBe(1);
   });
 
   it("9. proves SMS provider timeout aborts within deadline, returns 502 and transitions to DELIVERY_UNKNOWN", async () => {
