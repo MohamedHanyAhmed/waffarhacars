@@ -8,10 +8,10 @@ const POSTGRES_URL_REGEX = /^postgres(?:ql)?:\/\//i;
 
 const RawServerEnvSchema = z.object({
   APP_RUNTIME_PROFILE: z.enum(["showcase", "production"], {
-    errorMap: () => ({ message: "Invalid or missing APP_RUNTIME_PROFILE" }),
+    message: "Invalid or missing APP_RUNTIME_PROFILE",
   }),
   APP_DATA_BACKEND: z.enum(["demo", "postgres"], {
-    errorMap: () => ({ message: "Invalid or missing APP_DATA_BACKEND" }),
+    message: "Invalid or missing APP_DATA_BACKEND",
   }),
   DATABASE_URL: z.string().optional(),
   DATABASE_DIRECT_URL: z.string().optional(),
@@ -19,6 +19,9 @@ const RawServerEnvSchema = z.object({
   DATABASE_CONNECTION_TIMEOUT_MS: z.coerce.number().int().min(250).max(60000).default(5000),
   DATABASE_IDLE_TIMEOUT_MS: z.coerce.number().int().min(1000).max(300000).default(10000),
   DATABASE_STATEMENT_TIMEOUT_MS: z.coerce.number().int().min(250).max(60000).default(5000),
+  BETTER_AUTH_SECRET: z.string().optional(),
+  BETTER_AUTH_URL: z.string().optional(),
+  AUTH_TRUSTED_ORIGINS: z.string().optional(),
 });
 
 export interface ServerEnv {
@@ -30,9 +33,99 @@ export interface ServerEnv {
   DATABASE_CONNECTION_TIMEOUT_MS: number;
   DATABASE_IDLE_TIMEOUT_MS: number;
   DATABASE_STATEMENT_TIMEOUT_MS: number;
+  BETTER_AUTH_SECRET: string | undefined;
+  BETTER_AUTH_URL: string | undefined;
+  AUTH_TRUSTED_ORIGINS: string[];
 }
 
 let cachedEnv: ServerEnv | null = null;
+
+function validateOriginUrl(
+  rawUrl: string,
+  profile: AppRuntimeProfile,
+  label: string = "origin"
+): URL {
+  if (rawUrl.includes("*")) {
+    throw new Error("Configuration error: Wildcard origins are not permitted.");
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error(`Configuration error: ${label} must be a valid absolute URL.`);
+  }
+
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(`Configuration error: ${label} must use http or https protocol.`);
+  }
+
+  if (parsed.username || parsed.password) {
+    throw new Error(`Configuration error: ${label} must not contain credentials.`);
+  }
+
+  if (parsed.search || parsed.searchParams.size > 0) {
+    throw new Error(`Configuration error: ${label} must not contain query parameters.`);
+  }
+
+  if (parsed.hash) {
+    throw new Error(`Configuration error: ${label} must not contain a URL fragment.`);
+  }
+
+  if (parsed.pathname !== "" && parsed.pathname !== "/") {
+    throw new Error(`Configuration error: ${label} must not contain a sub-path.`);
+  }
+
+  if (profile === "production") {
+    if (parsed.protocol !== "https:") {
+      throw new Error(`Configuration error: ${label} must use HTTPS in production.`);
+    }
+    const host = parsed.hostname.toLowerCase();
+    if (host === "localhost" || host === "127.0.0.1" || host === "::1" || host.endsWith(".local")) {
+      throw new Error(`Configuration error: ${label} cannot use localhost in production.`);
+    }
+  } else {
+    if (parsed.protocol === "http:") {
+      const host = parsed.hostname.toLowerCase();
+      if (host !== "localhost" && host !== "127.0.0.1" && host !== "::1") {
+        throw new Error(
+          `Configuration error: HTTP ${label} is only permitted on localhost outside production.`
+        );
+      }
+    }
+  }
+
+  return parsed;
+}
+
+function validateAuthUrl(rawUrl: string, profile: AppRuntimeProfile): URL {
+  return validateOriginUrl(rawUrl, profile, "BETTER_AUTH_URL");
+}
+
+function validateAuthSecret(secret: string, profile: AppRuntimeProfile): void {
+  if (secret.length < 32) {
+    throw new Error("Configuration error: BETTER_AUTH_SECRET must be at least 32 characters.");
+  }
+
+  // Ensure reasonable entropy: not repetitive single characters
+  const uniqueChars = new Set(secret);
+  if (uniqueChars.size < 8) {
+    throw new Error("Configuration error: BETTER_AUTH_SECRET must have sufficient entropy.");
+  }
+
+  if (profile === "production") {
+    const lower = secret.toLowerCase();
+    if (
+      lower.includes("example") ||
+      lower.includes("placeholder") ||
+      lower.includes("test-secret")
+    ) {
+      throw new Error(
+        "Configuration error: BETTER_AUTH_SECRET contains non-production placeholder value."
+      );
+    }
+  }
+}
 
 export function validateServerEnv(
   source: Record<string, string | undefined> = process.env
@@ -67,6 +160,49 @@ export function validateServerEnv(
     );
   }
 
+  // Rule 3: Auth environment requirements when backend is postgres
+  let validatedAuthUrl: string | undefined;
+  let trustedOrigins: string[] = [];
+
+  if (data.APP_DATA_BACKEND === "postgres") {
+    if (!data.BETTER_AUTH_SECRET || !data.BETTER_AUTH_SECRET.trim()) {
+      throw new Error(
+        "Configuration error: BETTER_AUTH_SECRET is required when using postgres backend."
+      );
+    }
+    validateAuthSecret(data.BETTER_AUTH_SECRET.trim(), data.APP_RUNTIME_PROFILE);
+
+    if (!data.BETTER_AUTH_URL || !data.BETTER_AUTH_URL.trim()) {
+      throw new Error(
+        "Configuration error: BETTER_AUTH_URL is required when using postgres backend."
+      );
+    }
+    const parsedUrl = validateAuthUrl(data.BETTER_AUTH_URL.trim(), data.APP_RUNTIME_PROFILE);
+    validatedAuthUrl = parsedUrl.origin;
+    trustedOrigins.push(parsedUrl.origin);
+  } else if (data.BETTER_AUTH_URL && data.BETTER_AUTH_URL.trim()) {
+    // If provided in showcase/demo, still validate format safely
+    const parsedUrl = validateAuthUrl(data.BETTER_AUTH_URL.trim(), data.APP_RUNTIME_PROFILE);
+    validatedAuthUrl = parsedUrl.origin;
+    trustedOrigins.push(parsedUrl.origin);
+    if (data.BETTER_AUTH_SECRET && data.BETTER_AUTH_SECRET.trim()) {
+      validateAuthSecret(data.BETTER_AUTH_SECRET.trim(), data.APP_RUNTIME_PROFILE);
+    }
+  }
+
+  // Parse any additional trusted origins
+  if (data.AUTH_TRUSTED_ORIGINS && data.AUTH_TRUSTED_ORIGINS.trim()) {
+    const split = data.AUTH_TRUSTED_ORIGINS.split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    for (const originStr of split) {
+      const parsedOrigin = validateOriginUrl(originStr, data.APP_RUNTIME_PROFILE, "Trusted origin");
+      if (!trustedOrigins.includes(parsedOrigin.origin)) {
+        trustedOrigins.push(parsedOrigin.origin);
+      }
+    }
+  }
+
   return {
     APP_RUNTIME_PROFILE: data.APP_RUNTIME_PROFILE,
     APP_DATA_BACKEND: data.APP_DATA_BACKEND,
@@ -76,6 +212,9 @@ export function validateServerEnv(
     DATABASE_CONNECTION_TIMEOUT_MS: data.DATABASE_CONNECTION_TIMEOUT_MS,
     DATABASE_IDLE_TIMEOUT_MS: data.DATABASE_IDLE_TIMEOUT_MS,
     DATABASE_STATEMENT_TIMEOUT_MS: data.DATABASE_STATEMENT_TIMEOUT_MS,
+    BETTER_AUTH_SECRET: data.BETTER_AUTH_SECRET?.trim(),
+    BETTER_AUTH_URL: validatedAuthUrl,
+    AUTH_TRUSTED_ORIGINS: trustedOrigins,
   };
 }
 
