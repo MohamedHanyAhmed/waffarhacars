@@ -358,7 +358,35 @@ export async function requestOtpChallenge(
         }
       }
 
-      // 2. Compare-and-set promote PENDING to ACTIVE
+      // 2. Confirm ownership of PENDING challenge inside transaction
+      const pendingRecord = await tx.otpChallenge.findFirst({
+        where: {
+          id: prep.pendingId,
+          dispatchId: prep.dispatchId,
+          status: OtpChallengeStatus.PENDING,
+        },
+      });
+
+      if (!pendingRecord) {
+        // Ownership lost: do not supersede existing ACTIVE challenge
+        return {
+          success: false,
+          error: "DISPATCH_LOST_RACE",
+        };
+      }
+
+      // 3. Ownership confirmed: now supersede existing ACTIVE challenge to free unique constraint
+      if (prep.previousActiveId) {
+        await tx.otpChallenge.updateMany({
+          where: { id: prep.previousActiveId, status: OtpChallengeStatus.ACTIVE },
+          data: {
+            status: OtpChallengeStatus.SUPERSEDED,
+            updatedAt: new Date(),
+          },
+        });
+      }
+
+      // 4. Compare-and-set promote PENDING to ACTIVE
       const cas = await tx.otpChallenge.updateMany({
         where: {
           id: prep.pendingId,
@@ -377,17 +405,6 @@ export async function requestOtpChallenge(
           success: false,
           error: "DISPATCH_LOST_RACE",
         };
-      }
-
-      // 3. Do not supersede existing ACTIVE challenge until ownership of PENDING is confirmed inside the same locked transaction
-      if (prep.previousActiveId) {
-        await tx.otpChallenge.updateMany({
-          where: { id: prep.previousActiveId, status: OtpChallengeStatus.ACTIVE },
-          data: {
-            status: OtpChallengeStatus.SUPERSEDED,
-            updatedAt: new Date(),
-          },
-        });
       }
 
       return {
