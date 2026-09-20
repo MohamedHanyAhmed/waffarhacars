@@ -9,7 +9,10 @@ export const OTP_COOLDOWN_SECONDS = 60;
 export const OTP_MAX_ATTEMPTS = 3;
 export const OTP_MAX_SENDS = 5;
 export const OTP_LOCKOUT_SECONDS = 900; // 15 minutes bounded lockout
-export const OTP_DISPATCH_TIMEOUT_MS = 8000; // 8 seconds dispatch timeout
+export const OTP_DISPATCH_TIMEOUT_MS =
+  typeof process !== "undefined" && process.env.OTP_DISPATCH_TIMEOUT_MS
+    ? Number(process.env.OTP_DISPATCH_TIMEOUT_MS)
+    : 8000; // 8 seconds default dispatch timeout
 
 export type RequestOtpResult =
   | { success: true; cooldownSeconds: number }
@@ -31,8 +34,10 @@ export type VerifyOtpResult =
  * Computes HMAC-SHA-256 digest of an OTP code using dedicated OTP pepper secret.
  */
 export function computeCodeHash(code: string, secret?: string): string {
-  const pepper =
-    secret || getServerEnv().OTP_PEPPER_SECRET || "default_pepper_fallback_min_32_chars_12345";
+  const pepper = secret || getServerEnv().OTP_PEPPER_SECRET;
+  if (!pepper) {
+    throw new Error("Configuration error: OTP_PEPPER_SECRET is required.");
+  }
   return crypto.createHmac("sha256", pepper).update(`otp-code:v1\0${code}`).digest("hex");
 }
 
@@ -40,8 +45,10 @@ export function computeCodeHash(code: string, secret?: string): string {
  * Computes non-reversible HMAC-SHA-256 digest of canonical E.164 phone for indexed lookup.
  */
 export function computePhoneLookupHash(canonicalE164: string, secret?: string): string {
-  const key =
-    secret || getServerEnv().PHONE_LOOKUP_HMAC_KEY || "default_lookup_fallback_min_32_chars_12345";
+  const key = secret || getServerEnv().PHONE_LOOKUP_HMAC_KEY;
+  if (!key) {
+    throw new Error("Configuration error: PHONE_LOOKUP_HMAC_KEY is required.");
+  }
   return crypto.createHmac("sha256", key).update(`phone-lookup:v1\0${canonicalE164}`).digest("hex");
 }
 
@@ -49,8 +56,10 @@ export function computePhoneLookupHash(canonicalE164: string, secret?: string): 
  * Generates deterministic placeholder email address with reserved .invalid domain (RFC 2606).
  */
 export function generatePlaceholderEmail(canonicalE164: string, secret?: string): string {
-  const key =
-    secret || getServerEnv().PHONE_ALIAS_HMAC_KEY || "default_alias_fallback_min_32_chars_12345";
+  const key = secret || getServerEnv().PHONE_ALIAS_HMAC_KEY;
+  if (!key) {
+    throw new Error("Configuration error: PHONE_ALIAS_HMAC_KEY is required.");
+  }
   const digest = crypto
     .createHmac("sha256", key)
     .update(`phone-alias:v1\0${canonicalE164}`)

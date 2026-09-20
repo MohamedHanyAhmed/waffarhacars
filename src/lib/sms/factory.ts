@@ -16,6 +16,9 @@ let testOverrideAdapter: SmsAdapter | null = null;
  */
 export function getSmsAdapter(): SmsAdapter {
   if (testOverrideAdapter) {
+    if (process.env.APP_RUNTIME_PROFILE === "production" || process.env.NODE_ENV === "production") {
+      throw new Error("Security violation: Test SMS adapter override is prohibited in production.");
+    }
     return testOverrideAdapter;
   }
 

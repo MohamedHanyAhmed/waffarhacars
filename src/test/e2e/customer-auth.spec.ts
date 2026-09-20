@@ -137,4 +137,60 @@ test.describe("Customer Mobile Phone OTP Authentication Flow", () => {
     await expect(page.getByRole("heading", { name: "تسجيل دخول العملاء" })).toBeVisible();
     await expect(page.locator("[data-testid='phone-input']")).toHaveValue("01012345678");
   });
+
+  test("3. Open redirect prevention: rejects untrusted external returnUrl and redirects to fallback root", async ({
+    page,
+  }) => {
+    await page.route("**/api/v1/auth/phone/request", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ accepted: true }),
+      });
+    });
+
+    await page.route("**/api/v1/auth/phone/verify", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        headers: {
+          "Set-Cookie":
+            "better-auth.session_token=mock-session-token; Path=/; HttpOnly; SameSite=Lax",
+        },
+        body: JSON.stringify({
+          authenticated: true,
+          isNewCustomer: false,
+        }),
+      });
+    });
+
+    // Navigate to login with malicious external returnUrl
+    await page.goto("/auth/login?returnUrl=https://evil.example.com/steal");
+
+    const phoneInput = page.locator("[data-testid='phone-input']");
+    await phoneInput.fill("01012345678");
+    await page.click("[data-testid='send-otp-button']");
+
+    await expect(page.getByRole("heading", { name: "Enter Verification Code" })).toBeVisible();
+
+    // Paste valid code
+    await page.locator("[data-testid='otp-box-0']").focus();
+    await page.evaluate(() => {
+      const input = document.querySelector("[data-testid='otp-box-0']") as HTMLInputElement;
+      const event = new ClipboardEvent("paste", {
+        clipboardData: new DataTransfer(),
+        bubbles: true,
+      });
+      event.clipboardData?.setData("text", "123456");
+      input?.dispatchEvent(event);
+    });
+
+    await page.click("[data-testid='verify-otp-button']");
+    await expect(page.locator("[data-testid='auth-success-message']")).toBeVisible();
+
+    // Verify redirected URL is safe root "/" and NEVER navigated to external evil.example.com
+    await page.waitForURL((url) => !url.pathname.includes("/auth/login"), { timeout: 5000 });
+    expect(page.url()).not.toContain("evil.example.com");
+    expect(new URL(page.url()).pathname).toBe("/");
+  });
 });

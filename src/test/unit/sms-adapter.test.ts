@@ -49,12 +49,15 @@ describe("SMS Provider Abstraction Suite", () => {
     process.env.DATABASE_URL = "postgresql://test:test@localhost:5432/db";
     process.env.BETTER_AUTH_SECRET = "prod-secret-at-least-32-chars-long-with-entropy-123";
     process.env.BETTER_AUTH_URL = "https://waffarhacars.com";
+    process.env.OTP_PEPPER_SECRET = "prod-pepper-at-least-32-chars-long-entropy-123";
+    process.env.PHONE_ALIAS_HMAC_KEY = "prod-alias-at-least-32-chars-long-entropy-123";
+    process.env.PHONE_LOOKUP_HMAC_KEY = "prod-lookup-at-least-32-chars-long-entropy-123";
     process.env.OTP_SMS_PROVIDER = "test";
 
     expect(() => {
       resetServerEnvCache();
       getSmsAdapter();
-    }).toThrow(/Production runtime profile cannot use test or dev_capture SMS provider/);
+    }).toThrow(/Production runtime requires an active, implemented SMS aggregator/);
 
     process.env = originalEnv;
     resetServerEnvCache();

@@ -32,6 +32,15 @@ describe("Redirect URL Sanitization (Open Redirect Prevention)", () => {
     expect(sanitizeReturnUrl("data:text/html,<script>alert(1)</script>")).toBe("/");
   });
 
+  it("rejects encoded and double-encoded protocol-relative and scheme bypass attempts", () => {
+    expect(sanitizeReturnUrl("/%2f%2fevil.example.com")).toBe("/");
+    expect(sanitizeReturnUrl("/%5c%5cevil.example.com")).toBe("/");
+    expect(sanitizeReturnUrl("/%252f%252fevil.example.com")).toBe("/");
+    expect(sanitizeReturnUrl("/%2f\\evil.example.com")).toBe("/");
+    expect(sanitizeReturnUrl("/javascript%3aalert(1)")).toBe("/");
+    expect(sanitizeReturnUrl("/%E0%A4%A")).toBe("/");
+  });
+
   it("rejects control characters, newlines, and NUL bytes", () => {
     expect(sanitizeReturnUrl("/\r\nevil")).toBe("/");
     expect(sanitizeReturnUrl("/test\0path")).toBe("/");

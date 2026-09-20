@@ -104,6 +104,10 @@ jobs:
           DATABASE_DIRECT_URL: postgresql://test_user:test_password@localhost:5432/waffarhacars_test
           BETTER_AUTH_SECRET: ci-non-production-test-secret-at-least-32-chars-long
           BETTER_AUTH_URL: http://localhost:3000
+          OTP_PEPPER_SECRET: ci-otp-pepper-test-secret-at-least-32-chars-long
+          PHONE_ALIAS_HMAC_KEY: ci-phone-alias-test-secret-at-least-32-chars-long
+          PHONE_LOOKUP_HMAC_KEY: ci-phone-lookup-test-secret-at-least-32-chars-long
+          OTP_SMS_PROVIDER: test
 
       - name: Production Build
         run: npm run build

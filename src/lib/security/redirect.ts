@@ -31,6 +31,33 @@ export function sanitizeReturnUrl(raw: string | null | undefined, fallback = "/"
     return fallback;
   }
 
+  // Decode URI components to catch encoded protocol-relative or scheme attempts (e.g. /%2f%2fevil.com, /%5c%5cevil.com)
+  try {
+    let decoded = decodeURIComponent(trimmed);
+    if (decoded.includes("%")) {
+      try {
+        decoded = decodeURIComponent(decoded);
+      } catch {
+        return fallback;
+      }
+    }
+    const stripped = decoded.replace(/^[/\\]+/, "");
+    const pathPart = stripped.split(/[?#]/)[0];
+    if (
+      decoded.startsWith("//") ||
+      decoded.startsWith("/\\") ||
+      decoded.startsWith("\\\\") ||
+      /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(decoded) ||
+      /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(pathPart) ||
+      /[\r\n\0\t\x00-\x1f]/.test(decoded)
+    ) {
+      return fallback;
+    }
+  } catch {
+    // Malformed URI encoding
+    return fallback;
+  }
+
   // Parse as relative against a dummy localhost base
   try {
     const dummyBase = "http://localhost";

@@ -93,6 +93,10 @@ describe("Real PostgreSQL 17 Better Auth Database Session Integration Suite", ()
     process.env.DATABASE_DIRECT_URL = DEFAULT_TEST_DB_URL;
     process.env.BETTER_AUTH_SECRET = TEST_SECRET;
     process.env.BETTER_AUTH_URL = "http://localhost:3000";
+    process.env.OTP_PEPPER_SECRET = "test-pepper-secret-at-least-32-characters-long-12345";
+    process.env.PHONE_ALIAS_HMAC_KEY = "test-alias-key-at-least-32-characters-long-12345";
+    process.env.PHONE_LOOKUP_HMAC_KEY = "test-lookup-key-at-least-32-characters-long-12345";
+    process.env.OTP_SMS_PROVIDER = "test";
 
     testAuth = createTestAuth({
       baseURL: "http://localhost:3000",
