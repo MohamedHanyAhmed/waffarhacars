@@ -25,7 +25,7 @@ const RawServerEnvSchema = z.object({
   OTP_PEPPER_SECRET: z.string().optional(),
   PHONE_ALIAS_HMAC_KEY: z.string().optional(),
   PHONE_LOOKUP_HMAC_KEY: z.string().optional(),
-  OTP_SMS_PROVIDER: z.enum(["test", "dev_capture", "egyptian_gateway", "mock_gateway"]).optional(),
+  OTP_SMS_PROVIDER: z.enum(["test", "dev_capture", "egyptian_gateway"]).optional(),
   TRUSTED_PROXY_HOPS: z.coerce.number().int().min(0).max(10).default(0),
 });
 
@@ -44,7 +44,7 @@ export interface ServerEnv {
   OTP_PEPPER_SECRET: string | undefined;
   PHONE_ALIAS_HMAC_KEY: string | undefined;
   PHONE_LOOKUP_HMAC_KEY: string | undefined;
-  OTP_SMS_PROVIDER: "test" | "dev_capture" | "egyptian_gateway" | "mock_gateway";
+  OTP_SMS_PROVIDER: "test" | "dev_capture" | "egyptian_gateway";
   TRUSTED_PROXY_HOPS: number;
 }
 
@@ -223,7 +223,6 @@ export function validateServerEnv(
     if (
       smsProvider === "test" ||
       smsProvider === "dev_capture" ||
-      smsProvider === "mock_gateway" ||
       smsProvider === "egyptian_gateway"
     ) {
       throw new Error(

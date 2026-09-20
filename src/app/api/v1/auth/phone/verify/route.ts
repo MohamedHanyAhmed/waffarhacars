@@ -4,7 +4,7 @@ import { getAuth } from "@/lib/auth";
 import { getPrisma } from "@/lib/db";
 import { getServerEnv } from "@/lib/env";
 import { normalizeEgyptianPhone } from "@/lib/phone";
-import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { checkRateLimit, getClientIp, hashIpAddress } from "@/lib/rate-limit";
 import { computePhoneLookupHash } from "@/lib/otp/challenge-service";
 import { validateRequestOrigin } from "@/lib/security/origin";
 
@@ -136,9 +136,10 @@ export async function POST(req: NextRequest): Promise<Response> {
   const phoneLookupHash = computePhoneLookupHash(canonicalE164);
   const candidateCode = parsedBody.data.code;
   const clientIp = getClientIp(req);
+  const hashedIp = hashIpAddress(clientIp);
 
   // 5. Rate limiting: verification attempts per IP
-  const ipLimit = await checkRateLimit(`rl:ip:verify:${clientIp}`, 20, 900);
+  const ipLimit = await checkRateLimit(`rl:ip:verify:${hashedIp}`, 20, 900);
   if (!ipLimit.allowed) {
     return Response.json(
       {

@@ -1,27 +1,27 @@
 import type { SmsAdapter, SmsSendInput, SmsSendResult } from "./types";
 
 /**
- * Placeholder stub for future Egyptian SMS Gateway adapter
- * (Unifonic / CEQUENS / VictoryLink / Infobip).
+ * Placeholder contract stub for future Egyptian SMS Gateway adapter
+ * (e.g. Unifonic, CEQUENS, VictoryLink, Infobip).
  *
- * Integration of a commercial paid SMS gateway is strictly deferred post-ADR 14.
+ * NOTE: Production customer OTP deployment remains intentionally unavailable
+ * until a real commercial SMS aggregator adapter is selected and integrated.
+ * This stub strictly fails closed in all environments.
  */
 export class EgyptianSmsGatewayStub implements SmsAdapter {
   readonly providerId = "egyptian_gateway";
 
-  constructor(private readonly apiKey?: string) {}
-
   async send(input: SmsSendInput): Promise<SmsSendResult> {
-    if (!this.apiKey) {
+    if (input.signal?.aborted) {
       return {
         success: false,
         idempotencyKey: input.idempotencyKey,
         status: "failed",
-        errorCategory: "CONFIGURATION_ERROR",
+        errorCategory: "GATEWAY_TIMEOUT",
       };
     }
 
-    // Commercial gateway integration deferred
+    // Commercial aggregator integration deferred post-ADR 14
     return {
       success: false,
       idempotencyKey: input.idempotencyKey,

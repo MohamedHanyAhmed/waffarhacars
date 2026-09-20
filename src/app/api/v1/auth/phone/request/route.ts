@@ -2,8 +2,8 @@ import { NextRequest } from "next/server";
 import { z } from "zod";
 import { getServerEnv } from "@/lib/env";
 import { normalizeEgyptianPhone } from "@/lib/phone";
-import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
-import { requestOtpChallenge, computePhoneLookupHash } from "@/lib/otp/challenge-service";
+import { checkRateLimit, getClientIp, hashIpAddress } from "@/lib/rate-limit";
+import { computePhoneLookupHash, requestOtpChallenge } from "@/lib/otp/challenge-service";
 import { validateRequestOrigin } from "@/lib/security/origin";
 
 const RequestBodySchema = z.object({
@@ -132,9 +132,10 @@ export async function POST(req: NextRequest): Promise<Response> {
   const canonicalE164 = norm.canonicalE164;
   const phoneLookupHash = computePhoneLookupHash(canonicalE164);
   const clientIp = getClientIp(req);
+  const hashedIp = hashIpAddress(clientIp);
 
   // 5. Rate limiting: IP burst limit (max 20 requests per 15 min)
-  const ipLimit = await checkRateLimit(`rl:ip:req:${clientIp}`, 20, 900);
+  const ipLimit = await checkRateLimit(`rl:ip:req:${hashedIp}`, 20, 900);
   if (!ipLimit.allowed) {
     return Response.json(
       {
@@ -211,24 +212,6 @@ export async function POST(req: NextRequest): Promise<Response> {
             "Content-Type": "application/problem+json",
             "Cache-Control": "no-store",
             "Retry-After": String(challengeResult.retryAfterSeconds),
-          },
-        }
-      );
-    }
-
-    if (challengeResult.error === "SEND_LIMIT_EXCEEDED") {
-      return Response.json(
-        {
-          type: "https://waffarhacars.com/errors/rate-limit-exceeded",
-          title: "Too Many Requests",
-          status: 429,
-          detail: "Maximum verification send limit reached. Please try again later.",
-        },
-        {
-          status: 429,
-          headers: {
-            "Content-Type": "application/problem+json",
-            "Cache-Control": "no-store",
           },
         }
       );

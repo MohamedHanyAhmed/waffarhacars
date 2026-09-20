@@ -10,27 +10,19 @@ export interface OriginValidationResult {
 /**
  * Validates request Origin and Referer headers against configured trusted origins.
  * State-changing POST/PUT/DELETE requests MUST provide an approved Origin or Referer.
+ *
+ * Security Guarantee:
+ * - Allowlist is built directly from env.AUTH_TRUSTED_ORIGINS (which contains BETTER_AUTH_URL
+ *   plus any configured additional origins).
+ * - RFC 7807 error details NEVER reflect attacker-controlled Origin/Referer headers.
  */
 export function validateRequestOrigin(req: NextRequest): OriginValidationResult {
   const env = getServerEnv();
-  const configuredBaseUrl = env.BETTER_AUTH_URL;
 
-  const allowedOrigins: string[] = [];
-  if (configuredBaseUrl) {
-    try {
-      const baseOrigin = new URL(configuredBaseUrl).origin;
-      allowedOrigins.push(baseOrigin);
-    } catch {
-      return { valid: false, reason: "Server misconfiguration: invalid BETTER_AUTH_URL" };
-    }
-  } else if (env.APP_RUNTIME_PROFILE === "production") {
-    return {
-      valid: false,
-      reason: "Server misconfiguration: missing BETTER_AUTH_URL in production",
-    };
-  }
+  // Allowlist sourced from centrally validated AUTH_TRUSTED_ORIGINS
+  const allowedOrigins: string[] = [...env.AUTH_TRUSTED_ORIGINS];
 
-  // Add localhost/127.0.0.1 variants if running in non-production
+  // In non-production profiles only, include local loopback origins
   if (env.APP_RUNTIME_PROFILE !== "production") {
     if (!allowedOrigins.includes("http://localhost:3000")) {
       allowedOrigins.push("http://localhost:3000");
@@ -50,7 +42,7 @@ export function validateRequestOrigin(req: NextRequest): OriginValidationResult 
       if (allowedOrigins.includes(parsed)) {
         return { valid: true, matchedOrigin: parsed };
       }
-      return { valid: false, reason: `Untrusted origin: ${originHeader}` };
+      return { valid: false, reason: "Untrusted request origin" };
     } catch {
       return { valid: false, reason: "Malformed origin header" };
     }
@@ -63,7 +55,7 @@ export function validateRequestOrigin(req: NextRequest): OriginValidationResult 
       if (allowedOrigins.includes(parsed)) {
         return { valid: true, matchedOrigin: parsed };
       }
-      return { valid: false, reason: `Untrusted referer: ${refererHeader}` };
+      return { valid: false, reason: "Untrusted request referer" };
     } catch {
       return { valid: false, reason: "Malformed referer header" };
     }

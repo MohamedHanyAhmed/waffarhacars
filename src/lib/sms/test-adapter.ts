@@ -18,15 +18,62 @@ export class TestSmsAdapter implements SmsAdapter {
   private simulatedFailureCategory: SmsErrorCategory | null = null;
   private simulatedTimeout = false;
   private simulatedException: Error | null = null;
+  private isDeferred = false;
+  private deferredPromise: {
+    resolve: (val: SmsSendResult) => void;
+    reject: (err: Error) => void;
+  } | null = null;
+  private lastSendAborted = false;
 
   async send(input: SmsSendInput): Promise<SmsSendResult> {
+    this.lastSendAborted = false;
+
+    if (input.signal?.aborted) {
+      this.lastSendAborted = true;
+      return {
+        success: false,
+        idempotencyKey: input.idempotencyKey,
+        status: "failed",
+        errorCategory: "GATEWAY_TIMEOUT",
+      };
+    }
+
+    if (input.signal) {
+      input.signal.addEventListener(
+        "abort",
+        () => {
+          this.lastSendAborted = true;
+        },
+        { once: true }
+      );
+    }
+
     if (this.simulatedException) {
       throw this.simulatedException;
     }
 
+    if (this.isDeferred) {
+      return new Promise<SmsSendResult>((resolve, reject) => {
+        this.deferredPromise = { resolve, reject };
+      });
+    }
+
     if (this.simulatedTimeout) {
-      // Delay longer than default timeout
-      await new Promise((resolve) => setTimeout(resolve, (input.timeoutMs ?? 8000) + 100));
+      // Delay longer than default timeout, but respect AbortSignal
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, (input.timeoutMs ?? 8000) + 100);
+        if (input.signal) {
+          input.signal.addEventListener(
+            "abort",
+            () => {
+              clearTimeout(timer);
+              resolve();
+            },
+            { once: true }
+          );
+        }
+      });
+
       return {
         success: false,
         idempotencyKey: input.idempotencyKey,
@@ -88,10 +135,44 @@ export class TestSmsAdapter implements SmsAdapter {
     this.simulatedException = err;
   }
 
+  setDeferred(enabled: boolean): void {
+    this.isDeferred = enabled;
+    if (!enabled) {
+      this.deferredPromise = null;
+    }
+  }
+
+  resolveDeferred(result?: Partial<SmsSendResult>): void {
+    if (this.deferredPromise) {
+      const defaultResult: SmsSendResult = {
+        success: true,
+        idempotencyKey: "deferred-key",
+        status: "delivered",
+        ...result,
+      };
+      this.deferredPromise.resolve(defaultResult);
+      this.deferredPromise = null;
+    }
+  }
+
+  rejectDeferred(err: Error): void {
+    if (this.deferredPromise) {
+      this.deferredPromise.reject(err);
+      this.deferredPromise = null;
+    }
+  }
+
+  wasLastSendAborted(): boolean {
+    return this.lastSendAborted;
+  }
+
   clear(): void {
     this.captured = [];
     this.simulatedFailureCategory = null;
     this.simulatedTimeout = false;
     this.simulatedException = null;
+    this.isDeferred = false;
+    this.deferredPromise = null;
+    this.lastSendAborted = false;
   }
 }

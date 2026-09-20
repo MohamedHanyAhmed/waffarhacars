@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 
-test.describe("Customer Mobile Phone OTP Authentication Flow", () => {
+test.describe("Customer Mobile Phone OTP Authentication UI Contract Suite", () => {
   test("1. English LTR: Validates Egyptian phone, requests OTP, enters 6-digit code, and authenticates", async ({
     page,
   }) => {

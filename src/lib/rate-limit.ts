@@ -1,3 +1,5 @@
+import { isIP } from "node:net";
+import crypto from "node:crypto";
 import { NextRequest } from "next/server";
 import { getPrisma } from "./db";
 import { getServerEnv } from "./env";
@@ -7,37 +9,77 @@ export interface RateLimitResult {
   retryAfterSeconds: number;
 }
 
+const MAX_FORWARDED_HEADER_LENGTH = 512;
+const MAX_FORWARDED_ENTRIES = 20;
+
 /**
  * Resolves the client IP address safely according to TRUSTED_PROXY_HOPS.
- * Never naively trusts X-Forwarded-For when TRUSTED_PROXY_HOPS is 0 (direct/untrusted).
+ *
+ * Security Invariants:
+ * - When TRUSTED_PROXY_HOPS === 0 (direct/untrusted ingress):
+ *   Both X-Forwarded-For and X-Real-IP are strictly IGNORED and NEVER returned.
+ *   Returns safe fallback "127.0.0.1".
+ * - When TRUSTED_PROXY_HOPS > 0:
+ *   Bounds header length (<= 512) and entry count (<= 20).
+ *   Picks the IP at `entries.length - trustedHops` from the right boundary.
+ *   Validates address strictly with node:net `isIP`.
+ *   Falls back to "127.0.0.1" if unparseable or invalid.
  */
 export function getClientIp(req: NextRequest): string {
   const env = getServerEnv();
   const trustedHops = env.TRUSTED_PROXY_HOPS;
 
-  if (trustedHops > 0) {
-    const forwarded = req.headers.get("x-forwarded-for");
-    if (forwarded) {
-      const parts = forwarded
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean);
-      if (parts.length >= trustedHops) {
-        // Pick the IP at the trusted hop boundary from the right
-        return parts[parts.length - trustedHops];
-      }
-      return parts[0] ?? "127.0.0.1";
-    }
-    const realIp = req.headers.get("x-real-ip");
-    if (realIp) return realIp.trim();
+  // In untrusted/direct mode, strictly ignore both X-Forwarded-For and X-Real-IP
+  if (trustedHops <= 0) {
+    return "127.0.0.1";
   }
 
-  // In direct/untrusted mode, do not trust spoofable X-Forwarded-For header chains.
-  // Fall back to x-real-ip if present or safe fallback 127.0.0.1
+  const forwarded = req.headers.get("x-forwarded-for");
+  if (forwarded) {
+    if (forwarded.length > MAX_FORWARDED_HEADER_LENGTH) {
+      return "127.0.0.1";
+    }
+
+    const parts = forwarded
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    if (parts.length > MAX_FORWARDED_ENTRIES || parts.length === 0) {
+      return "127.0.0.1";
+    }
+
+    const candidate =
+      parts.length >= trustedHops
+        ? parts[parts.length - trustedHops]
+        : parts[0];
+
+    if (candidate && isIP(candidate) !== 0) {
+      return candidate;
+    }
+    return "127.0.0.1";
+  }
+
   const realIp = req.headers.get("x-real-ip");
-  if (realIp) return realIp.trim();
+  if (realIp) {
+    const trimmed = realIp.trim();
+    if (trimmed.length <= 45 && isIP(trimmed) !== 0) {
+      return trimmed;
+    }
+  }
 
   return "127.0.0.1";
+}
+
+/**
+ * Hashes a normalized IP address to produce a safe, fixed-length rate-limit key token.
+ */
+export function hashIpAddress(ip: string): string {
+  return crypto
+    .createHash("sha256")
+    .update(`ip:v1:${ip.trim().toLowerCase()}`)
+    .digest("hex")
+    .slice(0, 32);
 }
 
 /**

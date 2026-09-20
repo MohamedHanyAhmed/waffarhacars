@@ -7,7 +7,6 @@ import { OtpPurpose, OtpChallengeStatus, type OtpChallenge } from "@/generated/p
 export const OTP_VALIDITY_SECONDS = 180;
 export const OTP_COOLDOWN_SECONDS = 60;
 export const OTP_MAX_ATTEMPTS = 3;
-export const OTP_MAX_SENDS = 5;
 export const OTP_LOCKOUT_SECONDS = 900; // 15 minutes bounded lockout
 export const OTP_DISPATCH_TIMEOUT_MS =
   typeof process !== "undefined" && process.env.OTP_DISPATCH_TIMEOUT_MS
@@ -18,7 +17,6 @@ export type RequestOtpResult =
   | { success: true; cooldownSeconds: number }
   | { success: false; error: "COOLDOWN_ACTIVE"; retryAfterSeconds: number }
   | { success: false; error: "PHONE_LOCKED"; retryAfterSeconds: number }
-  | { success: false; error: "SEND_LIMIT_EXCEEDED" }
   | { success: false; error: "SMS_DELIVERY_FAILED"; errorCategory?: string };
 
 export type VerifyOtpResult =
@@ -29,6 +27,17 @@ export type VerifyOtpResult =
       remainingAttempts?: number;
       lockoutSeconds?: number;
     };
+
+/**
+ * Acquires a 64-bit transaction-scoped advisory lock for the given phone lookup hash.
+ * Uses hashtextextended(..., 0) to produce a 64-bit bigint, preventing 32-bit hashtext collisions.
+ */
+export async function acquirePhoneOtpAdvisoryLock(
+  tx: { $executeRaw: (strings: TemplateStringsArray, ...values: unknown[]) => Promise<unknown> },
+  phoneLookupHash: string
+): Promise<void> {
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`waffarhacars_otp:${phoneLookupHash}`}, 0));`;
+}
 
 /**
  * Computes HMAC-SHA-256 digest of an OTP code using dedicated OTP pepper secret.
@@ -79,14 +88,15 @@ export function generateOtpCode(): string {
  * Requests and dispatches an OTP challenge synchronously.
  *
  * Concurrency & Safety Guarantees:
- * 1. Acquires a PostgreSQL transaction-scoped advisory lock on hashtext('waffarhacars_otp:' || phoneLookupHash).
+ * 1. Acquires a PostgreSQL transaction-scoped 64-bit advisory lock on hashtextextended('waffarhacars_otp:' || phoneLookupHash, 0).
  * 2. Checks for locked challenges (bounded 15m lockout) and active cooldown.
- * 3. Enforces single active challenge per phone and purpose.
- * 4. Preserves failedAttemptCount from previous challenge on resend (NIST compliance).
- * 5. Creates challenge in PENDING state with stable dispatchId.
- * 6. Dispatches SMS synchronously with 8s timeout.
- * 7. If SMS succeeds -> marks challenge ACTIVE. If resend, supersedes previous active challenge.
- * 8. If SMS fails -> marks new challenge DELIVERY_FAILED and preserves previous ACTIVE challenge untouched.
+ * 3. Never mutates the existing ACTIVE challenge during preparation or dispatch.
+ * 4. Verification of the prior ACTIVE challenge remains fully available while replacement send is in flight.
+ * 5. Recovers stale PENDING challenges before creating a new PENDING row.
+ * 6. Dispatches SMS synchronously with AbortSignal, AbortController, and timeout cleanup.
+ * 7. On confirmed delivery -> atomically supersedes previous ACTIVE and promotes PENDING to ACTIVE.
+ * 8. On confirmed failure -> marks PENDING as DELIVERY_FAILED; previous ACTIVE remains untouched.
+ * 9. On timeout/unknown -> marks PENDING as DELIVERY_UNKNOWN; previous ACTIVE remains untouched.
  */
 export async function requestOtpChallenge(
   canonicalE164: string,
@@ -111,8 +121,8 @@ export async function requestOtpChallenge(
       };
 
   const prep = await prisma.$transaction(async (tx): Promise<PreparationResult> => {
-    // 1. Transaction-scoped advisory lock on phone hash
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`waffarhacars_otp:${phoneLookupHash}`}));`;
+    // 1. Transaction-scoped 64-bit advisory lock on phone hash
+    await acquirePhoneOtpAdvisoryLock(tx, phoneLookupHash);
 
     // 2. Check for active lockout
     const lockedRecords = await tx.$queryRaw<OtpChallenge[]>`
@@ -137,27 +147,53 @@ export async function requestOtpChallenge(
       };
     }
 
-    // 3. Transition any expired PENDING or ACTIVE challenges to EXPIRED so they release
-    //    the partial unique index ("phoneLookupHash", "purpose") WHERE "status" IN ('PENDING', 'ACTIVE').
+    // 3. Stale-PENDING recovery: Recover any PENDING challenges whose dispatch lease expired
     await tx.otpChallenge.updateMany({
       where: {
         phoneLookupHash,
         purpose,
-        status: { in: [OtpChallengeStatus.PENDING, OtpChallengeStatus.ACTIVE] },
-        expiresAt: { lte: now },
+        status: OtpChallengeStatus.PENDING,
+        dispatchLeaseExpiresAt: { lte: now },
       },
       data: {
-        status: OtpChallengeStatus.EXPIRED,
+        status: OtpChallengeStatus.DELIVERY_UNKNOWN,
+        dispatchLeaseExpiresAt: null,
         updatedAt: now,
       },
     });
 
-    // 4. Check for existing active/pending challenge (now guaranteed unexpired)
+    // 4. Check for active (in-flight) PENDING challenge
+    const pendingRecords = await tx.$queryRaw<OtpChallenge[]>`
+      SELECT * FROM "otp_challenge"
+      WHERE "phoneLookupHash" = ${phoneLookupHash}
+        AND "purpose" = ${purpose}::"OtpPurpose"
+        AND "status" = ${OtpChallengeStatus.PENDING}::"OtpChallengeStatus"
+        AND ("dispatchLeaseExpiresAt" IS NULL OR "dispatchLeaseExpiresAt" > ${now})
+      LIMIT 1
+      FOR UPDATE
+    `;
+
+    if (pendingRecords.length > 0) {
+      const remainingMs = Math.max(
+        1000,
+        (pendingRecords[0].dispatchLeaseExpiresAt?.getTime() ?? now.getTime() + 5000) - now.getTime()
+      );
+      return {
+        action: "REJECT",
+        result: {
+          success: false,
+          error: "COOLDOWN_ACTIVE",
+          retryAfterSeconds: Math.ceil(remainingMs / 1000),
+        },
+      };
+    }
+
+    // 5. Query existing ACTIVE challenge (separate query from PENDING)
     const activeRecords = await tx.$queryRaw<OtpChallenge[]>`
       SELECT * FROM "otp_challenge"
       WHERE "phoneLookupHash" = ${phoneLookupHash}
         AND "purpose" = ${purpose}::"OtpPurpose"
-        AND "status" IN (${OtpChallengeStatus.PENDING}::"OtpChallengeStatus", ${OtpChallengeStatus.ACTIVE}::"OtpChallengeStatus")
+        AND "status" = ${OtpChallengeStatus.ACTIVE}::"OtpChallengeStatus"
         AND "expiresAt" > ${now}
       ORDER BY "createdAt" DESC
       LIMIT 1
@@ -184,17 +220,6 @@ export async function requestOtpChallenge(
         };
       }
 
-      // Check send limit
-      if (existingActive.sendCount >= OTP_MAX_SENDS) {
-        return {
-          action: "REJECT",
-          result: {
-            success: false,
-            error: "SEND_LIMIT_EXCEEDED",
-          },
-        };
-      }
-
       previousAttemptCount = existingActive.failedAttemptCount;
       sendCount = existingActive.sendCount + 1;
       previousActiveId = existingActive.id;
@@ -208,22 +233,11 @@ export async function requestOtpChallenge(
       .slice(0, 32);
 
     const message = `رمز التحقق الخاص بك في وفّرها كارز هو: ${code}. صالح لمدة 3 دقائق. لا تشاركه مع أحد.`;
+    const dispatchLeaseExpiresAt = new Date(now.getTime() + OTP_DISPATCH_TIMEOUT_MS + 2000);
 
-    // Create PENDING challenge record
-    // If there was an existing active challenge, temporarily set it to SUPERSEDED or keep it active until dispatch succeeds?
-    // Because partial unique index is on ('PENDING', 'ACTIVE'), we cannot have two rows in ('PENDING', 'ACTIVE') simultaneously!
-    // Therefore, if existingActive exists, we set existingActive to 'SUPERSEDED' provisionally.
-    // If dispatch fails, we restore existingActive back to 'ACTIVE'!
-    if (existingActive) {
-      await tx.otpChallenge.update({
-        where: { id: existingActive.id },
-        data: {
-          status: OtpChallengeStatus.SUPERSEDED,
-          updatedAt: now,
-        },
-      });
-    }
-
+    // Create separate PENDING challenge record.
+    // NOTE: The existing ACTIVE challenge is deliberately NOT modified here.
+    // Its verification remains active while SMS dispatch is in-flight.
     const created = await tx.otpChallenge.create({
       data: {
         phoneLookupHash,
@@ -233,7 +247,8 @@ export async function requestOtpChallenge(
         dispatchId,
         expiresAt: new Date(now.getTime() + OTP_VALIDITY_SECONDS * 1000),
         cooldownUntil: new Date(now.getTime() + OTP_COOLDOWN_SECONDS * 1000),
-        failedAttemptCount: previousAttemptCount, // Preserve failure budget across resends!
+        dispatchLeaseExpiresAt,
+        failedAttemptCount: previousAttemptCount, // Preserve failure budget across resends
         sendCount,
       },
     });
@@ -251,48 +266,76 @@ export async function requestOtpChallenge(
     return prep.result;
   }
 
-  // Phase 2: Synchronous SMS Delivery with Timeout
+  // Phase 2: Synchronous SMS Delivery with AbortController, timeout, and signal cancellation
   const adapter = getSmsAdapter();
-  let dispatchSuccess = false;
-  let errorCategory: string | undefined;
+  const abortController = new AbortController();
+  let timeoutHandle: NodeJS.Timeout | undefined;
+  let outcome:
+    | { type: "SUCCESS" }
+    | { type: "FAILURE"; errorCategory?: string }
+    | { type: "UNKNOWN"; errorCategory: "GATEWAY_TIMEOUT" | "NETWORK_ERROR" };
 
   try {
-    const sendResult = await Promise.race([
-      adapter.send({
-        toCanonicalE164: canonicalE164,
-        message: prep.message,
-        idempotencyKey: prep.dispatchId,
-        timeoutMs: OTP_DISPATCH_TIMEOUT_MS,
-      }),
-      new Promise<never>((_, reject) =>
-        setTimeout(
-          () => reject(new Error("SMS Gateway timeout after 8000ms")),
-          OTP_DISPATCH_TIMEOUT_MS
-        )
-      ),
-    ]);
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutHandle = setTimeout(() => {
+        abortController.abort();
+        reject(new Error("SMS Gateway timeout"));
+      }, OTP_DISPATCH_TIMEOUT_MS);
+    });
 
-    dispatchSuccess = Boolean(sendResult && sendResult.success);
-    if (!dispatchSuccess) {
-      errorCategory = sendResult?.errorCategory || "PROVIDER_UNAVAILABLE";
+    const sendPromise = adapter.send({
+      toCanonicalE164: canonicalE164,
+      message: prep.message,
+      idempotencyKey: prep.dispatchId,
+      timeoutMs: OTP_DISPATCH_TIMEOUT_MS,
+      signal: abortController.signal,
+    });
+
+    const sendResult = await Promise.race([sendPromise, timeoutPromise]);
+    if (sendResult && sendResult.success) {
+      outcome = { type: "SUCCESS" };
+    } else {
+      outcome = {
+        type: "FAILURE",
+        errorCategory: sendResult?.errorCategory || "PROVIDER_UNAVAILABLE",
+      };
     }
   } catch (err: unknown) {
-    dispatchSuccess = false;
-    errorCategory = (err as Error)?.message?.includes("timeout")
-      ? "GATEWAY_TIMEOUT"
-      : "NETWORK_ERROR";
+    const isTimeout =
+      abortController.signal.aborted ||
+      ((err as Error)?.message?.toLowerCase().includes("timeout") ?? false);
+    if (isTimeout) {
+      outcome = { type: "UNKNOWN", errorCategory: "GATEWAY_TIMEOUT" };
+    } else {
+      outcome = { type: "UNKNOWN", errorCategory: "NETWORK_ERROR" };
+    }
+  } finally {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
   }
 
-  // Phase 3: Transition state based on synchronous delivery result under advisory lock
+  // Phase 3: Transition state based on synchronous delivery result under 64-bit advisory lock
   return await prisma.$transaction(async (tx): Promise<RequestOtpResult> => {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`waffarhacars_otp:${phoneLookupHash}`}));`;
+    await acquirePhoneOtpAdvisoryLock(tx, phoneLookupHash);
 
-    if (dispatchSuccess) {
-      // Transition PENDING -> ACTIVE
+    if (outcome.type === "SUCCESS") {
+      // Confirmed delivery: atomically supersede old ACTIVE challenge (if still ACTIVE) and activate PENDING
+      if (prep.previousActiveId) {
+        await tx.otpChallenge.updateMany({
+          where: { id: prep.previousActiveId, status: OtpChallengeStatus.ACTIVE },
+          data: {
+            status: OtpChallengeStatus.SUPERSEDED,
+            updatedAt: new Date(),
+          },
+        });
+      }
+
       await tx.otpChallenge.update({
         where: { id: prep.pendingId },
         data: {
           status: OtpChallengeStatus.ACTIVE,
+          dispatchLeaseExpiresAt: null,
           updatedAt: new Date(),
         },
       });
@@ -301,33 +344,42 @@ export async function requestOtpChallenge(
         success: true,
         cooldownSeconds: OTP_COOLDOWN_SECONDS,
       };
-    } else {
-      // Transition PENDING -> DELIVERY_FAILED
+    }
+
+    if (outcome.type === "FAILURE") {
+      // Confirmed provider rejection: mark only PENDING as DELIVERY_FAILED. Previous ACTIVE remains untouched!
       await tx.otpChallenge.update({
         where: { id: prep.pendingId },
         data: {
           status: OtpChallengeStatus.DELIVERY_FAILED,
+          dispatchLeaseExpiresAt: null,
           updatedAt: new Date(),
         },
       });
 
-      // If resend failed, restore the previous challenge back to ACTIVE so the user is not stranded!
-      if (prep.previousActiveId) {
-        await tx.otpChallenge.update({
-          where: { id: prep.previousActiveId },
-          data: {
-            status: OtpChallengeStatus.ACTIVE,
-            updatedAt: new Date(),
-          },
-        });
-      }
-
       return {
         success: false,
         error: "SMS_DELIVERY_FAILED",
-        errorCategory,
+        errorCategory: outcome.errorCategory,
       };
     }
+
+    // Outcome is UNKNOWN (e.g. timeout or network error where provider state cannot be proven)
+    // Mark PENDING as DELIVERY_UNKNOWN. Previous ACTIVE remains untouched!
+    await tx.otpChallenge.update({
+      where: { id: prep.pendingId },
+      data: {
+        status: OtpChallengeStatus.DELIVERY_UNKNOWN,
+        dispatchLeaseExpiresAt: null,
+        updatedAt: new Date(),
+      },
+    });
+
+    return {
+      success: false,
+      error: "SMS_DELIVERY_FAILED",
+      errorCategory: outcome.errorCategory,
+    };
   });
 }
 
@@ -335,7 +387,7 @@ export async function requestOtpChallenge(
  * Atomically verifies and consumes an OTP challenge.
  *
  * Concurrency & Safety Guarantees:
- * 1. Transaction-scoped advisory lock prevents races against simultaneous requests or resends.
+ * 1. 64-bit transaction-scoped advisory lock prevents races against simultaneous requests or resends.
  * 2. SELECT ... FOR UPDATE locks the active challenge row.
  * 3. Timing-safe hash comparison prevents timing side channels.
  * 4. Increments attempt counter on failure; exhausts at 3 attempts and locks for 15 minutes.
@@ -353,8 +405,8 @@ export async function verifyAndConsumeOtpChallenge(
   const now = new Date();
 
   return await prisma.$transaction(async (tx): Promise<VerifyOtpResult> => {
-    // 1. Transaction-scoped advisory lock
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`waffarhacars_otp:${phoneLookupHash}`}));`;
+    // 1. Transaction-scoped 64-bit advisory lock using shared helper
+    await acquirePhoneOtpAdvisoryLock(tx, phoneLookupHash);
 
     // 2. Lock the active challenge row
     const activeChallenges = await tx.$queryRaw<OtpChallenge[]>`
@@ -491,6 +543,7 @@ export async function purgeExpiredAuthRecords(prismaInstance = getPrisma()): Pro
                 OtpChallengeStatus.LOCKED,
                 OtpChallengeStatus.SUPERSEDED,
                 OtpChallengeStatus.DELIVERY_FAILED,
+                OtpChallengeStatus.DELIVERY_UNKNOWN,
               ],
             },
             createdAt: { lte: cutoff },

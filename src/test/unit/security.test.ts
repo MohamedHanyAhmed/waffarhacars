@@ -84,14 +84,27 @@ describe("Centralized Request Origin Validation", () => {
     expect(result.matchedOrigin).toBe("http://localhost:3000");
   });
 
-  it("rejects request with untrusted Origin header", () => {
+  it("rejects request with untrusted Origin header without reflecting untrusted input", () => {
     const req = new NextRequest("http://localhost:3000/api/v1/auth/phone/request", {
       method: "POST",
       headers: { origin: "https://evil.example.com" },
     });
     const result = validateRequestOrigin(req);
     expect(result.valid).toBe(false);
-    expect(result.reason).toContain("Untrusted origin");
+    expect(result.reason).toBe("Untrusted request origin");
+  });
+
+  it("accepts an explicitly configured second trusted origin", () => {
+    process.env.AUTH_TRUSTED_ORIGINS = "https://partner.waffarhacars.com";
+    resetServerEnvCache();
+
+    const req = new NextRequest("http://localhost:3000/api/v1/auth/phone/request", {
+      method: "POST",
+      headers: { origin: "https://partner.waffarhacars.com" },
+    });
+    const result = validateRequestOrigin(req);
+    expect(result.valid).toBe(true);
+    expect(result.matchedOrigin).toBe("https://partner.waffarhacars.com");
   });
 
   it("falls back to Referer when Origin is absent and accepts trusted Referer", () => {
@@ -104,14 +117,14 @@ describe("Centralized Request Origin Validation", () => {
     expect(result.matchedOrigin).toBe("http://localhost:3000");
   });
 
-  it("rejects request when Referer is untrusted", () => {
+  it("rejects request when Referer is untrusted without reflecting untrusted input", () => {
     const req = new NextRequest("http://localhost:3000/api/v1/auth/phone/request", {
       method: "POST",
       headers: { referer: "https://evil.example.com/phishing" },
     });
     const result = validateRequestOrigin(req);
     expect(result.valid).toBe(false);
-    expect(result.reason).toContain("Untrusted referer");
+    expect(result.reason).toBe("Untrusted request referer");
   });
 
   it("fails closed when both Origin and Referer are absent", () => {
@@ -138,7 +151,7 @@ describe("Client IP Resolution & Trusted Proxy Configuration", () => {
     resetServerEnvCache();
   });
 
-  it("does not trust X-Forwarded-For when TRUSTED_PROXY_HOPS is 0", () => {
+  it("ignores both X-Forwarded-For and X-Real-IP when TRUSTED_PROXY_HOPS is 0", () => {
     process.env.TRUSTED_PROXY_HOPS = "0";
     resetServerEnvCache();
 
@@ -150,7 +163,9 @@ describe("Client IP Resolution & Trusted Proxy Configuration", () => {
     });
 
     const ip = getClientIp(req);
-    expect(ip).toBe("10.0.0.1");
+    expect(ip).toBe("127.0.0.1");
+    expect(ip).not.toBe("10.0.0.1");
+    expect(ip).not.toBe("203.0.113.195");
   });
 
   it("extracts correct client IP from X-Forwarded-For when TRUSTED_PROXY_HOPS is 1", () => {

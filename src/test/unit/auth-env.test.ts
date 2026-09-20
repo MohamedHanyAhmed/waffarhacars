@@ -59,8 +59,8 @@ describe("Server Auth Environment Validation", () => {
     );
   });
 
-  it("fails in production when OTP_SMS_PROVIDER is set to test, dev_capture, or mock_gateway", () => {
-    for (const provider of ["test", "dev_capture", "mock_gateway", "egyptian_gateway"] as const) {
+  it("fails in production when OTP_SMS_PROVIDER is set to test, dev_capture, or egyptian_gateway", () => {
+    for (const provider of ["test", "dev_capture", "egyptian_gateway"] as const) {
       expect(() =>
         validateServerEnv({
           APP_RUNTIME_PROFILE: "production",

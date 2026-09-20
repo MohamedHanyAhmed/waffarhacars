@@ -12,7 +12,9 @@ let testOverrideAdapter: SmsAdapter | null = null;
  *
  * Production Safety Invariant:
  * - If APP_RUNTIME_PROFILE === "production", test and dev_capture adapters are strictly prohibited.
- * - Application fails closed immediately if an unapproved mock adapter is configured.
+ * - Application fails closed immediately if an unapproved mock/test adapter is configured.
+ * - Production customer OTP deployment remains intentionally unavailable until a real
+ *   commercial SMS aggregator adapter is selected and integrated.
  */
 export function getSmsAdapter(): SmsAdapter {
   if (testOverrideAdapter) {
@@ -32,9 +34,9 @@ export function getSmsAdapter(): SmsAdapter {
     (env.APP_RUNTIME_PROFILE === "production" ? "egyptian_gateway" : "dev_capture");
 
   if (env.APP_RUNTIME_PROFILE === "production") {
-    if (provider === "test" || provider === "dev_capture" || provider === "mock_gateway") {
+    if (provider === "test" || provider === "dev_capture") {
       throw new Error(
-        "FATAL: Production runtime profile cannot use test, mock, or dev_capture SMS provider."
+        "FATAL: Production runtime profile cannot use test or dev_capture SMS provider."
       );
     }
     if (provider === "egyptian_gateway") {
@@ -52,7 +54,7 @@ export function getSmsAdapter(): SmsAdapter {
       cachedAdapter = new DevCaptureSmsAdapter();
       break;
     case "egyptian_gateway":
-      cachedAdapter = new EgyptianSmsGatewayStub(process.env.OTP_API_KEY);
+      cachedAdapter = new EgyptianSmsGatewayStub();
       break;
     default:
       throw new Error(`Unknown SMS provider: ${provider}`);

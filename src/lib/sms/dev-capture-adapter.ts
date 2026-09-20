@@ -10,6 +10,15 @@ export class DevCaptureSmsAdapter implements SmsAdapter {
   readonly providerId = "dev_capture";
 
   async send(input: SmsSendInput): Promise<SmsSendResult> {
+    if (input.signal?.aborted) {
+      return {
+        success: false,
+        idempotencyKey: input.idempotencyKey,
+        status: "failed",
+        errorCategory: "GATEWAY_TIMEOUT",
+      };
+    }
+
     const masked = formatMaskedPhone(input.toCanonicalE164);
     // Development-only diagnostic output
     console.log(`[DevCaptureSmsAdapter] SMS dispatched to ${masked}: "${input.message}"`);

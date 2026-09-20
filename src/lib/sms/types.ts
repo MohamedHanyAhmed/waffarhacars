@@ -15,14 +15,12 @@ export type SmsErrorCategory =
   | "CONFIGURATION_ERROR"
   | "PROVIDER_UNAVAILABLE";
 
-/**
- * Input parameters for sending an SMS OTP.
- */
 export interface SmsSendInput {
   toCanonicalE164: string;
   message: string;
   idempotencyKey: string;
   timeoutMs?: number;
+  signal?: AbortSignal;
 }
 
 /**
