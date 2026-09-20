@@ -595,7 +595,23 @@ describe("Real PostgreSQL 17 Egyptian Customer Mobile OTP & Concurrency Integrat
 
     const phone = generateRandomEgyptianPhone();
     await requestOtpChallenge(phone);
-    const validCode = testSmsAdapter.getLastOtp(phone)!;
+
+    const auth = getAuth();
+    // Mock verifyPhoneNumber to succeed so the route proceeds past Better Auth verification
+    // into the CustomerProfile provisioning block where we inject the failure.
+    const originalVerifyPhoneNumber = (auth.api as unknown as { verifyPhoneNumber: unknown })
+      .verifyPhoneNumber;
+    (auth.api as unknown as { verifyPhoneNumber: unknown }).verifyPhoneNumber = async () => {
+      const h = new Headers();
+      h.append(
+        "Set-Cookie",
+        "better-auth.session_token=fake-token; Path=/; HttpOnly; SameSite=Lax"
+      );
+      return new Response(JSON.stringify({ token: "fake-token" }), {
+        status: 200,
+        headers: h,
+      });
+    };
 
     const prisma = getPrisma();
     const originalCreate = prisma.customerProfile.create;
@@ -608,7 +624,7 @@ describe("Real PostgreSQL 17 Egyptian Customer Mobile OTP & Concurrency Integrat
       const verifyReq = new NextRequest("http://localhost:3000/api/v1/auth/phone/verify", {
         method: "POST",
         headers: { "Content-Type": "application/json", Origin: "http://localhost:3000" },
-        body: JSON.stringify({ phone, code: validCode }),
+        body: JSON.stringify({ phone, code: "123456" }),
       });
 
       const res = await verifyHandler(verifyReq);
@@ -618,6 +634,8 @@ describe("Real PostgreSQL 17 Egyptian Customer Mobile OTP & Concurrency Integrat
       expect(json.title).toBe("Customer Profile Error");
     } finally {
       prisma.customerProfile.create = originalCreate;
+      (auth.api as unknown as { verifyPhoneNumber: unknown }).verifyPhoneNumber =
+        originalVerifyPhoneNumber;
     }
   });
 
