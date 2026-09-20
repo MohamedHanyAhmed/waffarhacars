@@ -176,7 +176,8 @@ export async function requestOtpChallenge(
     if (pendingRecords.length > 0) {
       const remainingMs = Math.max(
         1000,
-        (pendingRecords[0].dispatchLeaseExpiresAt?.getTime() ?? now.getTime() + 5000) - now.getTime()
+        (pendingRecords[0].dispatchLeaseExpiresAt?.getTime() ?? now.getTime() + 5000) -
+          now.getTime()
       );
       return {
         action: "REJECT",

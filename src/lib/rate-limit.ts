@@ -49,10 +49,7 @@ export function getClientIp(req: NextRequest): string {
       return "127.0.0.1";
     }
 
-    const candidate =
-      parts.length >= trustedHops
-        ? parts[parts.length - trustedHops]
-        : parts[0];
+    const candidate = parts.length >= trustedHops ? parts[parts.length - trustedHops] : parts[0];
 
     if (candidate && isIP(candidate) !== 0) {
       return candidate;

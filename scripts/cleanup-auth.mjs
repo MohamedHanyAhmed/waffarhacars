@@ -24,12 +24,12 @@ import pg from "pg";
 
 export async function runCleanup(connectionStringOverride) {
   const connectionString =
-    connectionStringOverride ||
-    process.env.DATABASE_DIRECT_URL ||
-    process.env.DATABASE_URL;
+    connectionStringOverride || process.env.DATABASE_DIRECT_URL || process.env.DATABASE_URL;
 
   if (!connectionString) {
-    console.error("[auth:cleanup] FATAL: Neither DATABASE_DIRECT_URL nor DATABASE_URL is configured.");
+    console.error(
+      "[auth:cleanup] FATAL: Neither DATABASE_DIRECT_URL nor DATABASE_URL is configured."
+    );
     return { success: false, skipped: false, error: "MISSING_DATABASE_URL" };
   }
 
