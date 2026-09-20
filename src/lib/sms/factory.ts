@@ -29,9 +29,14 @@ export function getSmsAdapter(): SmsAdapter {
     (env.APP_RUNTIME_PROFILE === "production" ? "egyptian_gateway" : "dev_capture");
 
   if (env.APP_RUNTIME_PROFILE === "production") {
-    if (provider === "test" || provider === "dev_capture") {
+    if (provider === "test" || provider === "dev_capture" || provider === "mock_gateway") {
       throw new Error(
-        "FATAL: Production runtime profile cannot use test or dev_capture SMS provider."
+        "FATAL: Production runtime profile cannot use test, mock, or dev_capture SMS provider."
+      );
+    }
+    if (provider === "egyptian_gateway") {
+      throw new Error(
+        "FATAL: Production runtime requires an active, implemented SMS aggregator. EgyptianSmsGatewayStub is an unimplemented contract stub and cannot serve production authentication traffic."
       );
     }
   }
@@ -55,8 +60,12 @@ export function getSmsAdapter(): SmsAdapter {
 
 /**
  * Injects an explicit SMS adapter for integration/unit testing.
+ * Strictly prohibited in production environments.
  */
 export function setSmsAdapterForTesting(adapter: SmsAdapter | null): void {
+  if (process.env.APP_RUNTIME_PROFILE === "production" || process.env.NODE_ENV === "production") {
+    throw new Error("Security violation: Test SMS adapter override is prohibited in production.");
+  }
   testOverrideAdapter = adapter;
   cachedAdapter = null;
 }

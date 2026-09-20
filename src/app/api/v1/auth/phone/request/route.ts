@@ -2,37 +2,13 @@ import { NextRequest } from "next/server";
 import { z } from "zod";
 import { getServerEnv } from "@/lib/env";
 import { normalizeEgyptianPhone } from "@/lib/phone";
-import { checkRateLimit } from "@/lib/rate-limit";
+import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import { requestOtpChallenge, computePhoneLookupHash } from "@/lib/otp/challenge-service";
+import { validateRequestOrigin } from "@/lib/security/origin";
 
 const RequestBodySchema = z.object({
   phone: z.string().min(1, "Phone number is required"),
 });
-
-function getClientIp(req: NextRequest): string {
-  const forwarded = req.headers.get("x-forwarded-for");
-  if (forwarded) {
-    return forwarded.split(",")[0].trim();
-  }
-  return req.headers.get("x-real-ip") || "127.0.0.1";
-}
-
-function validateOrigin(req: NextRequest): boolean {
-  const env = getServerEnv();
-  const origin = req.headers.get("origin");
-  if (!origin) {
-    // If no origin header, check referer as fallback
-    const referer = req.headers.get("referer");
-    if (!referer) return true; // Direct/same-origin server calls in tests
-    try {
-      const refOrigin = new URL(referer).origin;
-      return env.AUTH_TRUSTED_ORIGINS.includes(refOrigin);
-    } catch {
-      return false;
-    }
-  }
-  return env.AUTH_TRUSTED_ORIGINS.includes(origin);
-}
 
 export async function POST(req: NextRequest): Promise<Response> {
   let env;
@@ -72,14 +48,15 @@ export async function POST(req: NextRequest): Promise<Response> {
     );
   }
 
-  // 2. Validate trusted origin
-  if (!validateOrigin(req)) {
+  // 2. Validate trusted origin/referer
+  const originCheck = validateRequestOrigin(req);
+  if (!originCheck.valid) {
     return Response.json(
       {
         type: "https://waffarhacars.com/errors/invalid-origin",
         title: "Invalid Origin",
         status: 403,
-        detail: "Untrusted request origin",
+        detail: originCheck.reason || "Untrusted request origin",
       },
       {
         status: 403,
@@ -156,8 +133,8 @@ export async function POST(req: NextRequest): Promise<Response> {
   const phoneLookupHash = computePhoneLookupHash(canonicalE164);
   const clientIp = getClientIp(req);
 
-  // 5. Rate limiting: IP burst limit (max 15 requests per 15 min)
-  const ipLimit = await checkRateLimit(`rl:ip:req:${clientIp}`, 15, 900);
+  // 5. Rate limiting: IP burst limit (max 20 requests per 15 min)
+  const ipLimit = await checkRateLimit(`rl:ip:req:${clientIp}`, 20, 900);
   if (!ipLimit.allowed) {
     return Response.json(
       {
@@ -177,28 +154,28 @@ export async function POST(req: NextRequest): Promise<Response> {
     );
   }
 
-  // 6. Rate limiting: Phone daily limit (max 10 requests per 24 hours)
-  const dailyPhoneLimit = await checkRateLimit(`rl:phone:daily:${phoneLookupHash}`, 10, 86400);
-  if (!dailyPhoneLimit.allowed) {
+  // 6. Rate limiting: Phone rolling limit (max 5 requests per 15 min)
+  const phoneLimit = await checkRateLimit(`rl:phone:req:${phoneLookupHash}`, 5, 900);
+  if (!phoneLimit.allowed) {
     return Response.json(
       {
         type: "https://waffarhacars.com/errors/rate-limit-exceeded",
         title: "Too Many Requests",
         status: 429,
-        detail: "Daily verification limit reached for this number.",
+        detail: "Too many verification requests for this number. Please try again later.",
       },
       {
         status: 429,
         headers: {
           "Content-Type": "application/problem+json",
           "Cache-Control": "no-store",
-          "Retry-After": String(dailyPhoneLimit.retryAfterSeconds),
+          "Retry-After": String(phoneLimit.retryAfterSeconds),
         },
       }
     );
   }
 
-  // 7. Request Challenge
+  // 7. Request and synchronously dispatch Challenge
   const challengeResult = await requestOtpChallenge(canonicalE164);
   if (!challengeResult.success) {
     if (challengeResult.error === "COOLDOWN_ACTIVE") {
@@ -220,15 +197,53 @@ export async function POST(req: NextRequest): Promise<Response> {
       );
     }
 
+    if (challengeResult.error === "PHONE_LOCKED") {
+      return Response.json(
+        {
+          type: "https://waffarhacars.com/errors/account-locked",
+          title: "Account Temporarily Locked",
+          status: 429,
+          detail: "Too many failed attempts. This number is temporarily locked for your security.",
+        },
+        {
+          status: 429,
+          headers: {
+            "Content-Type": "application/problem+json",
+            "Cache-Control": "no-store",
+            "Retry-After": String(challengeResult.retryAfterSeconds),
+          },
+        }
+      );
+    }
+
+    if (challengeResult.error === "SEND_LIMIT_EXCEEDED") {
+      return Response.json(
+        {
+          type: "https://waffarhacars.com/errors/rate-limit-exceeded",
+          title: "Too Many Requests",
+          status: 429,
+          detail: "Maximum verification send limit reached. Please try again later.",
+        },
+        {
+          status: 429,
+          headers: {
+            "Content-Type": "application/problem+json",
+            "Cache-Control": "no-store",
+          },
+        }
+      );
+    }
+
+    // SMS_DELIVERY_FAILED
     return Response.json(
       {
-        type: "https://waffarhacars.com/errors/rate-limit-exceeded",
-        title: "Too Many Requests",
-        status: 429,
-        detail: "Maximum send attempts exceeded. Please try again later.",
+        type: "https://waffarhacars.com/errors/sms-delivery-failed",
+        title: "SMS Delivery Failed",
+        status: 502,
+        detail: "Unable to dispatch SMS verification code. Please try again shortly.",
       },
       {
-        status: 429,
+        status: 502,
         headers: {
           "Content-Type": "application/problem+json",
           "Cache-Control": "no-store",
@@ -237,7 +252,17 @@ export async function POST(req: NextRequest): Promise<Response> {
     );
   }
 
-  // Generic accepted response to prevent phone enumeration
+  // Sanitized operational log: never log raw phone numbers or OTP codes
+  console.info(
+    JSON.stringify({
+      event: "customer_otp_requested",
+      phoneLookupHash,
+      cooldownSeconds: challengeResult.cooldownSeconds,
+      timestamp: new Date().toISOString(),
+    })
+  );
+
+  // Accepted response: provider confirmed dispatch
   return Response.json(
     { accepted: true },
     {

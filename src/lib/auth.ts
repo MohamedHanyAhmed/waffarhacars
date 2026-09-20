@@ -54,20 +54,16 @@ export function getAuthOptions(overrides: Partial<BetterAuthOptions> = {}): Bett
           return res.success;
         },
         callbackOnVerification: async ({ user }) => {
-          try {
-            const prisma = getPrisma();
-            await prisma.customerProfile.upsert({
-              where: { userId: user.id },
-              create: {
-                userId: user.id,
-                preferredLanguage: "ar",
-                notificationPreferences: { sms: true, whatsapp: false },
-              },
-              update: {},
-            });
-          } catch (err) {
-            console.error("[Profile Upsert Error]", err);
-          }
+          const prisma = getPrisma();
+          await prisma.customerProfile.upsert({
+            where: { userId: user.id },
+            create: {
+              userId: user.id,
+              preferredLanguage: "ar",
+              notificationPreferences: { sms: true, whatsapp: false },
+            },
+            update: {},
+          });
         },
       }),
     ],

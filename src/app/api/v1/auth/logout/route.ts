@@ -1,22 +1,7 @@
 import { NextRequest } from "next/server";
 import { getAuth } from "@/lib/auth";
 import { getServerEnv } from "@/lib/env";
-
-function validateOrigin(req: NextRequest): boolean {
-  const env = getServerEnv();
-  const origin = req.headers.get("origin");
-  if (!origin) {
-    const referer = req.headers.get("referer");
-    if (!referer) return true;
-    try {
-      const refOrigin = new URL(referer).origin;
-      return env.AUTH_TRUSTED_ORIGINS.includes(refOrigin);
-    } catch {
-      return false;
-    }
-  }
-  return env.AUTH_TRUSTED_ORIGINS.includes(origin);
-}
+import { validateRequestOrigin } from "@/lib/security/origin";
 
 export async function POST(req: NextRequest): Promise<Response> {
   let env;
@@ -57,13 +42,14 @@ export async function POST(req: NextRequest): Promise<Response> {
   }
 
   // 2. Validate trusted origin
-  if (!validateOrigin(req)) {
+  const originCheck = validateRequestOrigin(req);
+  if (!originCheck.valid) {
     return Response.json(
       {
         type: "https://waffarhacars.com/errors/invalid-origin",
         title: "Invalid Origin",
         status: 403,
-        detail: "Untrusted request origin",
+        detail: originCheck.reason || "Untrusted request origin",
       },
       {
         status: 403,
@@ -82,12 +68,19 @@ export async function POST(req: NextRequest): Promise<Response> {
       asResponse: true,
     });
 
-    const setCookie = signOutRes.headers.get("set-cookie");
     const headers = new Headers();
     headers.set("Content-Type", "application/json");
     headers.set("Cache-Control", "no-store");
-    if (setCookie) {
-      headers.set("Set-Cookie", setCookie);
+
+    const setCookies =
+      typeof signOutRes.headers.getSetCookie === "function"
+        ? signOutRes.headers.getSetCookie()
+        : signOutRes.headers.get("set-cookie")
+          ? [signOutRes.headers.get("set-cookie")!]
+          : [];
+
+    for (const cookieStr of setCookies) {
+      headers.append("Set-Cookie", cookieStr);
     }
 
     return new Response(JSON.stringify({ success: true }), {

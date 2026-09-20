@@ -28,14 +28,22 @@ export async function handleAuth(req: NextRequest): Promise<Response> {
   }
 
   // Block public exposure of Better Auth stock phone endpoints (Issue #10449 mitigation)
-  let pathname = "";
+  let normalizedPath = "";
   try {
-    pathname = new URL(req.url, "http://localhost").pathname;
+    const url = new URL(req.url, "http://localhost");
+    normalizedPath = url.pathname.replace(/\/+/g, "/").toLowerCase();
   } catch {
-    // ignore
+    normalizedPath = "";
   }
 
-  if (pathname.includes("/phone-number") || pathname.includes("/sign-in/phone-number")) {
+  const isBlockedPhoneEndpoint =
+    normalizedPath === "/api/auth/phone-number" ||
+    normalizedPath.startsWith("/api/auth/phone-number/") ||
+    normalizedPath === "/api/auth/sign-in/phone-number" ||
+    normalizedPath.startsWith("/api/auth/sign-in/phone-number/") ||
+    normalizedPath.includes("/phone-number");
+
+  if (isBlockedPhoneEndpoint) {
     return Response.json(
       {
         type: "https://waffarhacars.com/errors/not-found",

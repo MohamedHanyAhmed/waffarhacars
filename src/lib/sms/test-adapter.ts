@@ -16,8 +16,25 @@ export class TestSmsAdapter implements SmsAdapter {
   readonly providerId = "test";
   private captured: CapturedSms[] = [];
   private simulatedFailureCategory: SmsErrorCategory | null = null;
+  private simulatedTimeout = false;
+  private simulatedException: Error | null = null;
 
   async send(input: SmsSendInput): Promise<SmsSendResult> {
+    if (this.simulatedException) {
+      throw this.simulatedException;
+    }
+
+    if (this.simulatedTimeout) {
+      // Delay longer than default timeout
+      await new Promise((resolve) => setTimeout(resolve, (input.timeoutMs ?? 8000) + 100));
+      return {
+        success: false,
+        idempotencyKey: input.idempotencyKey,
+        status: "failed",
+        errorCategory: "GATEWAY_TIMEOUT",
+      };
+    }
+
     if (this.simulatedFailureCategory) {
       return {
         success: false,
@@ -63,8 +80,18 @@ export class TestSmsAdapter implements SmsAdapter {
     this.simulatedFailureCategory = category;
   }
 
+  setSimulateTimeout(enabled: boolean): void {
+    this.simulatedTimeout = enabled;
+  }
+
+  setSimulateException(err: Error | null): void {
+    this.simulatedException = err;
+  }
+
   clear(): void {
     this.captured = [];
     this.simulatedFailureCategory = null;
+    this.simulatedTimeout = false;
+    this.simulatedException = null;
   }
 }

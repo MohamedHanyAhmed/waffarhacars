@@ -1,6 +1,9 @@
 -- CreateEnum
 CREATE TYPE "OtpPurpose" AS ENUM ('CUSTOMER_AUTH');
 
+-- CreateEnum
+CREATE TYPE "OtpChallengeStatus" AS ENUM ('PENDING', 'ACTIVE', 'CONSUMED', 'EXPIRED', 'LOCKED', 'SUPERSEDED', 'DELIVERY_FAILED');
+
 -- AlterTable
 ALTER TABLE "user" ADD COLUMN     "phoneNumber" TEXT,
 ADD COLUMN     "phoneNumberVerified" BOOLEAN;
@@ -8,12 +11,14 @@ ADD COLUMN     "phoneNumberVerified" BOOLEAN;
 -- CreateTable
 CREATE TABLE "otp_challenge" (
     "id" UUID NOT NULL DEFAULT pg_catalog.gen_random_uuid(),
-    "phone" VARCHAR(20) NOT NULL,
     "phoneLookupHash" VARCHAR(64) NOT NULL,
     "purpose" "OtpPurpose" NOT NULL DEFAULT 'CUSTOMER_AUTH',
+    "status" "OtpChallengeStatus" NOT NULL DEFAULT 'PENDING',
     "codeHash" VARCHAR(64) NOT NULL,
+    "dispatchId" VARCHAR(64) NOT NULL,
     "expiresAt" TIMESTAMP(3) NOT NULL,
     "cooldownUntil" TIMESTAMP(3) NOT NULL,
+    "lockoutUntil" TIMESTAMP(3),
     "failedAttemptCount" INTEGER NOT NULL DEFAULT 0,
     "sendCount" INTEGER NOT NULL DEFAULT 1,
     "consumedAt" TIMESTAMP(3),
@@ -47,7 +52,7 @@ CREATE TABLE "rate_limit_bucket" (
 );
 
 -- CreateIndex
-CREATE INDEX "otp_challenge_phoneLookupHash_purpose_idx" ON "otp_challenge"("phoneLookupHash", "purpose");
+CREATE INDEX "otp_challenge_phoneLookupHash_status_idx" ON "otp_challenge"("phoneLookupHash", "status");
 
 -- CreateIndex
 CREATE INDEX "otp_challenge_expiresAt_idx" ON "otp_challenge"("expiresAt");
@@ -64,5 +69,5 @@ CREATE UNIQUE INDEX "user_phoneNumber_key" ON "user"("phoneNumber");
 -- AddForeignKey
 ALTER TABLE "customer_profile" ADD CONSTRAINT "customer_profile_userId_fkey" FOREIGN KEY ("userId") REFERENCES "user"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
--- Partial unique index ensuring exactly one active (unconsumed) challenge exists per phone and purpose
-CREATE UNIQUE INDEX "unique_active_otp_challenge" ON "otp_challenge" ("phoneLookupHash", "purpose") WHERE "consumedAt" IS NULL;
+-- Partial unique index ensuring exactly one active (PENDING or ACTIVE) challenge exists per phone and purpose
+CREATE UNIQUE INDEX "unique_active_otp_challenge" ON "otp_challenge" ("phoneLookupHash", "purpose") WHERE "status" IN ('PENDING', 'ACTIVE');

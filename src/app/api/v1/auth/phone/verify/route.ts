@@ -4,36 +4,14 @@ import { getAuth } from "@/lib/auth";
 import { getPrisma } from "@/lib/db";
 import { getServerEnv } from "@/lib/env";
 import { normalizeEgyptianPhone } from "@/lib/phone";
-import { checkRateLimit } from "@/lib/rate-limit";
+import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { computePhoneLookupHash } from "@/lib/otp/challenge-service";
+import { validateRequestOrigin } from "@/lib/security/origin";
 
 const VerifyBodySchema = z.object({
   phone: z.string().min(1, "Phone number is required"),
   code: z.string().regex(/^\d{6}$/, "Code must be exactly 6 decimal digits"),
 });
-
-function getClientIp(req: NextRequest): string {
-  const forwarded = req.headers.get("x-forwarded-for");
-  if (forwarded) {
-    return forwarded.split(",")[0].trim();
-  }
-  return req.headers.get("x-real-ip") || "127.0.0.1";
-}
-
-function validateOrigin(req: NextRequest): boolean {
-  const env = getServerEnv();
-  const origin = req.headers.get("origin");
-  if (!origin) {
-    const referer = req.headers.get("referer");
-    if (!referer) return true;
-    try {
-      const refOrigin = new URL(referer).origin;
-      return env.AUTH_TRUSTED_ORIGINS.includes(refOrigin);
-    } catch {
-      return false;
-    }
-  }
-  return env.AUTH_TRUSTED_ORIGINS.includes(origin);
-}
 
 export async function POST(req: NextRequest): Promise<Response> {
   let env;
@@ -73,14 +51,15 @@ export async function POST(req: NextRequest): Promise<Response> {
     );
   }
 
-  // 2. Validate trusted origin
-  if (!validateOrigin(req)) {
+  // 2. Validate trusted origin/referer
+  const originCheck = validateRequestOrigin(req);
+  if (!originCheck.valid) {
     return Response.json(
       {
         type: "https://waffarhacars.com/errors/invalid-origin",
         title: "Invalid Origin",
         status: 403,
-        detail: "Untrusted request origin",
+        detail: originCheck.reason || "Untrusted request origin",
       },
       {
         status: 403,
@@ -154,6 +133,7 @@ export async function POST(req: NextRequest): Promise<Response> {
   }
 
   const canonicalE164 = norm.canonicalE164;
+  const phoneLookupHash = computePhoneLookupHash(canonicalE164);
   const candidateCode = parsedBody.data.code;
   const clientIp = getClientIp(req);
 
@@ -165,7 +145,7 @@ export async function POST(req: NextRequest): Promise<Response> {
         type: "https://waffarhacars.com/errors/rate-limit-exceeded",
         title: "Too Many Requests",
         status: 429,
-        detail: "Too many failed attempts. Please try again later.",
+        detail: "Too many verification attempts. Please try again later.",
       },
       {
         status: 429,
@@ -178,8 +158,30 @@ export async function POST(req: NextRequest): Promise<Response> {
     );
   }
 
-  // Check if user already exists prior to verification (to accurately report isNewCustomer)
+  // Rate limiting: verification attempts per phone
+  const phoneVerifyLimit = await checkRateLimit(`rl:phone:verify:${phoneLookupHash}`, 10, 900);
+  if (!phoneVerifyLimit.allowed) {
+    return Response.json(
+      {
+        type: "https://waffarhacars.com/errors/rate-limit-exceeded",
+        title: "Too Many Requests",
+        status: 429,
+        detail: "Too many failed attempts on this number. Please try again later.",
+      },
+      {
+        status: 429,
+        headers: {
+          "Content-Type": "application/problem+json",
+          "Cache-Control": "no-store",
+          "Retry-After": String(phoneVerifyLimit.retryAfterSeconds),
+        },
+      }
+    );
+  }
+
   const prisma = getPrisma();
+
+  // Check whether this user exists beforehand to determine isNewCustomer
   const preExistingUser = await prisma.user.findUnique({
     where: { phoneNumber: canonicalE164 },
     select: { id: true },
@@ -187,6 +189,7 @@ export async function POST(req: NextRequest): Promise<Response> {
   const isNewCustomer = !preExistingUser;
 
   // 6. Invoke Better Auth internal phone verification endpoint
+  let authRes: Response;
   try {
     const auth = getAuth();
     const phoneApi = auth.api as unknown as {
@@ -197,7 +200,7 @@ export async function POST(req: NextRequest): Promise<Response> {
       }) => Promise<Response>;
     };
 
-    const authRes = await phoneApi.verifyPhoneNumber({
+    authRes = await phoneApi.verifyPhoneNumber({
       body: {
         phoneNumber: canonicalE164,
         code: candidateCode,
@@ -205,53 +208,32 @@ export async function POST(req: NextRequest): Promise<Response> {
       headers: req.headers,
       asResponse: true,
     });
-
-    if (!authRes || !authRes.ok) {
-      return Response.json(
-        {
-          type: "https://waffarhacars.com/errors/invalid-otp",
-          title: "Invalid Verification Code",
-          status: 400,
-          detail: "The verification code is incorrect, expired, or has already been used.",
-        },
-        {
-          status: 400,
-          headers: {
-            "Content-Type": "application/problem+json",
-            "Cache-Control": "no-store",
-          },
-        }
-      );
-    }
-
-    // Capture the official Better Auth Set-Cookie header
-    const setCookie = authRes.headers.get("set-cookie");
-
-    // Construct response: strictly zero tokens in JSON body
-    const headers = new Headers();
-    headers.set("Content-Type", "application/json");
-    headers.set("Cache-Control", "no-store");
-    if (setCookie) {
-      headers.set("Set-Cookie", setCookie);
-    }
-
-    return new Response(
-      JSON.stringify({
-        authenticated: true,
-        isNewCustomer,
-      }),
+  } catch (err: unknown) {
+    console.error("[Verify Auth Error]", err instanceof Error ? err.message : "Unknown auth error");
+    return Response.json(
       {
-        status: 200,
-        headers,
+        type: "https://waffarhacars.com/errors/internal-error",
+        title: "Authentication Service Error",
+        status: 500,
+        detail: "An unexpected error occurred during authentication.",
+      },
+      {
+        status: 500,
+        headers: {
+          "Content-Type": "application/problem+json",
+          "Cache-Control": "no-store",
+        },
       }
     );
-  } catch {
+  }
+
+  if (!authRes || !authRes.ok) {
     return Response.json(
       {
         type: "https://waffarhacars.com/errors/invalid-otp",
-        title: "Verification Failed",
+        title: "Invalid Verification Code",
         status: 400,
-        detail: "Verification failed. Please check the code and try again.",
+        detail: "The verification code is incorrect, expired, or has already been used.",
       },
       {
         status: 400,
@@ -262,4 +244,73 @@ export async function POST(req: NextRequest): Promise<Response> {
       }
     );
   }
+
+  // 7. Synchronous Profile Verification & Consistency Check
+  try {
+    const user = await prisma.user.findUnique({
+      where: { phoneNumber: canonicalE164 },
+      include: { customerProfile: true },
+    });
+
+    if (!user) {
+      throw new Error("User record missing following verification");
+    }
+
+    if (!user.customerProfile) {
+      await prisma.customerProfile.create({
+        data: {
+          userId: user.id,
+          preferredLanguage: "ar",
+        },
+      });
+    }
+  } catch (err: unknown) {
+    console.error(
+      "[Profile Consistency Error]",
+      err instanceof Error ? err.message : "Profile check failed"
+    );
+    return Response.json(
+      {
+        type: "https://waffarhacars.com/errors/internal-error",
+        title: "Customer Profile Error",
+        status: 500,
+        detail: "Authentication succeeded but customer profile could not be synchronized.",
+      },
+      {
+        status: 500,
+        headers: {
+          "Content-Type": "application/problem+json",
+          "Cache-Control": "no-store",
+        },
+      }
+    );
+  }
+
+  // 8. Capture and forward ALL Set-Cookie headers individually
+  const headers = new Headers();
+  headers.set("Content-Type", "application/json");
+  headers.set("Cache-Control", "no-store");
+
+  const setCookies =
+    typeof authRes.headers.getSetCookie === "function"
+      ? authRes.headers.getSetCookie()
+      : authRes.headers.get("set-cookie")
+        ? [authRes.headers.get("set-cookie")!]
+        : [];
+
+  for (const cookieStr of setCookies) {
+    headers.append("Set-Cookie", cookieStr);
+  }
+
+  // Construct response: strictly zero tokens in JSON body
+  return new Response(
+    JSON.stringify({
+      authenticated: true,
+      isNewCustomer,
+    }),
+    {
+      status: 200,
+      headers,
+    }
+  );
 }

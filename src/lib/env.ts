@@ -25,7 +25,8 @@ const RawServerEnvSchema = z.object({
   OTP_PEPPER_SECRET: z.string().optional(),
   PHONE_ALIAS_HMAC_KEY: z.string().optional(),
   PHONE_LOOKUP_HMAC_KEY: z.string().optional(),
-  OTP_SMS_PROVIDER: z.enum(["test", "dev_capture", "egyptian_gateway"]).optional(),
+  OTP_SMS_PROVIDER: z.enum(["test", "dev_capture", "egyptian_gateway", "mock_gateway"]).optional(),
+  TRUSTED_PROXY_HOPS: z.coerce.number().int().min(0).max(10).default(0),
 });
 
 export interface ServerEnv {
@@ -43,7 +44,8 @@ export interface ServerEnv {
   OTP_PEPPER_SECRET: string | undefined;
   PHONE_ALIAS_HMAC_KEY: string | undefined;
   PHONE_LOOKUP_HMAC_KEY: string | undefined;
-  OTP_SMS_PROVIDER: "test" | "dev_capture" | "egyptian_gateway";
+  OTP_SMS_PROVIDER: "test" | "dev_capture" | "egyptian_gateway" | "mock_gateway";
+  TRUSTED_PROXY_HOPS: number;
 }
 
 let cachedEnv: ServerEnv | null = null;
@@ -216,7 +218,7 @@ export function validateServerEnv(
     (data.APP_RUNTIME_PROFILE === "production" ? "egyptian_gateway" : "dev_capture");
 
   if (data.APP_RUNTIME_PROFILE === "production") {
-    if (smsProvider === "test" || smsProvider === "dev_capture") {
+    if (smsProvider === "test" || smsProvider === "dev_capture" || smsProvider === "mock_gateway") {
       throw new Error(
         "Configuration error: Production runtime profile cannot use test or dev_capture SMS provider."
       );
@@ -232,10 +234,20 @@ export function validateServerEnv(
     if (phoneAliasKey) validateAuthSecret(phoneAliasKey, data.APP_RUNTIME_PROFILE);
     if (phoneLookupKey) validateAuthSecret(phoneLookupKey, data.APP_RUNTIME_PROFILE);
 
-    if (data.BETTER_AUTH_SECRET) {
-      if (!otpPepper) otpPepper = `${data.BETTER_AUTH_SECRET}_otp_pepper_fallback_32`;
-      if (!phoneAliasKey) phoneAliasKey = `${data.BETTER_AUTH_SECRET}_phone_alias_fallback_32`;
-      if (!phoneLookupKey) phoneLookupKey = `${data.BETTER_AUTH_SECRET}_phone_lookup_fallback_32`;
+    if (data.APP_RUNTIME_PROFILE === "production") {
+      if (otpPepper && phoneAliasKey && phoneLookupKey) {
+        if (new Set([data.BETTER_AUTH_SECRET, otpPepper, phoneAliasKey, phoneLookupKey]).size < 4) {
+          throw new Error(
+            "Configuration error: BETTER_AUTH_SECRET, OTP_PEPPER_SECRET, PHONE_ALIAS_HMAC_KEY, and PHONE_LOOKUP_HMAC_KEY must all be mutually distinct."
+          );
+        }
+      }
+    } else {
+      if (data.BETTER_AUTH_SECRET) {
+        if (!otpPepper) otpPepper = `${data.BETTER_AUTH_SECRET}_otp_pepper_fallback_32`;
+        if (!phoneAliasKey) phoneAliasKey = `${data.BETTER_AUTH_SECRET}_phone_alias_fallback_32`;
+        if (!phoneLookupKey) phoneLookupKey = `${data.BETTER_AUTH_SECRET}_phone_lookup_fallback_32`;
+      }
     }
   }
 
@@ -255,6 +267,7 @@ export function validateServerEnv(
     PHONE_ALIAS_HMAC_KEY: phoneAliasKey,
     PHONE_LOOKUP_HMAC_KEY: phoneLookupKey,
     OTP_SMS_PROVIDER: smsProvider,
+    TRUSTED_PROXY_HOPS: data.TRUSTED_PROXY_HOPS,
   };
 }
 

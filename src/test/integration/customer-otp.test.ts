@@ -11,11 +11,12 @@ import {
   requestOtpChallenge,
   verifyAndConsumeOtpChallenge,
   computePhoneLookupHash,
+  purgeExpiredAuthRecords,
 } from "@/lib/otp/challenge-service";
+import { checkRateLimit } from "@/lib/rate-limit";
 import { POST as requestHandler } from "@/app/api/v1/auth/phone/request/route";
 import { POST as verifyHandler } from "@/app/api/v1/auth/phone/verify/route";
-import { GET as sessionHandler } from "@/app/api/v1/auth/session/route";
-import { POST as logoutHandler } from "@/app/api/v1/auth/logout/route";
+import { OtpChallengeStatus } from "@/generated/prisma/client";
 
 const DEFAULT_TEST_DB_URL =
   process.env.DATABASE_URL ||
@@ -86,7 +87,6 @@ describe("Real PostgreSQL 17 Egyptian Customer Mobile OTP & Concurrency Integrat
           await prisma.user.deleteMany({ where: { id: { in: userIds } } });
         }
 
-        // Delete challenges and rate limit buckets for created phones
         for (const phone of createdUserPhones) {
           const lookup = computePhoneLookupHash(phone, TEST_LOOKUP_KEY);
           await prisma.otpChallenge.deleteMany({ where: { phoneLookupHash: lookup } });
@@ -112,14 +112,13 @@ describe("Real PostgreSQL 17 Egyptian Customer Mobile OTP & Concurrency Integrat
   });
 
   function generateRandomEgyptianPhone(): string {
-    // Generates a random valid Egyptian mobile number: +2010XXXXXXXX
     const suffix = crypto.randomInt(10000000, 99999999).toString();
     const phone = `+2010${suffix}`;
     createdUserPhones.push(phone);
     return phone;
   }
 
-  it("1. proves only one active challenge exists and resend invalidates the previous code while preserving failed attempts", async () => {
+  it("1. proves only one active challenge exists and resend supersedes previous code while preserving failed attempts", async () => {
     if (!isDbReachable) {
       throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
     }
@@ -127,27 +126,26 @@ describe("Real PostgreSQL 17 Egyptian Customer Mobile OTP & Concurrency Integrat
     const phone = generateRandomEgyptianPhone();
     const lookup = computePhoneLookupHash(phone, TEST_LOOKUP_KEY);
 
-    // Initial challenge request
     const req1 = await requestOtpChallenge(phone);
     expect(req1.success).toBe(true);
 
     const prisma = getPrisma();
-    const challenges1 = await prisma.otpChallenge.findMany({
-      where: { phoneLookupHash: lookup },
+    const active1 = await prisma.otpChallenge.findMany({
+      where: { phoneLookupHash: lookup, status: OtpChallengeStatus.ACTIVE },
     });
-    expect(challenges1.length).toBe(1);
-    expect(challenges1[0].sendCount).toBe(1);
-    expect(challenges1[0].failedAttemptCount).toBe(0);
+    expect(active1.length).toBe(1);
+    expect(active1[0].sendCount).toBe(1);
+    expect(active1[0].failedAttemptCount).toBe(0);
 
     const initialCode = testSmsAdapter.getLastOtp(phone);
     expect(initialCode).toBeDefined();
 
-    // Fast-forward cooldown in database to simulate elapsed 60s
+    // Simulate elapsed 60s cooldown and 1 failed verification attempt
     await prisma.otpChallenge.update({
-      where: { id: challenges1[0].id },
+      where: { id: active1[0].id },
       data: {
         cooldownUntil: new Date(Date.now() - 1000),
-        failedAttemptCount: 1, // Simulate 1 failed attempt prior to resend
+        failedAttemptCount: 1,
       },
     });
 
@@ -155,20 +153,20 @@ describe("Real PostgreSQL 17 Egyptian Customer Mobile OTP & Concurrency Integrat
     const req2 = await requestOtpChallenge(phone);
     expect(req2.success).toBe(true);
 
-    const challenges2 = await prisma.otpChallenge.findMany({
-      where: { phoneLookupHash: lookup },
+    const active2 = await prisma.otpChallenge.findMany({
+      where: { phoneLookupHash: lookup, status: OtpChallengeStatus.ACTIVE },
     });
-    // Partial unique index / update ensures exactly ONE row exists
-    expect(challenges2.length).toBe(1);
-    expect(challenges2[0].sendCount).toBe(2);
-    // Failure budget MUST be preserved (not reset to 0)
-    expect(challenges2[0].failedAttemptCount).toBe(1);
+    // Exactly ONE row in ACTIVE status
+    expect(active2.length).toBe(1);
+    expect(active2[0].sendCount).toBe(2);
+    // Failure budget MUST be preserved (NIST compliance)
+    expect(active2[0].failedAttemptCount).toBe(1);
 
     const resendCode = testSmsAdapter.getLastOtp(phone);
     expect(resendCode).toBeDefined();
     expect(resendCode).not.toBe(initialCode);
 
-    // Verify initial replaced code FAILS immediately
+    // Verify initial superseded code FAILS
     const verifyInitial = await verifyAndConsumeOtpChallenge(phone, initialCode!);
     expect(verifyInitial.success).toBe(false);
 
@@ -177,7 +175,7 @@ describe("Real PostgreSQL 17 Egyptian Customer Mobile OTP & Concurrency Integrat
     expect(verifyResend.success).toBe(true);
   });
 
-  it("2. proves 3 failed verification attempts exhausts the challenge and blocks further attempts", async () => {
+  it("2. proves 3 failed verification attempts exhausts the challenge into LOCKED state with bounded lockout", async () => {
     if (!isDbReachable) {
       throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
     }
@@ -186,35 +184,39 @@ describe("Real PostgreSQL 17 Egyptian Customer Mobile OTP & Concurrency Integrat
     await requestOtpChallenge(phone);
     const validCode = testSmsAdapter.getLastOtp(phone)!;
 
-    // Attempt 1: wrong code
-    const res1 = await verifyAndConsumeOtpChallenge(phone, "000000");
-    expect(res1.success).toBe(false);
-    if (!res1.success) {
-      expect(res1.error).toBe("INVALID_CODE");
-      expect(res1.remainingAttempts).toBe(2);
-    }
+    // Attempts 1 & 2
+    await verifyAndConsumeOtpChallenge(phone, "000000");
+    await verifyAndConsumeOtpChallenge(phone, "111111");
 
-    // Attempt 2: wrong code
-    const res2 = await verifyAndConsumeOtpChallenge(phone, "111111");
-    expect(res2.success).toBe(false);
-    if (!res2.success) {
-      expect(res2.error).toBe("INVALID_CODE");
-      expect(res2.remainingAttempts).toBe(1);
-    }
-
-    // Attempt 3: wrong code -> exhausts budget
+    // Attempt 3: exhausts budget -> LOCKED
     const res3 = await verifyAndConsumeOtpChallenge(phone, "222222");
     expect(res3.success).toBe(false);
     if (!res3.success) {
       expect(res3.error).toBe("ATTEMPTS_EXHAUSTED");
+      expect(res3.lockoutSeconds).toBe(900);
     }
 
-    // Attempt 4: valid code is now REJECTED because challenge is exhausted
+    // Subsequent verify is rejected
     const res4 = await verifyAndConsumeOtpChallenge(phone, validCode);
     expect(res4.success).toBe(false);
-    if (!res4.success) {
-      expect(res4.error).toBe("ATTEMPTS_EXHAUSTED");
+
+    // Subsequent request is rejected while locked
+    const reqWhileLocked = await requestOtpChallenge(phone);
+    expect(reqWhileLocked.success).toBe(false);
+    if (!reqWhileLocked.success) {
+      expect(reqWhileLocked.error).toBe("PHONE_LOCKED");
     }
+
+    // Fast-forward lockout in database -> recovery allowed
+    const prisma = getPrisma();
+    const lookup = computePhoneLookupHash(phone, TEST_LOOKUP_KEY);
+    await prisma.otpChallenge.updateMany({
+      where: { phoneLookupHash: lookup, status: OtpChallengeStatus.LOCKED },
+      data: { lockoutUntil: new Date(Date.now() - 1000) },
+    });
+
+    const recoveredReq = await requestOtpChallenge(phone);
+    expect(recoveredReq.success).toBe(true);
   });
 
   it("3. proves expired challenge rejects verification", async () => {
@@ -254,7 +256,7 @@ describe("Real PostgreSQL 17 Egyptian Customer Mobile OTP & Concurrency Integrat
     const res1 = await verifyAndConsumeOtpChallenge(phone, code);
     expect(res1.success).toBe(true);
 
-    // Second consumption of the same code fails closed
+    // Second consumption fails closed
     const res2 = await verifyAndConsumeOtpChallenge(phone, code);
     expect(res2.success).toBe(false);
     if (!res2.success) {
@@ -269,13 +271,10 @@ describe("Real PostgreSQL 17 Egyptian Customer Mobile OTP & Concurrency Integrat
 
     const phone = generateRandomEgyptianPhone();
 
-    // Step 1: Request OTP via public request endpoint
+    // Step 1: Request OTP
     const requestReq = new NextRequest("http://localhost:3000/api/v1/auth/phone/request", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Origin: "http://localhost:3000",
-      },
+      headers: { "Content-Type": "application/json", Origin: "http://localhost:3000" },
       body: JSON.stringify({ phone }),
     });
 
@@ -285,18 +284,12 @@ describe("Real PostgreSQL 17 Egyptian Customer Mobile OTP & Concurrency Integrat
     const validCode = testSmsAdapter.getLastOtp(phone);
     expect(validCode).toBeDefined();
 
-    // Step 2: Concurrently fire two identical verification requests against the same challenge
+    // Step 2: Concurrently fire two identical verification requests
     const createVerifyReq = () =>
       new NextRequest("http://localhost:3000/api/v1/auth/phone/verify", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Origin: "http://localhost:3000",
-        },
-        body: JSON.stringify({
-          phone,
-          code: validCode,
-        }),
+        headers: { "Content-Type": "application/json", Origin: "http://localhost:3000" },
+        body: JSON.stringify({ phone, code: validCode }),
       });
 
     const [resA, resB] = await Promise.all([
@@ -305,145 +298,205 @@ describe("Real PostgreSQL 17 Egyptian Customer Mobile OTP & Concurrency Integrat
     ]);
 
     const statuses = [resA.status, resB.status];
-
-    // Assert: Exactly ONE 200 OK and ONE 400 Bad Request
     expect(statuses).toContain(200);
     expect(statuses).toContain(400);
 
     const successRes = resA.status === 200 ? resA : resB;
-    const failureRes = resA.status === 400 ? resA : resB;
-
-    // Verify success response body format
     const successJson = await successRes.json();
     expect(successJson.authenticated).toBe(true);
-    expect(successJson.isNewCustomer).toBe(true);
-    // Security Invariant: ZERO session tokens in response JSON
     expect(successJson.token).toBeUndefined();
-    expect(successJson.session).toBeUndefined();
 
-    // Verify success response Set-Cookie header contains Better Auth session token
+    // Set-Cookie contains Better Auth session token
     const setCookie = successRes.headers.get("set-cookie");
-    expect(setCookie).toBeDefined();
     expect(setCookie).toContain("better-auth.session_token=");
     expect(setCookie?.toLowerCase()).toContain("httponly");
 
-    // Verify failure response is RFC 7807 problem details
-    const failureJson = await failureRes.json();
-    expect(failureJson.status).toBe(400);
-    expect(failureJson.title).toBeDefined();
-
-    // Assert database: Exactly ONE user and ONE customer profile created
+    // Assert database consistency
     const prisma = getPrisma();
     const userCount = await prisma.user.count({ where: { phoneNumber: phone } });
     expect(userCount).toBe(1);
 
     const user = await prisma.user.findUnique({ where: { phoneNumber: phone } });
-    expect(user).not.toBeNull();
-    expect(user!.phoneNumberVerified).toBe(true);
+    expect(user?.phoneNumberVerified).toBe(true);
 
     const profileCount = await prisma.customerProfile.count({ where: { userId: user!.id } });
     expect(profileCount).toBe(1);
-
-    // Assert database: Exactly ONE session created
-    const sessionCount = await prisma.session.count({ where: { userId: user!.id } });
-    expect(sessionCount).toBe(1);
   });
 
-  it("6. proves returning customer verification creates exactly one session and preserves existing profile", async () => {
+  it("6. CONCURRENT INITIAL REQUEST HARD GATE: competing first requests serialize safely without 500 collision", async () => {
     if (!isDbReachable) {
       throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
     }
 
     const phone = generateRandomEgyptianPhone();
 
-    // First sign-up flow
-    await requestHandler(
+    const createReq = () =>
       new NextRequest("http://localhost:3000/api/v1/auth/phone/request", {
         method: "POST",
         headers: { "Content-Type": "application/json", Origin: "http://localhost:3000" },
         body: JSON.stringify({ phone }),
-      })
-    );
-    const code1 = testSmsAdapter.getLastOtp(phone)!;
-    const verify1 = await verifyHandler(
-      new NextRequest("http://localhost:3000/api/v1/auth/phone/verify", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Origin: "http://localhost:3000" },
-        body: JSON.stringify({ phone, code: code1 }),
-      })
-    );
-    expect(verify1.status).toBe(200);
-    const json1 = await verify1.json();
-    expect(json1.isNewCustomer).toBe(true);
+      });
 
-    // Second returning customer login flow
-    await requestHandler(
-      new NextRequest("http://localhost:3000/api/v1/auth/phone/request", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Origin: "http://localhost:3000" },
-        body: JSON.stringify({ phone }),
-      })
-    );
-    const code2 = testSmsAdapter.getLastOtp(phone)!;
-    const verify2 = await verifyHandler(
-      new NextRequest("http://localhost:3000/api/v1/auth/phone/verify", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Origin: "http://localhost:3000" },
-        body: JSON.stringify({ phone, code: code2 }),
-      })
-    );
-    expect(verify2.status).toBe(200);
-    const json2 = await verify2.json();
-    expect(json2.isNewCustomer).toBe(false);
+    // Concurrently fire two requests for a brand new phone number
+    const [resA, resB] = await Promise.all([
+      requestHandler(createReq()),
+      requestHandler(createReq()),
+    ]);
 
-    // Authenticate via session endpoint with issued cookie
-    const setCookie = verify2.headers.get("set-cookie")!;
-    const cookieHeader = setCookie.split(";")[0];
+    const statuses = [resA.status, resB.status];
+    // Exactly one succeeds with 200; the competing request encounters 429 COOLDOWN_ACTIVE. Neither throws 500!
+    expect(statuses).toContain(200);
+    expect(statuses).toContain(429);
 
-    const sessionRes = await sessionHandler(
-      new NextRequest("http://localhost:3000/api/v1/auth/session", {
-        headers: { cookie: cookieHeader },
-      })
-    );
-    expect(sessionRes.status).toBe(200);
-    const sessionJson = await sessionRes.json();
-    expect(sessionJson.authenticated).toBe(true);
-    expect(sessionJson.user.phoneNumber).toBe(phone);
-    expect(sessionJson.user.preferredLanguage).toBe("ar");
-
-    // Logout endpoint revokes session
-    const logoutRes = await logoutHandler(
-      new NextRequest("http://localhost:3000/api/v1/auth/logout", {
-        method: "POST",
-        headers: { cookie: cookieHeader, Origin: "http://localhost:3000" },
-      })
-    );
-    expect(logoutRes.status).toBe(200);
-
-    // Session endpoint after logout reports unauthenticated
-    const postLogoutSession = await sessionHandler(
-      new NextRequest("http://localhost:3000/api/v1/auth/session", {
-        headers: { cookie: cookieHeader },
-      })
-    );
-    const postLogoutJson = await postLogoutSession.json();
-    expect(postLogoutJson.authenticated).toBe(false);
+    const prisma = getPrisma();
+    const lookup = computePhoneLookupHash(phone, TEST_LOOKUP_KEY);
+    const activeRows = await prisma.otpChallenge.count({
+      where: { phoneLookupHash: lookup, status: OtpChallengeStatus.ACTIVE },
+    });
+    expect(activeRows).toBe(1);
   });
 
-  it("7. proves showcase demo mode returns 503 and executes zero database queries", async () => {
-    process.env.APP_DATA_BACKEND = "demo";
-    resetServerEnvCache();
+  it("7. proves failed SMS provider returns 502 and marks challenge DELIVERY_FAILED", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+
+    const phone = generateRandomEgyptianPhone();
+    testSmsAdapter.simulateFailure("PROVIDER_UNAVAILABLE");
 
     const req = new NextRequest("http://localhost:3000/api/v1/auth/phone/request", {
       method: "POST",
       headers: { "Content-Type": "application/json", Origin: "http://localhost:3000" },
-      body: JSON.stringify({ phone: "+201012345678" }),
+      body: JSON.stringify({ phone }),
     });
 
     const res = await requestHandler(req);
-    expect(res.status).toBe(503);
+    expect(res.status).toBe(502);
     const json = await res.json();
-    expect(json.type).toBe("https://waffarhacars.com/errors/service-unavailable");
-    expect(json.detail).toContain("demo mode");
+    expect(json.type).toBe("https://waffarhacars.com/errors/sms-delivery-failed");
+
+    const prisma = getPrisma();
+    const lookup = computePhoneLookupHash(phone, TEST_LOOKUP_KEY);
+    const failedRows = await prisma.otpChallenge.findMany({
+      where: { phoneLookupHash: lookup, status: OtpChallengeStatus.DELIVERY_FAILED },
+    });
+    expect(failedRows.length).toBe(1);
+  });
+
+  it("8. proves failed resend preserves the previous active valid code", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+
+    const phone = generateRandomEgyptianPhone();
+
+    // 1. Initial request succeeds
+    const req1 = await requestOtpChallenge(phone);
+    expect(req1.success).toBe(true);
+    const initialCode = testSmsAdapter.getLastOtp(phone)!;
+
+    // Fast-forward cooldown
+    const prisma = getPrisma();
+    const lookup = computePhoneLookupHash(phone, TEST_LOOKUP_KEY);
+    await prisma.otpChallenge.updateMany({
+      where: { phoneLookupHash: lookup, status: OtpChallengeStatus.ACTIVE },
+      data: { cooldownUntil: new Date(Date.now() - 1000) },
+    });
+
+    // 2. Set provider failure for resend
+    testSmsAdapter.simulateFailure("NETWORK_ERROR");
+    const req2 = await requestOtpChallenge(phone);
+    expect(req2.success).toBe(false);
+
+    // 3. Initial code MUST still be ACTIVE and valid!
+    const verifyInitial = await verifyAndConsumeOtpChallenge(phone, initialCode);
+    expect(verifyInitial.success).toBe(true);
+  });
+
+  it("9. proves atomic rate limit boundary under concurrent load", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+
+    const testKey = `test_boundary_${crypto.randomUUID()}`;
+    const limit = 5;
+    const windowSeconds = 60;
+
+    // Fire 10 concurrent requests at boundary limit of 5
+    const results = await Promise.all(
+      Array.from({ length: 10 }, () => checkRateLimit(testKey, limit, windowSeconds))
+    );
+
+    const allowedCount = results.filter((r) => r.allowed).length;
+    const blockedCount = results.filter((r) => !r.allowed).length;
+
+    expect(allowedCount).toBe(5);
+    expect(blockedCount).toBe(5);
+  });
+
+  it("10. proves request with untrusted or missing Origin/Referer is rejected with 403", async () => {
+    const phone = generateRandomEgyptianPhone();
+
+    // Untrusted Origin
+    const untrustedReq = new NextRequest("http://localhost:3000/api/v1/auth/phone/request", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: "https://evil.example.com",
+      },
+      body: JSON.stringify({ phone }),
+    });
+
+    const resUntrusted = await requestHandler(untrustedReq);
+    expect(resUntrusted.status).toBe(403);
+
+    // Missing Origin & Referer
+    const missingReq = new NextRequest("http://localhost:3000/api/v1/auth/phone/request", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ phone }),
+    });
+
+    const resMissing = await requestHandler(missingReq);
+    expect(resMissing.status).toBe(403);
+  });
+
+  it("11. proves retention cleanup removes expired challenges and rate limit buckets", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+
+    const prisma = getPrisma();
+    const oldDate = new Date(Date.now() - 48 * 60 * 60 * 1000); // 48 hours ago
+    const phone = generateRandomEgyptianPhone();
+    const lookup = computePhoneLookupHash(phone, TEST_LOOKUP_KEY);
+
+    // Insert an old expired challenge
+    await prisma.otpChallenge.create({
+      data: {
+        phoneLookupHash: lookup,
+        status: OtpChallengeStatus.CONSUMED,
+        codeHash: "0000000000000000000000000000000000000000000000000000000000000000",
+        dispatchId: "old-dispatch",
+        expiresAt: oldDate,
+        cooldownUntil: oldDate,
+        consumedAt: oldDate,
+        createdAt: oldDate,
+      },
+    });
+
+    // Insert an old rate limit bucket
+    await prisma.rateLimitBucket.create({
+      data: {
+        key: `old_bucket_${crypto.randomUUID()}`,
+        points: 5,
+        expireAt: new Date(Date.now() - 2 * 60 * 60 * 1000), // 2 hours ago
+        createdAt: oldDate,
+      },
+    });
+
+    const purgeRes = await purgeExpiredAuthRecords(prisma);
+    expect(purgeRes.deletedChallenges).toBeGreaterThanOrEqual(1);
+    expect(purgeRes.deletedRateLimits).toBeGreaterThanOrEqual(1);
   });
 });

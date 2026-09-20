@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useI18n } from "@/context/I18nContext";
 import { PhoneInputStep } from "./PhoneInputStep";
 import { OtpInputStep } from "./OtpInputStep";
+import { sanitizeReturnUrl } from "@/lib/security/redirect";
 
 type Step = "phone" | "otp";
 
@@ -12,7 +13,7 @@ export function CustomerLoginForm() {
   const { t, dir } = useI18n();
   const router = useRouter();
   const searchParams = useSearchParams();
-  const returnUrl = searchParams.get("returnUrl") || "/";
+  const safeReturnUrl = sanitizeReturnUrl(searchParams.get("returnUrl"));
 
   const [step, setStep] = useState<Step>("phone");
   const [canonicalPhone, setCanonicalPhone] = useState<string>("");
@@ -86,7 +87,7 @@ export function CustomerLoginForm() {
       setSuccessMessage(t("auth.verificationSuccess"));
       // Short delay to allow user to see success state, then redirect
       setTimeout(() => {
-        router.push(returnUrl);
+        router.replace(safeReturnUrl);
         router.refresh();
       }, 500);
     } catch {

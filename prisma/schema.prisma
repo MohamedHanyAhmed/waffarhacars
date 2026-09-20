@@ -83,21 +83,33 @@ enum OtpPurpose {
   CUSTOMER_AUTH
 }
 
+enum OtpChallengeStatus {
+  PENDING
+  ACTIVE
+  CONSUMED
+  EXPIRED
+  LOCKED
+  SUPERSEDED
+  DELIVERY_FAILED
+}
+
 model OtpChallenge {
-  id                 String     @id @default(dbgenerated("pg_catalog.gen_random_uuid()")) @db.Uuid
-  phone              String     @db.VarChar(20)
-  phoneLookupHash    String     @db.VarChar(64)
-  purpose            OtpPurpose @default(CUSTOMER_AUTH)
-  codeHash           String     @db.VarChar(64)
+  id                 String             @id @default(dbgenerated("pg_catalog.gen_random_uuid()")) @db.Uuid
+  phoneLookupHash    String             @db.VarChar(64)
+  purpose            OtpPurpose         @default(CUSTOMER_AUTH)
+  status             OtpChallengeStatus @default(PENDING)
+  codeHash           String             @db.VarChar(64)
+  dispatchId         String             @db.VarChar(64)
   expiresAt          DateTime
   cooldownUntil      DateTime
-  failedAttemptCount Int        @default(0)
-  sendCount          Int        @default(1)
+  lockoutUntil       DateTime?
+  failedAttemptCount Int                @default(0)
+  sendCount          Int                @default(1)
   consumedAt         DateTime?
-  createdAt          DateTime   @default(now())
-  updatedAt          DateTime   @updatedAt
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
 
-  @@index([phoneLookupHash, purpose])
+  @@index([phoneLookupHash, status])
   @@index([expiresAt])
   @@map("otp_challenge")
 }
