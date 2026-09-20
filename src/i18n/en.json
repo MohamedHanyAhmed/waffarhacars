@@ -261,5 +261,27 @@
     "routeReview": "8. Customer Review",
     "routeSales": "9. Sales Wizard",
     "routeOps": "10. Operations & Ledger"
+  },
+  "auth": {
+    "loginTitle": "Customer Sign In",
+    "loginSubtitle": "Enter your Egyptian mobile number to sign in or create an account with SMS OTP.",
+    "phoneLabel": "Mobile Number",
+    "phonePlaceholder": "010 1234 5678",
+    "phoneHint": "Enter your 11-digit mobile number (010, 011, 012, or 015)",
+    "sendCode": "Send Verification Code",
+    "sending": "Sending...",
+    "otpTitle": "Enter Verification Code",
+    "otpSubtitle": "We sent a 6-digit code to",
+    "editPhone": "Edit number",
+    "verifyCode": "Verify & Continue",
+    "verifying": "Verifying...",
+    "resendPrompt": "Didn't receive the code?",
+    "resendIn": "Resend in {seconds}s",
+    "resendNow": "Resend Code",
+    "invalidPhone": "Please enter a valid Egyptian mobile number",
+    "invalidOtp": "Please enter a valid 6-digit code",
+    "rateLimitError": "Too many requests. Please try again later.",
+    "verificationSuccess": "Successfully signed in!",
+    "logout": "Sign Out"
   }
 }

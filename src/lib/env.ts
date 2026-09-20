@@ -22,6 +22,10 @@ const RawServerEnvSchema = z.object({
   BETTER_AUTH_SECRET: z.string().optional(),
   BETTER_AUTH_URL: z.string().optional(),
   AUTH_TRUSTED_ORIGINS: z.string().optional(),
+  OTP_PEPPER_SECRET: z.string().optional(),
+  PHONE_ALIAS_HMAC_KEY: z.string().optional(),
+  PHONE_LOOKUP_HMAC_KEY: z.string().optional(),
+  OTP_SMS_PROVIDER: z.enum(["test", "dev_capture", "egyptian_gateway"]).optional(),
 });
 
 export interface ServerEnv {
@@ -36,6 +40,10 @@ export interface ServerEnv {
   BETTER_AUTH_SECRET: string | undefined;
   BETTER_AUTH_URL: string | undefined;
   AUTH_TRUSTED_ORIGINS: string[];
+  OTP_PEPPER_SECRET: string | undefined;
+  PHONE_ALIAS_HMAC_KEY: string | undefined;
+  PHONE_LOOKUP_HMAC_KEY: string | undefined;
+  OTP_SMS_PROVIDER: "test" | "dev_capture" | "egyptian_gateway";
 }
 
 let cachedEnv: ServerEnv | null = null;
@@ -203,6 +211,34 @@ export function validateServerEnv(
     }
   }
 
+  const smsProvider =
+    data.OTP_SMS_PROVIDER ||
+    (data.APP_RUNTIME_PROFILE === "production" ? "egyptian_gateway" : "dev_capture");
+
+  if (data.APP_RUNTIME_PROFILE === "production") {
+    if (smsProvider === "test" || smsProvider === "dev_capture") {
+      throw new Error(
+        "Configuration error: Production runtime profile cannot use test or dev_capture SMS provider."
+      );
+    }
+  }
+
+  let otpPepper = data.OTP_PEPPER_SECRET?.trim();
+  let phoneAliasKey = data.PHONE_ALIAS_HMAC_KEY?.trim();
+  let phoneLookupKey = data.PHONE_LOOKUP_HMAC_KEY?.trim();
+
+  if (data.APP_DATA_BACKEND === "postgres") {
+    if (otpPepper) validateAuthSecret(otpPepper, data.APP_RUNTIME_PROFILE);
+    if (phoneAliasKey) validateAuthSecret(phoneAliasKey, data.APP_RUNTIME_PROFILE);
+    if (phoneLookupKey) validateAuthSecret(phoneLookupKey, data.APP_RUNTIME_PROFILE);
+
+    if (data.BETTER_AUTH_SECRET) {
+      if (!otpPepper) otpPepper = `${data.BETTER_AUTH_SECRET}_otp_pepper_fallback_32`;
+      if (!phoneAliasKey) phoneAliasKey = `${data.BETTER_AUTH_SECRET}_phone_alias_fallback_32`;
+      if (!phoneLookupKey) phoneLookupKey = `${data.BETTER_AUTH_SECRET}_phone_lookup_fallback_32`;
+    }
+  }
+
   return {
     APP_RUNTIME_PROFILE: data.APP_RUNTIME_PROFILE,
     APP_DATA_BACKEND: data.APP_DATA_BACKEND,
@@ -215,6 +251,10 @@ export function validateServerEnv(
     BETTER_AUTH_SECRET: data.BETTER_AUTH_SECRET?.trim(),
     BETTER_AUTH_URL: validatedAuthUrl,
     AUTH_TRUSTED_ORIGINS: trustedOrigins,
+    OTP_PEPPER_SECRET: otpPepper,
+    PHONE_ALIAS_HMAC_KEY: phoneAliasKey,
+    PHONE_LOOKUP_HMAC_KEY: phoneLookupKey,
+    OTP_SMS_PROVIDER: smsProvider,
   };
 }
 

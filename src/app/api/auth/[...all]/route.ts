@@ -27,6 +27,32 @@ export async function handleAuth(req: NextRequest): Promise<Response> {
     );
   }
 
+  // Block public exposure of Better Auth stock phone endpoints (Issue #10449 mitigation)
+  let pathname = "";
+  try {
+    pathname = new URL(req.url, "http://localhost").pathname;
+  } catch {
+    // ignore
+  }
+
+  if (pathname.includes("/phone-number") || pathname.includes("/sign-in/phone-number")) {
+    return Response.json(
+      {
+        type: "https://waffarhacars.com/errors/not-found",
+        title: "Not Found",
+        status: 404,
+        detail: "Endpoint not found",
+      },
+      {
+        status: 404,
+        headers: {
+          "Content-Type": "application/problem+json",
+          "Cache-Control": "no-store",
+        },
+      }
+    );
+  }
+
   try {
     const auth = getAuth();
     const res = await auth.handler(req);

@@ -1,9 +1,12 @@
 import "server-only";
 import { betterAuth, type BetterAuthOptions } from "better-auth";
+import { phoneNumber } from "better-auth/plugins";
 import { prismaAdapter } from "@better-auth/prisma-adapter";
 import { getPrisma } from "./db";
 import { getServerEnv } from "./env";
 import { authCoreOptions } from "./auth-core-options";
+import { normalizeEgyptianPhone, formatMaskedPhone } from "./phone";
+import { verifyAndConsumeOtpChallenge, generatePlaceholderEmail } from "./otp/challenge-service";
 
 let cachedAuth: ReturnType<typeof betterAuth> | null = null;
 
@@ -36,6 +39,38 @@ export function getAuthOptions(overrides: Partial<BetterAuthOptions> = {}): Bett
       enabled: true,
       disableSignUp: true, // Public email/password signup strictly disabled in production
     },
+    plugins: [
+      phoneNumber({
+        sendOTP: async () => {
+          // No-op: Public send-otp is blocked, application uses /api/v1/auth/phone/request
+        },
+        phoneNumberValidator: (phone) => normalizeEgyptianPhone(phone).success,
+        signUpOnVerification: {
+          getTempEmail: (phone) => generatePlaceholderEmail(phone),
+          getTempName: (phone) => formatMaskedPhone(phone),
+        },
+        verifyOTP: async ({ phoneNumber: phone, code }) => {
+          const res = await verifyAndConsumeOtpChallenge(phone, code);
+          return res.success;
+        },
+        callbackOnVerification: async ({ user }) => {
+          try {
+            const prisma = getPrisma();
+            await prisma.customerProfile.upsert({
+              where: { userId: user.id },
+              create: {
+                userId: user.id,
+                preferredLanguage: "ar",
+                notificationPreferences: { sms: true, whatsapp: false },
+              },
+              update: {},
+            });
+          } catch (err) {
+            console.error("[Profile Upsert Error]", err);
+          }
+        },
+      }),
+    ],
     databaseHooks: {
       session: {
         create: {
