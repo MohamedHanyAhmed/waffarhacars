@@ -137,8 +137,22 @@ export async function requestOtpChallenge(
       };
     }
 
-    // 3. Check for existing active/pending challenge — expired rows are excluded so
-    //    recovery after window expiry is permitted even if sendCount reached OTP_MAX_SENDS.
+    // 3. Transition any expired PENDING or ACTIVE challenges to EXPIRED so they release
+    //    the partial unique index ("phoneLookupHash", "purpose") WHERE "status" IN ('PENDING', 'ACTIVE').
+    await tx.otpChallenge.updateMany({
+      where: {
+        phoneLookupHash,
+        purpose,
+        status: { in: [OtpChallengeStatus.PENDING, OtpChallengeStatus.ACTIVE] },
+        expiresAt: { lte: now },
+      },
+      data: {
+        status: OtpChallengeStatus.EXPIRED,
+        updatedAt: now,
+      },
+    });
+
+    // 4. Check for existing active/pending challenge (now guaranteed unexpired)
     const activeRecords = await tx.$queryRaw<OtpChallenge[]>`
       SELECT * FROM "otp_challenge"
       WHERE "phoneLookupHash" = ${phoneLookupHash}
