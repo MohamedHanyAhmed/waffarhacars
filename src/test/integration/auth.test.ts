@@ -20,12 +20,7 @@ describe("Real PostgreSQL 17 Better Auth Database Session Integration Suite", ()
   let isDbReachable = false;
   const originalEnv = { ...process.env };
   const createdUserEmails: string[] = [];
-
-  // Isolated test auth instance enabling user provisioning solely for integration test execution
-  const testAuth = createTestAuth({
-    baseURL: "http://localhost:3000",
-    secret: TEST_SECRET,
-  });
+  let testAuth: ReturnType<typeof createTestAuth>;
 
   beforeAll(async () => {
     const probe = new pg.Client({
@@ -55,6 +50,11 @@ describe("Real PostgreSQL 17 Better Auth Database Session Integration Suite", ()
     process.env.DATABASE_DIRECT_URL = DEFAULT_TEST_DB_URL;
     process.env.BETTER_AUTH_SECRET = TEST_SECRET;
     process.env.BETTER_AUTH_URL = "http://localhost:3000";
+
+    testAuth = createTestAuth({
+      baseURL: "http://localhost:3000",
+      secret: TEST_SECRET,
+    });
   });
 
   afterEach(async () => {
