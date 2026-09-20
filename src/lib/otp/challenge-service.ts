@@ -103,7 +103,7 @@ export async function requestOtpChallenge(
 
   const prep = await prisma.$transaction(async (tx): Promise<PreparationResult> => {
     // 1. Transaction-scoped advisory lock on phone hash
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`waffarhacars_otp:${phoneLookupHash}`}));`;
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`waffarhacars_otp:${phoneLookupHash}`}));`;
 
     // 2. Check for active lockout
     const lockedRecords = await tx.$queryRaw<OtpChallenge[]>`
@@ -260,7 +260,7 @@ export async function requestOtpChallenge(
 
   // Phase 3: Transition state based on synchronous delivery result under advisory lock
   return await prisma.$transaction(async (tx): Promise<RequestOtpResult> => {
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`waffarhacars_otp:${phoneLookupHash}`}));`;
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`waffarhacars_otp:${phoneLookupHash}`}));`;
 
     if (dispatchSuccess) {
       // Transition PENDING -> ACTIVE
@@ -329,7 +329,7 @@ export async function verifyAndConsumeOtpChallenge(
 
   return await prisma.$transaction(async (tx): Promise<VerifyOtpResult> => {
     // 1. Transaction-scoped advisory lock
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`waffarhacars_otp:${phoneLookupHash}`}));`;
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`waffarhacars_otp:${phoneLookupHash}`}));`;
 
     // 2. Lock the active challenge row
     const activeChallenges = await tx.$queryRaw<OtpChallenge[]>`
