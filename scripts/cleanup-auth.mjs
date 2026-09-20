@@ -33,6 +33,7 @@ export async function runCleanup(connectionStringOverride) {
     return { success: false, skipped: false, error: "MISSING_DATABASE_URL" };
   }
 
+  const client = new pg.Client({ connectionString });
   let clientConnected = false;
   try {
     await client.connect();
