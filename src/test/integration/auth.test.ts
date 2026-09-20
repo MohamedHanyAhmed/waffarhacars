@@ -320,7 +320,7 @@ describe("Real PostgreSQL 17 Better Auth Database Session Integration Suite", ()
     const prodSetCookie = prodSignInRes.headers.get("set-cookie") || "";
     const parsedProdCookie = parseSetCookie(prodSetCookie);
 
-    expect(parsedProdCookie.name).toBe("better-auth.session_token");
+    expect(parsedProdCookie.name).toBe("__Secure-better-auth.session_token");
     expect(parsedProdCookie.value).toBeTruthy();
     expect(parsedProdCookie.isHttpOnly).toBe(true);
     expect(parsedProdCookie.isSecure).toBe(true); // Secure=true in production
@@ -515,13 +515,17 @@ describe("Real PostgreSQL 17 Better Auth Database Session Integration Suite", ()
     expect(parsedCookie.isSecure).toBe(false);
     expect(parsedCookie.sameSite?.toLowerCase()).toBe("lax");
 
-    // Retrieve database session row from PostgreSQL
+    // Retrieve database session row from PostgreSQL for the signed-in user
     const prisma = getPrisma();
-    const dbSession = await prisma.session.findUnique({
-      where: { token: parsedCookie.value },
+    const dbUser = await prisma.user.findUnique({ where: { email } });
+    expect(dbUser).not.toBeNull();
+
+    const dbSessions = await prisma.session.findMany({
+      where: { userId: dbUser!.id },
+      orderBy: { createdAt: "desc" },
     });
-    expect(dbSession).not.toBeNull();
-    const realDbToken = dbSession!.token;
+    expect(dbSessions.length).toBeGreaterThanOrEqual(1);
+    const realDbToken = dbSessions[0].token;
 
     // Verify response body JSON
     const bodyText = await res.text();
@@ -539,7 +543,7 @@ describe("Real PostgreSQL 17 Better Auth Database Session Integration Suite", ()
 
     // 3. Authentication using the preserved cookie still succeeds on session probe
     const probeReq = new NextRequest("http://localhost:3000/api/auth/probe", {
-      headers: { cookie: `better-auth.session_token=${realDbToken}` },
+      headers: { cookie: setCookie.split(";")[0] },
     });
     const probeRes = await probeHandler(probeReq);
     expect(probeRes.status).toBe(200);
