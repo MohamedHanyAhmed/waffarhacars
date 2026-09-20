@@ -26,6 +26,7 @@ const RawServerEnvSchema = z.object({
   PHONE_ALIAS_HMAC_KEY: z.string().optional(),
   PHONE_LOOKUP_HMAC_KEY: z.string().optional(),
   OTP_SMS_PROVIDER: z.enum(["test", "dev_capture", "egyptian_gateway"]).optional(),
+  OTP_DISPATCH_TIMEOUT_MS: z.coerce.number().int().min(100).max(30000).default(8000),
   TRUSTED_PROXY_HOPS: z.coerce.number().int().min(0).max(10).default(0),
 });
 
@@ -45,6 +46,7 @@ export interface ServerEnv {
   PHONE_ALIAS_HMAC_KEY: string | undefined;
   PHONE_LOOKUP_HMAC_KEY: string | undefined;
   OTP_SMS_PROVIDER: "test" | "dev_capture" | "egyptian_gateway";
+  OTP_DISPATCH_TIMEOUT_MS: number;
   TRUSTED_PROXY_HOPS: number;
 }
 
@@ -279,6 +281,7 @@ export function validateServerEnv(
     PHONE_ALIAS_HMAC_KEY: phoneAliasKey,
     PHONE_LOOKUP_HMAC_KEY: phoneLookupKey,
     OTP_SMS_PROVIDER: smsProvider,
+    OTP_DISPATCH_TIMEOUT_MS: data.OTP_DISPATCH_TIMEOUT_MS,
     TRUSTED_PROXY_HOPS: data.TRUSTED_PROXY_HOPS,
   };
 }

@@ -19,6 +19,7 @@ export class TestSmsAdapter implements SmsAdapter {
   private simulatedTimeout = false;
   private simulatedException: Error | null = null;
   private isDeferred = false;
+  private ignoreCancellation = false;
   private deferredPromise: {
     resolve: (val: SmsSendResult) => void;
     reject: (err: Error) => void;
@@ -55,6 +56,24 @@ export class TestSmsAdapter implements SmsAdapter {
     if (this.isDeferred) {
       return new Promise<SmsSendResult>((resolve, reject) => {
         this.deferredPromise = { resolve, reject };
+        if (input.signal && !this.ignoreCancellation) {
+          input.signal.addEventListener(
+            "abort",
+            () => {
+              this.lastSendAborted = true;
+              if (this.deferredPromise) {
+                this.deferredPromise.resolve({
+                  success: false,
+                  idempotencyKey: input.idempotencyKey,
+                  status: "failed",
+                  errorCategory: "GATEWAY_TIMEOUT",
+                });
+                this.deferredPromise = null;
+              }
+            },
+            { once: true }
+          );
+        }
       });
     }
 
@@ -135,8 +154,9 @@ export class TestSmsAdapter implements SmsAdapter {
     this.simulatedException = err;
   }
 
-  setDeferred(enabled: boolean): void {
+  setDeferred(enabled: boolean, options?: { ignoreCancellation?: boolean }): void {
     this.isDeferred = enabled;
+    this.ignoreCancellation = options?.ignoreCancellation ?? false;
     if (!enabled) {
       this.deferredPromise = null;
     }
@@ -172,6 +192,7 @@ export class TestSmsAdapter implements SmsAdapter {
     this.simulatedTimeout = false;
     this.simulatedException = null;
     this.isDeferred = false;
+    this.ignoreCancellation = false;
     this.deferredPromise = null;
     this.lastSendAborted = false;
   }

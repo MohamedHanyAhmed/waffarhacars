@@ -33,9 +33,10 @@ export async function runCleanup(connectionStringOverride) {
     return { success: false, skipped: false, error: "MISSING_DATABASE_URL" };
   }
 
-  const client = new pg.Client({ connectionString });
+  let clientConnected = false;
   try {
     await client.connect();
+    clientConnected = true;
 
     // 1. Acquire non-blocking 64-bit advisory lock
     const lockRes = await client.query(
@@ -89,12 +90,14 @@ export async function runCleanup(connectionStringOverride) {
         "SELECT pg_advisory_unlock(hashtextextended('waffarhacars_auth_cleanup', 0));"
       );
     }
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error during cleanup";
-    console.error(`[auth:cleanup] ERROR: Retention cleanup failed: ${message}`);
-    return { success: false, skipped: false, error: message };
+  } catch (_err) {
+    const errorCode = clientConnected ? "CLEANUP_EXECUTION_ERROR" : "DATABASE_CONNECTION_ERROR";
+    console.error(`[auth:cleanup] ERROR: Retention cleanup failed: ${errorCode}`);
+    return { success: false, skipped: false, error: errorCode };
   } finally {
-    await client.end().catch(() => {});
+    if (clientConnected) {
+      await client.end().catch(() => {});
+    }
   }
 }
 
@@ -111,8 +114,8 @@ if (isDirectExecution) {
         process.exitCode = 1;
       }
     })
-    .catch((err) => {
-      console.error("[auth:cleanup] Unhandled fatal error:", err);
+    .catch(() => {
+      console.error("[auth:cleanup] Fatal unhandled error during cleanup execution.");
       process.exitCode = 1;
     });
 }

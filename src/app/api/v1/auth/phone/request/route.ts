@@ -217,6 +217,27 @@ export async function POST(req: NextRequest): Promise<Response> {
       );
     }
 
+    if (
+      challengeResult.error === "DISPATCH_SUPERSEDED" ||
+      challengeResult.error === "DISPATCH_LOST_RACE"
+    ) {
+      return Response.json(
+        {
+          type: "https://waffarhacars.com/errors/request-conflict",
+          title: "Request Conflict",
+          status: 409,
+          detail: "The authentication challenge state was superseded. Please start a new request.",
+        },
+        {
+          status: 409,
+          headers: {
+            "Content-Type": "application/problem+json",
+            "Cache-Control": "no-store",
+          },
+        }
+      );
+    }
+
     // SMS_DELIVERY_FAILED
     return Response.json(
       {

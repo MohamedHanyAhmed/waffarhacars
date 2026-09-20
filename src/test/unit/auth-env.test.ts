@@ -449,4 +449,87 @@ describe("Server Auth Environment Validation", () => {
       expect(message).toContain("Configuration error");
     }
   });
+
+  describe("OTP_DISPATCH_TIMEOUT_MS validation", () => {
+    it("defaults to 8000 when missing", () => {
+      const env = validateServerEnv({
+        APP_RUNTIME_PROFILE: "showcase",
+        APP_DATA_BACKEND: "demo",
+      });
+      expect(env.OTP_DISPATCH_TIMEOUT_MS).toBe(8000);
+    });
+
+    it("parses valid integer timeout values within [100, 30000]", () => {
+      const env1 = validateServerEnv({
+        APP_RUNTIME_PROFILE: "showcase",
+        APP_DATA_BACKEND: "demo",
+        OTP_DISPATCH_TIMEOUT_MS: "100",
+      });
+      expect(env1.OTP_DISPATCH_TIMEOUT_MS).toBe(100);
+
+      const env2 = validateServerEnv({
+        APP_RUNTIME_PROFILE: "showcase",
+        APP_DATA_BACKEND: "demo",
+        OTP_DISPATCH_TIMEOUT_MS: "5000",
+      });
+      expect(env2.OTP_DISPATCH_TIMEOUT_MS).toBe(5000);
+
+      const env3 = validateServerEnv({
+        APP_RUNTIME_PROFILE: "showcase",
+        APP_DATA_BACKEND: "demo",
+        OTP_DISPATCH_TIMEOUT_MS: "30000",
+      });
+      expect(env3.OTP_DISPATCH_TIMEOUT_MS).toBe(30000);
+    });
+
+    it("fails when OTP_DISPATCH_TIMEOUT_MS is 0", () => {
+      expect(() =>
+        validateServerEnv({
+          APP_RUNTIME_PROFILE: "showcase",
+          APP_DATA_BACKEND: "demo",
+          OTP_DISPATCH_TIMEOUT_MS: "0",
+        })
+      ).toThrow();
+    });
+
+    it("fails when OTP_DISPATCH_TIMEOUT_MS is negative", () => {
+      expect(() =>
+        validateServerEnv({
+          APP_RUNTIME_PROFILE: "showcase",
+          APP_DATA_BACKEND: "demo",
+          OTP_DISPATCH_TIMEOUT_MS: "-100",
+        })
+      ).toThrow();
+    });
+
+    it("fails when OTP_DISPATCH_TIMEOUT_MS is NaN", () => {
+      expect(() =>
+        validateServerEnv({
+          APP_RUNTIME_PROFILE: "showcase",
+          APP_DATA_BACKEND: "demo",
+          OTP_DISPATCH_TIMEOUT_MS: "not-a-number",
+        })
+      ).toThrow();
+    });
+
+    it("fails when OTP_DISPATCH_TIMEOUT_MS is Infinity", () => {
+      expect(() =>
+        validateServerEnv({
+          APP_RUNTIME_PROFILE: "showcase",
+          APP_DATA_BACKEND: "demo",
+          OTP_DISPATCH_TIMEOUT_MS: "Infinity",
+        })
+      ).toThrow();
+    });
+
+    it("fails when OTP_DISPATCH_TIMEOUT_MS exceeds 30000", () => {
+      expect(() =>
+        validateServerEnv({
+          APP_RUNTIME_PROFILE: "showcase",
+          APP_DATA_BACKEND: "demo",
+          OTP_DISPATCH_TIMEOUT_MS: "30001",
+        })
+      ).toThrow();
+    });
+  });
 });

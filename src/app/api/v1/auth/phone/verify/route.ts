@@ -228,7 +228,44 @@ export async function POST(req: NextRequest): Promise<Response> {
     );
   }
 
-  if (!authRes || !authRes.ok) {
+  if (!authRes) {
+    return Response.json(
+      {
+        type: "https://waffarhacars.com/errors/internal-error",
+        title: "Internal Authentication Error",
+        status: 500,
+        detail: "Authentication service encountered an unexpected error.",
+      },
+      {
+        status: 500,
+        headers: {
+          "Content-Type": "application/problem+json",
+          "Cache-Control": "no-store",
+        },
+      }
+    );
+  }
+
+  if (authRes.status >= 500) {
+    const status = authRes.status >= 500 && authRes.status <= 504 ? authRes.status : 500;
+    return Response.json(
+      {
+        type: "https://waffarhacars.com/errors/internal-error",
+        title: "Internal Authentication Error",
+        status,
+        detail: "Authentication service encountered an internal failure.",
+      },
+      {
+        status,
+        headers: {
+          "Content-Type": "application/problem+json",
+          "Cache-Control": "no-store",
+        },
+      }
+    );
+  }
+
+  if (!authRes.ok) {
     return Response.json(
       {
         type: "https://waffarhacars.com/errors/invalid-otp",
@@ -246,30 +283,50 @@ export async function POST(req: NextRequest): Promise<Response> {
     );
   }
 
-  // 7. Synchronous Profile Verification & Consistency Check
+  // 7. Post-Auth Invariant & Profile Consistency Check
+  // Profile creation is strictly owned by callbackOnVerification.
+  // If the profile is missing, revoke the newly created session to prevent orphan live sessions.
   try {
     const user = await prisma.user.findUnique({
       where: { phoneNumber: canonicalE164 },
       include: { customerProfile: true },
     });
 
-    if (!user) {
-      throw new Error("User record missing following verification");
-    }
-
-    if (!user.customerProfile) {
-      await prisma.customerProfile.create({
-        data: {
-          userId: user.id,
-          preferredLanguage: "ar",
+    if (!user || !user.customerProfile) {
+      if (user?.id) {
+        await prisma.session.deleteMany({
+          where: { userId: user.id },
+        });
+      }
+      return Response.json(
+        {
+          type: "https://waffarhacars.com/errors/internal-error",
+          title: "Customer Profile Error",
+          status: 500,
+          detail: "Authentication succeeded but customer profile consistency check failed.",
         },
-      });
+        {
+          status: 500,
+          headers: {
+            "Content-Type": "application/problem+json",
+            "Cache-Control": "no-store",
+          },
+        }
+      );
     }
   } catch (err: unknown) {
     console.error(
       "[Profile Consistency Error]",
       err instanceof Error ? err.message : "Profile check failed"
     );
+    try {
+      const u = await prisma.user.findUnique({ where: { phoneNumber: canonicalE164 } });
+      if (u?.id) {
+        await prisma.session.deleteMany({ where: { userId: u.id } });
+      }
+    } catch {
+      // Secondary revocation failure ignored
+    }
     return Response.json(
       {
         type: "https://waffarhacars.com/errors/internal-error",

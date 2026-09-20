@@ -418,7 +418,8 @@ describe("Real PostgreSQL 17 Egyptian Customer Mobile OTP & Concurrency Integrat
     }
 
     const phone = generateRandomEgyptianPhone();
-    process.env.OTP_DISPATCH_TIMEOUT_MS = "50";
+    process.env.OTP_DISPATCH_TIMEOUT_MS = "150";
+    resetServerEnvCache();
     testSmsAdapter.setSimulateTimeout(true);
 
     try {
@@ -428,10 +429,17 @@ describe("Real PostgreSQL 17 Egyptian Customer Mobile OTP & Concurrency Integrat
         body: JSON.stringify({ phone }),
       });
 
+      const startTime = Date.now();
       const res = await requestHandler(req);
+      const elapsedMs = Date.now() - startTime;
+
       expect(res.status).toBe(502);
       const json = await res.json();
       expect(json.type).toBe("https://waffarhacars.com/errors/sms-delivery-failed");
+
+      // Verify that the timeout abort completed within bounded window (< 2000ms vs 8000ms default)
+      expect(elapsedMs).toBeLessThan(2000);
+      expect(elapsedMs).toBeGreaterThanOrEqual(130);
 
       const prisma = getPrisma();
       const lookup = computePhoneLookupHash(phone, TEST_LOOKUP_KEY);
@@ -441,11 +449,12 @@ describe("Real PostgreSQL 17 Egyptian Customer Mobile OTP & Concurrency Integrat
       expect(unknownRows.length).toBe(1);
     } finally {
       delete process.env.OTP_DISPATCH_TIMEOUT_MS;
+      resetServerEnvCache();
       testSmsAdapter.setSimulateTimeout(false);
     }
   });
 
-  it("10a. proves prior ACTIVE code remains usable while replacement send is unresolved (deferred adapter)", async () => {
+  it("10a. proves consuming prior ACTIVE code while replacement is in-flight prevents replacement from becoming ACTIVE", async () => {
     if (!isDbReachable) {
       throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
     }
@@ -484,31 +493,57 @@ describe("Real PostgreSQL 17 Egyptian Customer Mobile OTP & Concurrency Integrat
     });
     expect(pendingChallenge).not.toBeNull();
 
-    // 4. Verify that code A remains completely verifiable and consumable WHILE dispatch is unresolved!
+    // 4. Verify that code A remains completely verifiable and is CONSUMED while dispatch is in-flight
     const verifyA = await verifyAndConsumeOtpChallenge(phone, codeA);
     expect(verifyA.success).toBe(true);
 
     // 5. Now resolve the deferred dispatch
     testSmsAdapter.resolveDeferred({ success: true, status: "delivered" });
     const res2 = await sendPromise;
-    expect(res2.success).toBe(true);
+
+    // The replacement dispatch must report non-success because earlier challenge was consumed
+    expect(res2.success).toBe(false);
+    if (!res2.success) {
+      expect(res2.error).toBe("DISPATCH_SUPERSEDED");
+    }
 
     testSmsAdapter.setDeferred(false);
+
+    // 6. Inspect final database state: assert NO ACTIVE challenge remains after consumption
+    const remainingActive = await prisma.otpChallenge.findMany({
+      where: { phoneLookupHash: lookup, status: OtpChallengeStatus.ACTIVE },
+    });
+    expect(remainingActive.length).toBe(0);
+
+    const supersededChallenges = await prisma.otpChallenge.findMany({
+      where: { phoneLookupHash: lookup, status: OtpChallengeStatus.SUPERSEDED },
+    });
+    expect(supersededChallenges.length).toBe(1);
   });
 
-  it("10b. proves late-resolution after timeout does not violate DB constraints or corrupt future dispatches", async () => {
+  it("10b. proves late provider resolution after timeout cannot transition row to ACTIVE", async () => {
     if (!isDbReachable) {
       throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
     }
 
     const phone = generateRandomEgyptianPhone();
-    process.env.OTP_DISPATCH_TIMEOUT_MS = "50";
-    testSmsAdapter.setSimulateTimeout(true);
+    process.env.OTP_DISPATCH_TIMEOUT_MS = "150";
+    resetServerEnvCache();
+
+    // Configure deferred adapter with ignoreCancellation to simulate an upstream provider
+    // that continues processing and resolves late despite client abort
+    testSmsAdapter.setDeferred(true, { ignoreCancellation: true });
 
     try {
-      // 1. Request times out and transitions to DELIVERY_UNKNOWN
-      const req = await requestOtpChallenge(phone);
-      expect(req.success).toBe(false);
+      // 1. Start dispatch using deferred adapter
+      const dispatchPromise = requestOtpChallenge(phone);
+
+      // 2. Allow application timeout (150ms) to fire and mark challenge DELIVERY_UNKNOWN
+      const timeoutResult = await dispatchPromise;
+      expect(timeoutResult.success).toBe(false);
+      if (!timeoutResult.success) {
+        expect(timeoutResult.error).toBe("SMS_DELIVERY_FAILED");
+      }
 
       const prisma = getPrisma();
       const lookup = computePhoneLookupHash(phone, TEST_LOOKUP_KEY);
@@ -516,22 +551,118 @@ describe("Real PostgreSQL 17 Egyptian Customer Mobile OTP & Concurrency Integrat
         where: { phoneLookupHash: lookup, status: OtpChallengeStatus.DELIVERY_UNKNOWN },
       });
       expect(unknownRows.length).toBe(1);
+      const timedOutChallengeId = unknownRows[0].id;
 
-      // 2. Late resolution: reset timeout and make fresh request
-      testSmsAdapter.setSimulateTimeout(false);
+      // 3. Resolve the original deferred provider promise AFTERWARD with a successful result
+      let unhandledRejectionOccurred = false;
+      const unhandledHandler = () => {
+        unhandledRejectionOccurred = true;
+      };
+      process.on("unhandledRejection", unhandledHandler);
+
+      testSmsAdapter.resolveDeferred({ success: true, status: "delivered" });
+
+      // Give microtasks and event loop ticks to settle
+      await new Promise((r) => setTimeout(r, 60));
+      process.off("unhandledRejection", unhandledHandler);
+
+      // 4. Assert late resolution cannot transition that original row to ACTIVE and no unhandled rejection
+      expect(unhandledRejectionOccurred).toBe(false);
+      const originalRow = await prisma.otpChallenge.findUnique({
+        where: { id: timedOutChallengeId },
+      });
+      expect(originalRow?.status).toBe(OtpChallengeStatus.DELIVERY_UNKNOWN);
+
+      // 5. Clean up deferred adapter and reset environment
+      testSmsAdapter.setDeferred(false);
       delete process.env.OTP_DISPATCH_TIMEOUT_MS;
+      resetServerEnvCache();
 
+      // Clear cooldown so fresh dispatch can proceed
+      await prisma.otpChallenge.updateMany({
+        where: { phoneLookupHash: lookup },
+        data: { cooldownUntil: new Date(Date.now() - 1000) },
+      });
+
+      // 6. Assert subsequent fresh dispatch succeeds
       const freshReq = await requestOtpChallenge(phone);
       expect(freshReq.success).toBe(true);
 
+      // 7. Assert exactly one ACTIVE challenge exists afterward
       const activeRows = await prisma.otpChallenge.findMany({
         where: { phoneLookupHash: lookup, status: OtpChallengeStatus.ACTIVE },
       });
       expect(activeRows.length).toBe(1);
     } finally {
       delete process.env.OTP_DISPATCH_TIMEOUT_MS;
-      testSmsAdapter.setSimulateTimeout(false);
+      resetServerEnvCache();
+      testSmsAdapter.setDeferred(false);
     }
+  });
+
+  it("10c. proves CAS prevents stale recovered dispatch from becoming ACTIVE or interfering with fresh dispatch", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+
+    const phone = generateRandomEgyptianPhone();
+    testSmsAdapter.setDeferred(true, { ignoreCancellation: true });
+
+    // 1. Dispatch A begins
+    const dispatchAPromise = requestOtpChallenge(phone);
+    await new Promise((r) => setTimeout(r, 50));
+
+    const prisma = getPrisma();
+    const lookup = computePhoneLookupHash(phone, TEST_LOOKUP_KEY);
+
+    const pendingA = await prisma.otpChallenge.findFirst({
+      where: { phoneLookupHash: lookup, status: OtpChallengeStatus.PENDING },
+    });
+    expect(pendingA).not.toBeNull();
+
+    // 2. Dispatch A exceeds its lease (manually backdate lease)
+    await prisma.otpChallenge.update({
+      where: { id: pendingA!.id },
+      data: {
+        dispatchLeaseExpiresAt: new Date(Date.now() - 5000),
+        cooldownUntil: new Date(Date.now() - 5000),
+      },
+    });
+
+    // 3. Request B starts: its preparation recovers A to DELIVERY_UNKNOWN and proceeds with B
+    testSmsAdapter.setDeferred(false);
+    const dispatchB = await requestOtpChallenge(phone);
+    expect(dispatchB.success).toBe(true);
+
+    // Verify A was recovered to DELIVERY_UNKNOWN and B is ACTIVE
+    const rowA = await prisma.otpChallenge.findUnique({ where: { id: pendingA!.id } });
+    expect(rowA?.status).toBe(OtpChallengeStatus.DELIVERY_UNKNOWN);
+
+    const activeRowsBefore = await prisma.otpChallenge.findMany({
+      where: { phoneLookupHash: lookup, status: OtpChallengeStatus.ACTIVE },
+    });
+    expect(activeRowsBefore.length).toBe(1);
+    const activeBId = activeRowsBefore[0].id;
+
+    // 4. Dispatch A later reports success!
+    testSmsAdapter.resolveDeferred({ success: true, status: "delivered" });
+    const resultA = await dispatchAPromise;
+
+    // 5. A must report failure (DISPATCH_LOST_RACE) and NOT become ACTIVE
+    expect(resultA.success).toBe(false);
+    if (!resultA.success) {
+      expect(resultA.error).toBe("DISPATCH_LOST_RACE");
+    }
+
+    // 6. A did not overwrite B and did not become ACTIVE
+    const finalRowA = await prisma.otpChallenge.findUnique({ where: { id: pendingA!.id } });
+    expect(finalRowA?.status).toBe(OtpChallengeStatus.DELIVERY_UNKNOWN);
+
+    const activeRowsAfter = await prisma.otpChallenge.findMany({
+      where: { phoneLookupHash: lookup, status: OtpChallengeStatus.ACTIVE },
+    });
+    expect(activeRowsAfter.length).toBe(1);
+    expect(activeRowsAfter[0].id).toBe(activeBId);
   });
 
   it("10. proves failed resend preserves the previous active valid code", async () => {
@@ -812,6 +943,167 @@ describe("Real PostgreSQL 17 Egyptian Customer Mobile OTP & Concurrency Integrat
     }
   });
 
+  it("14b. proves post-auth profile invariant failure revokes newly created session, returns 500, and allows recovery", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+
+    const phone = generateRandomEgyptianPhone();
+    await requestOtpChallenge(phone);
+    const validCode = testSmsAdapter.getLastOtp(phone)!;
+
+    const prisma = getPrisma();
+    const canonical = phone.startsWith("+20") ? phone : `+20${phone.replace(/^0/, "")}`;
+
+    // Intercept prisma.user.findUnique so that when step 7 inspects the user,
+    // it finds customerProfile: null, triggering the invariant check session revocation
+    const originalFindUnique = prisma.user.findUnique;
+    let intercepted = false;
+    // @ts-expect-error Mocking findUnique for invariant failure injection
+    prisma.user.findUnique = async (args) => {
+      const realUser = await originalFindUnique.call(prisma.user, args);
+      if (realUser && realUser.phoneNumber === canonical && !intercepted) {
+        intercepted = true;
+        return {
+          ...realUser,
+          customerProfile: null,
+        };
+      }
+      return realUser;
+    };
+
+    try {
+      const verifyReq = new NextRequest("http://localhost:3000/api/v1/auth/phone/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Origin: "http://localhost:3000" },
+        body: JSON.stringify({ phone, code: validCode }),
+      });
+
+      const res = await verifyHandler(verifyReq);
+      // 1. Response is 500
+      expect(res.status).toBe(500);
+      const json = await res.json();
+      expect(json.type).toBe("https://waffarhacars.com/errors/internal-error");
+
+      // 2. No Set-Cookie is returned
+      expect(res.headers.get("set-cookie")).toBeNull();
+
+      // 3. No usable session remains in PostgreSQL
+      const user = await originalFindUnique.call(prisma.user, {
+        where: { phoneNumber: canonical },
+      });
+      expect(user).not.toBeNull();
+      if (user) {
+        const sessions = await prisma.session.findMany({ where: { userId: user.id } });
+        expect(sessions.length).toBe(0);
+      }
+    } finally {
+      prisma.user.findUnique = originalFindUnique;
+    }
+
+    // 4. Test recovery path: Next request succeeds cleanly
+    const lookup = computePhoneLookupHash(phone, TEST_LOOKUP_KEY);
+    await prisma.otpChallenge.updateMany({
+      where: { phoneLookupHash: lookup },
+      data: { cooldownUntil: new Date(Date.now() - 1000) },
+    });
+
+    const recoverRequest = await requestOtpChallenge(phone);
+    expect(recoverRequest.success).toBe(true);
+    const recoverCode = testSmsAdapter.getLastOtp(phone)!;
+
+    const recoverVerifyReq = new NextRequest("http://localhost:3000/api/v1/auth/phone/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: "http://localhost:3000" },
+      body: JSON.stringify({ phone, code: recoverCode }),
+    });
+
+    const recoverRes = await verifyHandler(recoverVerifyReq);
+    expect(recoverRes.status).toBe(200);
+    expect(recoverRes.headers.get("set-cookie")).not.toBeNull();
+
+    const recoveredUser = await prisma.user.findUnique({ where: { phoneNumber: canonical } });
+    const recoveredSessions = await prisma.session.findMany({
+      where: { userId: recoveredUser!.id },
+    });
+    expect(recoveredSessions.length).toBe(1);
+  });
+
+  it("15b. proves Better Auth 500 response returns sanitized 500 and does not convert to 400", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+
+    const phone = generateRandomEgyptianPhone();
+    await requestOtpChallenge(phone);
+    const validCode = testSmsAdapter.getLastOtp(phone)!;
+
+    const auth = getAuth();
+    const phoneApi = auth.api as unknown as {
+      verifyPhoneNumber: (opts: unknown) => Promise<Response>;
+    };
+    const originalVerifyPhoneNumber = phoneApi.verifyPhoneNumber;
+    phoneApi.verifyPhoneNumber = async () => {
+      return new Response(JSON.stringify({ error: "Better Auth internal database node failure" }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      });
+    };
+
+    try {
+      const verifyReq = new NextRequest("http://localhost:3000/api/v1/auth/phone/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Origin: "http://localhost:3000" },
+        body: JSON.stringify({ phone, code: validCode }),
+      });
+
+      const res = await verifyHandler(verifyReq);
+      expect(res.status).toBe(500);
+      const json = await res.json();
+      expect(json.type).toBe("https://waffarhacars.com/errors/internal-error");
+      expect(json.status).toBe(500);
+      expect(JSON.stringify(json)).not.toContain("Better Auth internal database node failure");
+    } finally {
+      phoneApi.verifyPhoneNumber = originalVerifyPhoneNumber;
+    }
+  });
+
+  it("15c. proves Better Auth thrown exception returns sanitized 500 internal error", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+
+    const phone = generateRandomEgyptianPhone();
+    await requestOtpChallenge(phone);
+    const validCode = testSmsAdapter.getLastOtp(phone)!;
+
+    const auth = getAuth();
+    const phoneApi = auth.api as unknown as {
+      verifyPhoneNumber: (opts: unknown) => Promise<Response>;
+    };
+    const originalVerifyPhoneNumber = phoneApi.verifyPhoneNumber;
+    phoneApi.verifyPhoneNumber = async () => {
+      throw new Error("Fatal runtime heap exhaustion inside Better Auth");
+    };
+
+    try {
+      const verifyReq = new NextRequest("http://localhost:3000/api/v1/auth/phone/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Origin: "http://localhost:3000" },
+        body: JSON.stringify({ phone, code: validCode }),
+      });
+
+      const res = await verifyHandler(verifyReq);
+      expect(res.status).toBe(500);
+      const json = await res.json();
+      expect(json.type).toBe("https://waffarhacars.com/errors/internal-error");
+      expect(json.status).toBe(500);
+      expect(JSON.stringify(json)).not.toContain("Fatal runtime heap exhaustion");
+    } finally {
+      phoneApi.verifyPhoneNumber = originalVerifyPhoneNumber;
+    }
+  });
+
   it("16. proves request with untrusted or missing Origin/Referer is rejected with 403, and configured second origin succeeds", async () => {
     const phone = generateRandomEgyptianPhone();
 
@@ -1013,6 +1305,37 @@ describe("Real PostgreSQL 17 Egyptian Customer Mobile OTP & Concurrency Integrat
         "SELECT pg_advisory_unlock(hashtextextended('waffarhacars_auth_cleanup', 0));"
       );
       await lockClient.end().catch(() => {});
+    }
+  });
+
+  it("20b. proves cleanup failure with connection error sanitizes output and never exposes database URL or credentials", async () => {
+    const sensitiveUrl =
+      "postgresql://secret_user:super_secret_password@invalid-host.waffarhacars.internal:5432/secret_db";
+    let capturedErrors = "";
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => {
+      capturedErrors += args.join(" ") + "\n";
+    };
+
+    try {
+      const result = await runCleanup(sensitiveUrl);
+      expect(result.success).toBe(false);
+      expect(result.skipped).toBe(false);
+      expect(result.error).toBe("DATABASE_CONNECTION_ERROR");
+
+      // Verify no sensitive tokens or hostnames are leaked in return value or logs
+      expect(result.error).not.toContain("secret_user");
+      expect(result.error).not.toContain("super_secret_password");
+      expect(result.error).not.toContain("invalid-host");
+      expect(result.error).not.toContain("secret_db");
+
+      expect(capturedErrors).not.toContain("secret_user");
+      expect(capturedErrors).not.toContain("super_secret_password");
+      expect(capturedErrors).not.toContain("invalid-host");
+      expect(capturedErrors).not.toContain("secret_db");
+      expect(capturedErrors).not.toContain("DELETE FROM");
+    } finally {
+      console.error = originalError;
     }
   });
 

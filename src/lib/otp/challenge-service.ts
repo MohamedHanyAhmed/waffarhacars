@@ -8,16 +8,22 @@ export const OTP_VALIDITY_SECONDS = 180;
 export const OTP_COOLDOWN_SECONDS = 60;
 export const OTP_MAX_ATTEMPTS = 3;
 export const OTP_LOCKOUT_SECONDS = 900; // 15 minutes bounded lockout
-export const OTP_DISPATCH_TIMEOUT_MS =
-  typeof process !== "undefined" && process.env.OTP_DISPATCH_TIMEOUT_MS
-    ? Number(process.env.OTP_DISPATCH_TIMEOUT_MS)
-    : 8000; // 8 seconds default dispatch timeout
+
+export function getOtpDispatchTimeoutMs(): number {
+  try {
+    return getServerEnv().OTP_DISPATCH_TIMEOUT_MS;
+  } catch {
+    return 8000;
+  }
+}
 
 export type RequestOtpResult =
   | { success: true; cooldownSeconds: number }
   | { success: false; error: "COOLDOWN_ACTIVE"; retryAfterSeconds: number }
   | { success: false; error: "PHONE_LOCKED"; retryAfterSeconds: number }
-  | { success: false; error: "SMS_DELIVERY_FAILED"; errorCategory?: string };
+  | { success: false; error: "SMS_DELIVERY_FAILED"; errorCategory?: string }
+  | { success: false; error: "DISPATCH_SUPERSEDED" }
+  | { success: false; error: "DISPATCH_LOST_RACE" };
 
 export type VerifyOtpResult =
   | { success: true }
@@ -100,11 +106,13 @@ export function generateOtpCode(): string {
  */
 export async function requestOtpChallenge(
   canonicalE164: string,
-  purpose: OtpPurpose = OtpPurpose.CUSTOMER_AUTH
+  purpose: OtpPurpose = OtpPurpose.CUSTOMER_AUTH,
+  options?: { timeoutMs?: number }
 ): Promise<RequestOtpResult> {
   const prisma = getPrisma();
   const phoneLookupHash = computePhoneLookupHash(canonicalE164);
   const now = new Date();
+  const dispatchTimeoutMs = options?.timeoutMs ?? getOtpDispatchTimeoutMs();
 
   const code = generateOtpCode();
   const codeHash = computeCodeHash(code);
@@ -234,7 +242,7 @@ export async function requestOtpChallenge(
       .slice(0, 32);
 
     const message = `رمز التحقق الخاص بك في وفّرها كارز هو: ${code}. صالح لمدة 3 دقائق. لا تشاركه مع أحد.`;
-    const dispatchLeaseExpiresAt = new Date(now.getTime() + OTP_DISPATCH_TIMEOUT_MS + 2000);
+    const dispatchLeaseExpiresAt = new Date(now.getTime() + dispatchTimeoutMs + 2000);
 
     // Create separate PENDING challenge record.
     // NOTE: The existing ACTIVE challenge is deliberately NOT modified here.
@@ -281,14 +289,14 @@ export async function requestOtpChallenge(
       timeoutHandle = setTimeout(() => {
         abortController.abort();
         reject(new Error("SMS Gateway timeout"));
-      }, OTP_DISPATCH_TIMEOUT_MS);
+      }, dispatchTimeoutMs);
     });
 
     const sendPromise = adapter.send({
       toCanonicalE164: canonicalE164,
       message: prep.message,
       idempotencyKey: prep.dispatchId,
-      timeoutMs: OTP_DISPATCH_TIMEOUT_MS,
+      timeoutMs: dispatchTimeoutMs,
       signal: abortController.signal,
     });
 
@@ -321,7 +329,57 @@ export async function requestOtpChallenge(
     await acquirePhoneOtpAdvisoryLock(tx, phoneLookupHash);
 
     if (outcome.type === "SUCCESS") {
-      // Confirmed delivery: atomically supersede old ACTIVE challenge (if still ACTIVE) and activate PENDING
+      // 1. Check if previous ACTIVE challenge was consumed while replacement was in-flight
+      if (prep.previousActiveId) {
+        const prev = await tx.otpChallenge.findUnique({
+          where: { id: prep.previousActiveId },
+          select: { status: true },
+        });
+        if (prev?.status === OtpChallengeStatus.CONSUMED) {
+          // Rule: If previous ACTIVE challenge was consumed while replacement was in-flight,
+          // replacement PENDING challenge must NOT be promoted to ACTIVE.
+          // Terminally mark it SUPERSEDED via CAS and return safe non-success result.
+          await tx.otpChallenge.updateMany({
+            where: {
+              id: prep.pendingId,
+              dispatchId: prep.dispatchId,
+              status: OtpChallengeStatus.PENDING,
+            },
+            data: {
+              status: OtpChallengeStatus.SUPERSEDED,
+              dispatchLeaseExpiresAt: null,
+              updatedAt: new Date(),
+            },
+          });
+          return {
+            success: false,
+            error: "DISPATCH_SUPERSEDED",
+          };
+        }
+      }
+
+      // 2. Compare-and-set promote PENDING to ACTIVE
+      const cas = await tx.otpChallenge.updateMany({
+        where: {
+          id: prep.pendingId,
+          dispatchId: prep.dispatchId,
+          status: OtpChallengeStatus.PENDING,
+        },
+        data: {
+          status: OtpChallengeStatus.ACTIVE,
+          dispatchLeaseExpiresAt: null,
+          updatedAt: new Date(),
+        },
+      });
+
+      if (cas.count === 0) {
+        return {
+          success: false,
+          error: "DISPATCH_LOST_RACE",
+        };
+      }
+
+      // 3. Do not supersede existing ACTIVE challenge until ownership of PENDING is confirmed inside the same locked transaction
       if (prep.previousActiveId) {
         await tx.otpChallenge.updateMany({
           where: { id: prep.previousActiveId, status: OtpChallengeStatus.ACTIVE },
@@ -332,15 +390,6 @@ export async function requestOtpChallenge(
         });
       }
 
-      await tx.otpChallenge.update({
-        where: { id: prep.pendingId },
-        data: {
-          status: OtpChallengeStatus.ACTIVE,
-          dispatchLeaseExpiresAt: null,
-          updatedAt: new Date(),
-        },
-      });
-
       return {
         success: true,
         cooldownSeconds: OTP_COOLDOWN_SECONDS,
@@ -348,15 +397,26 @@ export async function requestOtpChallenge(
     }
 
     if (outcome.type === "FAILURE") {
-      // Confirmed provider rejection: mark only PENDING as DELIVERY_FAILED. Previous ACTIVE remains untouched!
-      await tx.otpChallenge.update({
-        where: { id: prep.pendingId },
+      // Confirmed provider rejection: mark only PENDING as DELIVERY_FAILED via CAS
+      const cas = await tx.otpChallenge.updateMany({
+        where: {
+          id: prep.pendingId,
+          dispatchId: prep.dispatchId,
+          status: OtpChallengeStatus.PENDING,
+        },
         data: {
           status: OtpChallengeStatus.DELIVERY_FAILED,
           dispatchLeaseExpiresAt: null,
           updatedAt: new Date(),
         },
       });
+
+      if (cas.count === 0) {
+        return {
+          success: false,
+          error: "DISPATCH_LOST_RACE",
+        };
+      }
 
       return {
         success: false,
@@ -366,15 +426,26 @@ export async function requestOtpChallenge(
     }
 
     // Outcome is UNKNOWN (e.g. timeout or network error where provider state cannot be proven)
-    // Mark PENDING as DELIVERY_UNKNOWN. Previous ACTIVE remains untouched!
-    await tx.otpChallenge.update({
-      where: { id: prep.pendingId },
+    // Mark PENDING as DELIVERY_UNKNOWN via CAS. Previous ACTIVE remains untouched!
+    const cas = await tx.otpChallenge.updateMany({
+      where: {
+        id: prep.pendingId,
+        dispatchId: prep.dispatchId,
+        status: OtpChallengeStatus.PENDING,
+      },
       data: {
         status: OtpChallengeStatus.DELIVERY_UNKNOWN,
         dispatchLeaseExpiresAt: null,
         updatedAt: new Date(),
       },
     });
+
+    if (cas.count === 0) {
+      return {
+        success: false,
+        error: "DISPATCH_LOST_RACE",
+      };
+    }
 
     return {
       success: false,
