@@ -1676,7 +1676,7 @@ describe("Real PostgreSQL 17 Egyptian Customer Mobile OTP & Concurrency Integrat
     }
   });
 
-  it("15c. proves Better Auth thrown exception returns sanitized 500 internal error", async () => {
+  it("15c. proves Better Auth thrown exception returns sanitized 500 internal error and logs sanitized operational code", async () => {
     if (!isDbReachable) {
       throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
     }
@@ -1690,9 +1690,20 @@ describe("Real PostgreSQL 17 Egyptian Customer Mobile OTP & Concurrency Integrat
       verifyPhoneNumber: (opts: unknown) => Promise<Response>;
     };
     const originalVerifyPhoneNumber = phoneApi.verifyPhoneNumber;
+
+    const fakeHostname = "db-node-primary.internal.waffarhacars.com:5432";
+    const fakePassword = "super_secret_db_password_12345";
+    const fakeSql = "SELECT * FROM public.session WHERE secret_token = 'tok_xyz987'";
+    const fakePhone = phone;
+    const fakeToken = "sensitive_session_token_abc_999";
+
+    const sensitiveErrorMsg = `DB_FATAL_ERROR at ${fakeHostname} with auth pass=${fakePassword}: failed executing query [${fakeSql}] for phone=${fakePhone} and session=${fakeToken}`;
+
     phoneApi.verifyPhoneNumber = async () => {
-      throw new Error("Fatal runtime heap exhaustion inside Better Auth");
+      throw new Error(sensitiveErrorMsg);
     };
+
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     try {
       const verifyReq = new NextRequest("http://localhost:3000/api/v1/auth/phone/verify", {
@@ -1706,9 +1717,32 @@ describe("Real PostgreSQL 17 Egyptian Customer Mobile OTP & Concurrency Integrat
       const json = await res.json();
       expect(json.type).toBe("https://waffarhacars.com/errors/internal-error");
       expect(json.status).toBe(500);
-      expect(JSON.stringify(json)).not.toContain("Fatal runtime heap exhaustion");
+      expect(res.headers.get("set-cookie")).toBeNull();
+
+      // Assert none of the sensitive values appear in the HTTP response
+      const responseStr = JSON.stringify(json);
+      expect(responseStr).not.toContain(fakeHostname);
+      expect(responseStr).not.toContain(fakePassword);
+      expect(responseStr).not.toContain(fakeSql);
+      expect(responseStr).not.toContain(fakeToken);
+      expect(responseStr).not.toContain(fakePhone);
+
+      // Assert stable operational code is logged
+      const loggedMessages = errorSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      expect(loggedMessages).toContain(
+        "[Verify Auth Error] Code: AUTH_VERIFICATION_EXECUTION_ERROR"
+      );
+
+      // Assert none of the sensitive values appear in logs
+      expect(loggedMessages).not.toContain(fakeHostname);
+      expect(loggedMessages).not.toContain(fakePassword);
+      expect(loggedMessages).not.toContain(fakeSql);
+      expect(loggedMessages).not.toContain(fakeToken);
+      expect(loggedMessages).not.toContain(fakePhone);
+      expect(loggedMessages).not.toContain("DB_FATAL_ERROR");
     } finally {
       phoneApi.verifyPhoneNumber = originalVerifyPhoneNumber;
+      errorSpy.mockRestore();
     }
   });
 

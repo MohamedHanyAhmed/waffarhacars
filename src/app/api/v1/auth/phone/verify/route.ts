@@ -209,8 +209,8 @@ export async function POST(req: NextRequest): Promise<Response> {
       headers: req.headers,
       asResponse: true,
     });
-  } catch (err: unknown) {
-    console.error("[Verify Auth Error]", err instanceof Error ? err.message : "Unknown auth error");
+  } catch {
+    console.error("[Verify Auth Error] Code: AUTH_VERIFICATION_EXECUTION_ERROR");
     return Response.json(
       {
         type: "https://waffarhacars.com/errors/internal-error",
