@@ -10,10 +10,13 @@ export const OTP_MAX_ATTEMPTS = 3;
 export const OTP_LOCKOUT_SECONDS = 900; // 15 minutes bounded lockout
 
 export function getOtpDispatchTimeoutMs(): number {
-  try {
-    return getServerEnv().OTP_DISPATCH_TIMEOUT_MS;
-  } catch {
-    return 8000;
+  return getServerEnv().OTP_DISPATCH_TIMEOUT_MS;
+}
+
+export class ControlledCasLostError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ControlledCasLostError";
   }
 }
 
@@ -325,96 +328,184 @@ export async function requestOtpChallenge(
   }
 
   // Phase 3: Transition state based on synchronous delivery result under 64-bit advisory lock
-  return await prisma.$transaction(async (tx): Promise<RequestOtpResult> => {
-    await acquirePhoneOtpAdvisoryLock(tx, phoneLookupHash);
+  try {
+    return await prisma.$transaction(async (tx): Promise<RequestOtpResult> => {
+      await acquirePhoneOtpAdvisoryLock(tx, phoneLookupHash);
 
-    if (outcome.type === "SUCCESS") {
-      // 1. Check if previous ACTIVE challenge was consumed while replacement was in-flight
-      if (prep.previousActiveId) {
-        const prev = await tx.otpChallenge.findUnique({
-          where: { id: prep.previousActiveId },
-          select: { status: true },
-        });
-        if (prev?.status === OtpChallengeStatus.CONSUMED) {
-          // Rule: If previous ACTIVE challenge was consumed while replacement was in-flight,
-          // replacement PENDING challenge must NOT be promoted to ACTIVE.
-          // Terminally mark it SUPERSEDED via CAS and return safe non-success result.
-          await tx.otpChallenge.updateMany({
-            where: {
-              id: prep.pendingId,
-              dispatchId: prep.dispatchId,
-              status: OtpChallengeStatus.PENDING,
-            },
-            data: {
-              status: OtpChallengeStatus.SUPERSEDED,
-              dispatchLeaseExpiresAt: null,
-              updatedAt: new Date(),
-            },
-          });
+      if (outcome.type === "SUCCESS") {
+        // 1. Confirm ownership of PENDING challenge using SELECT ... FOR UPDATE
+        const pendingRecords = await tx.$queryRaw<OtpChallenge[]>`
+          SELECT * FROM "otp_challenge"
+          WHERE "id" = ${prep.pendingId}::uuid
+            AND "dispatchId" = ${prep.dispatchId}
+            AND "status" = ${OtpChallengeStatus.PENDING}::"OtpChallengeStatus"
+          LIMIT 1
+          FOR UPDATE
+        `;
+
+        const pendingRecord = pendingRecords[0];
+        if (!pendingRecord) {
+          // Ownership lost (e.g. lease expired and recovered by another worker)
+          // Do not mutate previous ACTIVE challenge or DB state
           return {
             success: false,
-            error: "DISPATCH_SUPERSEDED",
+            error: "DISPATCH_LOST_RACE",
           };
         }
-      }
 
-      // 2. Confirm ownership of PENDING challenge inside transaction
-      const pendingRecord = await tx.otpChallenge.findFirst({
-        where: {
-          id: prep.pendingId,
-          dispatchId: prep.dispatchId,
-          status: OtpChallengeStatus.PENDING,
-        },
-      });
+        // 2. Re-read and evaluate previous challenge under the advisory lock
+        let finalFailedAttemptCount = pendingRecord.failedAttemptCount;
 
-      if (!pendingRecord) {
-        // Ownership lost: do not supersede existing ACTIVE challenge
-        return {
-          success: false,
-          error: "DISPATCH_LOST_RACE",
-        };
-      }
+        if (prep.previousActiveId) {
+          const prevRecords = await tx.$queryRaw<OtpChallenge[]>`
+            SELECT * FROM "otp_challenge"
+            WHERE "id" = ${prep.previousActiveId}::uuid
+            LIMIT 1
+            FOR UPDATE
+          `;
+          const prev = prevRecords[0];
 
-      // 3. Ownership confirmed: now supersede existing ACTIVE challenge to free unique constraint
-      if (prep.previousActiveId) {
-        await tx.otpChallenge.updateMany({
-          where: { id: prep.previousActiveId, status: OtpChallengeStatus.ACTIVE },
+          if (!prev) {
+            // Previous challenge missing (e.g. purged)
+          } else if (prev.status === OtpChallengeStatus.LOCKED) {
+            // Previous challenge reached maximum attempts and became LOCKED while replacement was in-flight.
+            // Terminally invalidate pending challenge and preserve phone lockout.
+            await tx.otpChallenge.update({
+              where: { id: prep.pendingId },
+              data: {
+                status: OtpChallengeStatus.SUPERSEDED,
+                dispatchLeaseExpiresAt: null,
+                updatedAt: new Date(),
+              },
+            });
+
+            const remainingMs = Math.max(
+              1000,
+              (prev.lockoutUntil?.getTime() ?? Date.now() + OTP_LOCKOUT_SECONDS * 1000) - Date.now()
+            );
+            return {
+              success: false,
+              error: "PHONE_LOCKED",
+              retryAfterSeconds: Math.ceil(remainingMs / 1000),
+            };
+          } else if (prev.status === OtpChallengeStatus.CONSUMED) {
+            // Previous challenge was consumed while replacement was in flight.
+            // Terminally mark pending as SUPERSEDED.
+            await tx.otpChallenge.update({
+              where: { id: prep.pendingId },
+              data: {
+                status: OtpChallengeStatus.SUPERSEDED,
+                dispatchLeaseExpiresAt: null,
+                updatedAt: new Date(),
+              },
+            });
+            return {
+              success: false,
+              error: "DISPATCH_SUPERSEDED",
+            };
+          } else if (prev.status === OtpChallengeStatus.SUPERSEDED) {
+            // Previous challenge was superseded by another dispatch.
+            await tx.otpChallenge.update({
+              where: { id: prep.pendingId },
+              data: {
+                status: OtpChallengeStatus.SUPERSEDED,
+                dispatchLeaseExpiresAt: null,
+                updatedAt: new Date(),
+              },
+            });
+            return {
+              success: false,
+              error: "DISPATCH_SUPERSEDED",
+            };
+          } else if (prev.status === OtpChallengeStatus.ACTIVE) {
+            // Previous challenge is still ACTIVE.
+            // Inherit current failedAttemptCount using maximum value so attempt budget is never reduced.
+            finalFailedAttemptCount = Math.max(
+              prev.failedAttemptCount,
+              pendingRecord.failedAttemptCount
+            );
+
+            // Atomically supersede previous ACTIVE challenge to free unique constraint slot
+            await tx.otpChallenge.update({
+              where: { id: prev.id },
+              data: {
+                status: OtpChallengeStatus.SUPERSEDED,
+                updatedAt: new Date(),
+              },
+            });
+          } else if (prev.status === OtpChallengeStatus.EXPIRED) {
+            // Previous challenge expired while replacement was in flight.
+            finalFailedAttemptCount = Math.max(
+              prev.failedAttemptCount,
+              pendingRecord.failedAttemptCount
+            );
+          } else {
+            // Any other terminal state
+            finalFailedAttemptCount = Math.max(
+              prev.failedAttemptCount,
+              pendingRecord.failedAttemptCount
+            );
+          }
+        }
+
+        // 3. Compare-and-set promote PENDING to ACTIVE
+        const cas = await tx.otpChallenge.updateMany({
+          where: {
+            id: prep.pendingId,
+            dispatchId: prep.dispatchId,
+            status: OtpChallengeStatus.PENDING,
+          },
           data: {
-            status: OtpChallengeStatus.SUPERSEDED,
+            status: OtpChallengeStatus.ACTIVE,
+            failedAttemptCount: finalFailedAttemptCount,
+            dispatchLeaseExpiresAt: null,
             updatedAt: new Date(),
           },
         });
-      }
 
-      // 4. Compare-and-set promote PENDING to ACTIVE
-      const cas = await tx.otpChallenge.updateMany({
-        where: {
-          id: prep.pendingId,
-          dispatchId: prep.dispatchId,
-          status: OtpChallengeStatus.PENDING,
-        },
-        data: {
-          status: OtpChallengeStatus.ACTIVE,
-          dispatchLeaseExpiresAt: null,
-          updatedAt: new Date(),
-        },
-      });
+        if (cas.count === 0) {
+          // Controlled transaction error: causes PostgreSQL to rollback all transaction mutations,
+          // including the superseding of previousActiveId!
+          throw new ControlledCasLostError("CAS promotion failed to update pending challenge");
+        }
 
-      if (cas.count === 0) {
         return {
-          success: false,
-          error: "DISPATCH_LOST_RACE",
+          success: true,
+          cooldownSeconds: OTP_COOLDOWN_SECONDS,
         };
       }
 
-      return {
-        success: true,
-        cooldownSeconds: OTP_COOLDOWN_SECONDS,
-      };
-    }
+      if (outcome.type === "FAILURE") {
+        // Confirmed provider rejection: mark only PENDING as DELIVERY_FAILED via CAS
+        const cas = await tx.otpChallenge.updateMany({
+          where: {
+            id: prep.pendingId,
+            dispatchId: prep.dispatchId,
+            status: OtpChallengeStatus.PENDING,
+          },
+          data: {
+            status: OtpChallengeStatus.DELIVERY_FAILED,
+            dispatchLeaseExpiresAt: null,
+            updatedAt: new Date(),
+          },
+        });
 
-    if (outcome.type === "FAILURE") {
-      // Confirmed provider rejection: mark only PENDING as DELIVERY_FAILED via CAS
+        if (cas.count === 0) {
+          return {
+            success: false,
+            error: "DISPATCH_LOST_RACE",
+          };
+        }
+
+        return {
+          success: false,
+          error: "SMS_DELIVERY_FAILED",
+          errorCategory: outcome.errorCategory,
+        };
+      }
+
+      // Outcome is UNKNOWN (e.g. timeout or network error where provider state cannot be proven)
+      // Mark PENDING as DELIVERY_UNKNOWN via CAS. Previous ACTIVE remains untouched!
       const cas = await tx.otpChallenge.updateMany({
         where: {
           id: prep.pendingId,
@@ -422,7 +513,7 @@ export async function requestOtpChallenge(
           status: OtpChallengeStatus.PENDING,
         },
         data: {
-          status: OtpChallengeStatus.DELIVERY_FAILED,
+          status: OtpChallengeStatus.DELIVERY_UNKNOWN,
           dispatchLeaseExpiresAt: null,
           updatedAt: new Date(),
         },
@@ -440,36 +531,16 @@ export async function requestOtpChallenge(
         error: "SMS_DELIVERY_FAILED",
         errorCategory: outcome.errorCategory,
       };
-    }
-
-    // Outcome is UNKNOWN (e.g. timeout or network error where provider state cannot be proven)
-    // Mark PENDING as DELIVERY_UNKNOWN via CAS. Previous ACTIVE remains untouched!
-    const cas = await tx.otpChallenge.updateMany({
-      where: {
-        id: prep.pendingId,
-        dispatchId: prep.dispatchId,
-        status: OtpChallengeStatus.PENDING,
-      },
-      data: {
-        status: OtpChallengeStatus.DELIVERY_UNKNOWN,
-        dispatchLeaseExpiresAt: null,
-        updatedAt: new Date(),
-      },
     });
-
-    if (cas.count === 0) {
+  } catch (err: unknown) {
+    if (err instanceof ControlledCasLostError) {
       return {
         success: false,
         error: "DISPATCH_LOST_RACE",
       };
     }
-
-    return {
-      success: false,
-      error: "SMS_DELIVERY_FAILED",
-      errorCategory: outcome.errorCategory,
-    };
-  });
+    throw err;
+  }
 }
 
 /**

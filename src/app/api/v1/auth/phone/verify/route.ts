@@ -182,12 +182,24 @@ export async function POST(req: NextRequest): Promise<Response> {
 
   const prisma = getPrisma();
 
-  // Check whether this user exists beforehand to determine isNewCustomer
+  // Check whether this user exists beforehand to determine isNewCustomer and snapshot existing sessions
   const preExistingUser = await prisma.user.findUnique({
     where: { phoneNumber: canonicalE164 },
     select: { id: true },
   });
   const isNewCustomer = !preExistingUser;
+
+  // Snapshot existing session IDs for this user so only the newly created session is revoked on compensation
+  const preExistingSessionIds = preExistingUser
+    ? new Set(
+        (
+          await prisma.session.findMany({
+            where: { userId: preExistingUser.id },
+            select: { id: true },
+          })
+        ).map((s) => s.id)
+      )
+    : new Set<string>();
 
   // 6. Invoke Better Auth internal phone verification endpoint
   let authRes: Response;
@@ -283,9 +295,47 @@ export async function POST(req: NextRequest): Promise<Response> {
     );
   }
 
+  // Helper to extract session token from Set-Cookie header if present
+  const extractSessionTokenFromResponse = (res: Response): string | null => {
+    const setCookies =
+      typeof res.headers.getSetCookie === "function"
+        ? res.headers.getSetCookie()
+        : res.headers.get("set-cookie")
+          ? [res.headers.get("set-cookie")!]
+          : [];
+
+    for (const cookieStr of setCookies) {
+      const match = cookieStr.match(/(?:^|;\s*)(?:__Secure-)?better-auth\.session_token=([^;]+)/);
+      if (match) {
+        const rawVal = decodeURIComponent(match[1].trim());
+        return rawVal.split(".")[0];
+      }
+    }
+    return null;
+  };
+
+  const revokeCurrentSessionOnly = async (userId: string): Promise<void> => {
+    const token = extractSessionTokenFromResponse(authRes);
+    if (token) {
+      await prisma.session.deleteMany({
+        where: {
+          userId,
+          token,
+        },
+      });
+    } else {
+      await prisma.session.deleteMany({
+        where: {
+          userId,
+          id: { notIn: Array.from(preExistingSessionIds) },
+        },
+      });
+    }
+  };
+
   // 7. Post-Auth Invariant & Profile Consistency Check
   // Profile creation is strictly owned by callbackOnVerification.
-  // If the profile is missing, revoke the newly created session to prevent orphan live sessions.
+  // If the profile is missing, revoke ONLY the newly created session, preserving pre-existing user sessions.
   try {
     const user = await prisma.user.findUnique({
       where: { phoneNumber: canonicalE164 },
@@ -294,9 +344,14 @@ export async function POST(req: NextRequest): Promise<Response> {
 
     if (!user || !user.customerProfile) {
       if (user?.id) {
-        await prisma.session.deleteMany({
-          where: { userId: user.id },
-        });
+        try {
+          await revokeCurrentSessionOnly(user.id);
+        } catch (compensationErr) {
+          console.error(
+            "[Session Compensation Failed] Failed to revoke newly created session:",
+            compensationErr instanceof Error ? compensationErr.message : "Revocation error"
+          );
+        }
       }
       return Response.json(
         {
@@ -322,10 +377,13 @@ export async function POST(req: NextRequest): Promise<Response> {
     try {
       const u = await prisma.user.findUnique({ where: { phoneNumber: canonicalE164 } });
       if (u?.id) {
-        await prisma.session.deleteMany({ where: { userId: u.id } });
+        await revokeCurrentSessionOnly(u.id);
       }
-    } catch {
-      // Secondary revocation failure ignored
+    } catch (compensationErr) {
+      console.error(
+        "[Session Compensation Failed] Failed to revoke newly created session:",
+        compensationErr instanceof Error ? compensationErr.message : "Revocation error"
+      );
     }
     return Response.json(
       {

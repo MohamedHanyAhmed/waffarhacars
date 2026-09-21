@@ -8,6 +8,14 @@ export interface CapturedSms {
   otpCode?: string;
 }
 
+interface DeferredDispatchHandle {
+  idempotencyKey: string;
+  resolve: (val: SmsSendResult) => void;
+  reject: (err: Error) => void;
+  input: SmsSendInput;
+  ignoreCancellation: boolean;
+}
+
 /**
  * Deterministic in-memory test capture SMS adapter.
  * Used exclusively in automated tests. Never sends real network requests.
@@ -19,11 +27,10 @@ export class TestSmsAdapter implements SmsAdapter {
   private simulatedTimeout = false;
   private simulatedException: Error | null = null;
   private isDeferred = false;
-  private ignoreCancellation = false;
-  private deferredPromise: {
-    resolve: (val: SmsSendResult) => void;
-    reject: (err: Error) => void;
-  } | null = null;
+  private defaultIgnoreCancellation = false;
+  private deferNextCount = 0;
+  private deferNextOptions: { ignoreCancellation?: boolean } | null = null;
+  private deferredDispatches = new Map<string, DeferredDispatchHandle>();
   private lastSendAborted = false;
 
   async send(input: SmsSendInput): Promise<SmsSendResult> {
@@ -53,22 +60,44 @@ export class TestSmsAdapter implements SmsAdapter {
       throw this.simulatedException;
     }
 
-    if (this.isDeferred) {
+    const shouldDefer = this.isDeferred || this.deferNextCount > 0;
+    const ignoreCancellation =
+      this.deferNextCount > 0
+        ? (this.deferNextOptions?.ignoreCancellation ?? false)
+        : this.defaultIgnoreCancellation;
+
+    if (this.deferNextCount > 0) {
+      this.deferNextCount--;
+      if (this.deferNextCount === 0) {
+        this.deferNextOptions = null;
+      }
+    }
+
+    if (shouldDefer) {
       return new Promise<SmsSendResult>((resolve, reject) => {
-        this.deferredPromise = { resolve, reject };
-        if (input.signal && !this.ignoreCancellation) {
+        const handle: DeferredDispatchHandle = {
+          idempotencyKey: input.idempotencyKey,
+          resolve,
+          reject,
+          input,
+          ignoreCancellation,
+        };
+        this.deferredDispatches.set(input.idempotencyKey, handle);
+
+        if (input.signal && !ignoreCancellation) {
           input.signal.addEventListener(
             "abort",
             () => {
               this.lastSendAborted = true;
-              if (this.deferredPromise) {
-                this.deferredPromise.resolve({
+              const current = this.deferredDispatches.get(input.idempotencyKey);
+              if (current) {
+                this.deferredDispatches.delete(input.idempotencyKey);
+                current.resolve({
                   success: false,
                   idempotencyKey: input.idempotencyKey,
                   status: "failed",
                   errorCategory: "GATEWAY_TIMEOUT",
                 });
-                this.deferredPromise = null;
               }
             },
             { once: true }
@@ -154,32 +183,80 @@ export class TestSmsAdapter implements SmsAdapter {
     this.simulatedException = err;
   }
 
+  deferNextSend(options?: { ignoreCancellation?: boolean }): void {
+    this.deferNextCount = 1;
+    this.deferNextOptions = options ?? null;
+  }
+
   setDeferred(enabled: boolean, options?: { ignoreCancellation?: boolean }): void {
     this.isDeferred = enabled;
-    this.ignoreCancellation = options?.ignoreCancellation ?? false;
-    if (!enabled) {
-      this.deferredPromise = null;
-    }
+    this.defaultIgnoreCancellation = options?.ignoreCancellation ?? false;
+    // Note: Existing in-flight deferredDispatches are preserved so subsequent resolveDispatch works!
   }
 
-  resolveDeferred(result?: Partial<SmsSendResult>): void {
-    if (this.deferredPromise) {
-      const defaultResult: SmsSendResult = {
-        success: true,
-        idempotencyKey: "deferred-key",
-        status: "delivered",
-        ...result,
-      };
-      this.deferredPromise.resolve(defaultResult);
-      this.deferredPromise = null;
+  resolveDispatch(idempotencyKey: string, result?: Partial<SmsSendResult>): boolean {
+    const handle = this.deferredDispatches.get(idempotencyKey);
+    if (!handle) {
+      return false;
     }
+    this.deferredDispatches.delete(idempotencyKey);
+
+    const match = handle.input.message.match(/\b(\d{6})\b/);
+    const otpCode = match ? match[1] : undefined;
+
+    this.captured.push({
+      toCanonicalE164: handle.input.toCanonicalE164,
+      message: handle.input.message,
+      idempotencyKey: handle.input.idempotencyKey,
+      timestamp: new Date(),
+      otpCode,
+    });
+
+    const defaultResult: SmsSendResult = {
+      success: true,
+      providerMessageId: `deferred-msg-${this.captured.length}`,
+      idempotencyKey: handle.idempotencyKey,
+      status: "delivered",
+      ...result,
+    };
+    handle.resolve(defaultResult);
+    return true;
   }
 
-  rejectDeferred(err: Error): void {
-    if (this.deferredPromise) {
-      this.deferredPromise.reject(err);
-      this.deferredPromise = null;
+  rejectDispatch(idempotencyKey: string, error: Error): boolean {
+    const handle = this.deferredDispatches.get(idempotencyKey);
+    if (!handle) {
+      return false;
     }
+    this.deferredDispatches.delete(idempotencyKey);
+    handle.reject(error);
+    return true;
+  }
+
+  hasDeferredDispatch(idempotencyKey: string): boolean {
+    return this.deferredDispatches.has(idempotencyKey);
+  }
+
+  resolveDeferred(result?: Partial<SmsSendResult>): boolean {
+    const entries = Array.from(this.deferredDispatches.entries());
+    if (entries.length === 0) {
+      return false;
+    }
+    for (const [key] of entries) {
+      this.resolveDispatch(key, result);
+    }
+    return true;
+  }
+
+  rejectDeferred(err: Error): boolean {
+    const entries = Array.from(this.deferredDispatches.entries());
+    if (entries.length === 0) {
+      return false;
+    }
+    for (const [key] of entries) {
+      this.rejectDispatch(key, err);
+    }
+    return true;
   }
 
   wasLastSendAborted(): boolean {
@@ -192,8 +269,10 @@ export class TestSmsAdapter implements SmsAdapter {
     this.simulatedTimeout = false;
     this.simulatedException = null;
     this.isDeferred = false;
-    this.ignoreCancellation = false;
-    this.deferredPromise = null;
+    this.defaultIgnoreCancellation = false;
+    this.deferNextCount = 0;
+    this.deferNextOptions = null;
+    this.deferredDispatches.clear();
     this.lastSendAborted = false;
   }
 }

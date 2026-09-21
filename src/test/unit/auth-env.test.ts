@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { validateServerEnv } from "@/lib/env";
+import { validateServerEnv, resetServerEnvCache } from "@/lib/env";
+import { getOtpDispatchTimeoutMs } from "@/lib/otp/challenge-service";
 
 const VALID_POSTGRES_URL = "postgresql://test_user:test_password@localhost:5432/waffarhacars_test";
 const VALID_DEV_SECRET = "dev-secret-at-least-32-chars-long-with-entropy-12345";
@@ -530,6 +531,56 @@ describe("Server Auth Environment Validation", () => {
           OTP_DISPATCH_TIMEOUT_MS: "30001",
         })
       ).toThrow();
+    });
+
+    it("getOtpDispatchTimeoutMs returns schema default 8000 when variable is unset", () => {
+      const prevProfile = process.env.APP_RUNTIME_PROFILE;
+      const prevBackend = process.env.APP_DATA_BACKEND;
+      try {
+        process.env.APP_RUNTIME_PROFILE = "showcase";
+        process.env.APP_DATA_BACKEND = "demo";
+        delete process.env.OTP_DISPATCH_TIMEOUT_MS;
+        resetServerEnvCache();
+        expect(getOtpDispatchTimeoutMs()).toBe(8000);
+      } finally {
+        process.env.APP_RUNTIME_PROFILE = prevProfile;
+        process.env.APP_DATA_BACKEND = prevBackend;
+        resetServerEnvCache();
+      }
+    });
+
+    it("getOtpDispatchTimeoutMs returns validated integer when set to valid bound", () => {
+      const prevProfile = process.env.APP_RUNTIME_PROFILE;
+      const prevBackend = process.env.APP_DATA_BACKEND;
+      try {
+        process.env.APP_RUNTIME_PROFILE = "showcase";
+        process.env.APP_DATA_BACKEND = "demo";
+        process.env.OTP_DISPATCH_TIMEOUT_MS = "5000";
+        resetServerEnvCache();
+        expect(getOtpDispatchTimeoutMs()).toBe(5000);
+      } finally {
+        delete process.env.OTP_DISPATCH_TIMEOUT_MS;
+        process.env.APP_RUNTIME_PROFILE = prevProfile;
+        process.env.APP_DATA_BACKEND = prevBackend;
+        resetServerEnvCache();
+      }
+    });
+
+    it("getOtpDispatchTimeoutMs fails closed and throws when configured with invalid value", () => {
+      const prevProfile = process.env.APP_RUNTIME_PROFILE;
+      const prevBackend = process.env.APP_DATA_BACKEND;
+      try {
+        process.env.APP_RUNTIME_PROFILE = "showcase";
+        process.env.APP_DATA_BACKEND = "demo";
+        process.env.OTP_DISPATCH_TIMEOUT_MS = "invalid-value";
+        resetServerEnvCache();
+        expect(() => getOtpDispatchTimeoutMs()).toThrow();
+      } finally {
+        delete process.env.OTP_DISPATCH_TIMEOUT_MS;
+        process.env.APP_RUNTIME_PROFILE = prevProfile;
+        process.env.APP_DATA_BACKEND = prevBackend;
+        resetServerEnvCache();
+      }
     });
   });
 });
