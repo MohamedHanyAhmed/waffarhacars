@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import pg from "pg";
 import crypto from "node:crypto";
 import { NextRequest } from "next/server";
@@ -16,6 +16,7 @@ import {
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import { POST as requestHandler } from "@/app/api/v1/auth/phone/request/route";
 import { POST as verifyHandler } from "@/app/api/v1/auth/phone/verify/route";
+import { GET as sessionHandler } from "@/app/api/v1/auth/session/route";
 import { POST as logoutHandler } from "@/app/api/v1/auth/logout/route";
 import { handleAuth } from "@/app/api/auth/[...all]/route";
 import { OtpChallengeStatus } from "@/generated/prisma/client";
@@ -29,6 +30,11 @@ const TEST_SECRET = "test-secret-at-least-32-characters-long-12345";
 const TEST_PEPPER = "test-pepper-secret-at-least-32-characters-long-12345";
 const TEST_ALIAS_KEY = "test-alias-key-at-least-32-characters-long-12345";
 const TEST_LOOKUP_KEY = "test-lookup-key-at-least-32-characters-long-12345";
+
+function createSignedSessionCookie(token: string, secret: string = TEST_SECRET): string {
+  const signature = crypto.createHmac("sha256", secret).update(token).digest("base64");
+  return `better-auth.session_token=${encodeURIComponent(`${token}.${signature}`)}`;
+}
 
 describe("Real PostgreSQL 17 Egyptian Customer Mobile OTP & Concurrency Integration Suite", () => {
   let isDbReachable = false;
@@ -1319,47 +1325,81 @@ describe("Real PostgreSQL 17 Egyptian Customer Mobile OTP & Concurrency Integrat
     expect(recoveredSessions.length).toBe(1);
   });
 
-  it("14c. proves profile invariant failure during second login revokes only newly created session and preserves pre-existing valid sessions", async () => {
+  it("14c. proves profile invariant failure during second login revokes only newly created session and preserves pre-existing and concurrent valid sessions", async () => {
     if (!isDbReachable) {
       throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
     }
 
     const phone = generateRandomEgyptianPhone();
     const canonical = phone.startsWith("+20") ? phone : `+20${phone.replace(/^0/, "")}`;
+    createdUserPhones.push(canonical);
     const prisma = getPrisma();
 
-    // 1. Create pre-existing user with an existing valid session (e.g. from previous device)
-    const user = await prisma.user.create({
-      data: {
-        phoneNumber: canonical,
-        phoneNumberVerified: true,
-        name: "Existing Customer",
-        email: generatePlaceholderEmail(canonical, TEST_ALIAS_KEY),
-      },
-    });
-
-    const originalSessionToken = `existing-session-token-${Date.now()}`;
-    const originalSession = await prisma.session.create({
-      data: {
-        userId: user.id,
-        token: originalSessionToken,
-        expiresAt: new Date(Date.now() + 86400 * 1000),
-        lastActivityAt: new Date(),
-      },
-    });
-
-    // 2. Request OTP for second login
+    // 1. First login: establish pre-existing user and original valid session through the real flow
     await requestOtpChallenge(phone);
-    const validCode = testSmsAdapter.getLastOtp(phone)!;
+    const code1 = testSmsAdapter.getLastOtp(phone)!;
 
-    // 3. Intercept prisma.user.findUnique so step 7 sees customerProfile: null
+    const res1 = await verifyHandler(
+      new NextRequest("http://localhost:3000/api/v1/auth/phone/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Origin: "http://localhost:3000" },
+        body: JSON.stringify({ phone, code: code1 }),
+      })
+    );
+    expect(res1.status).toBe(200);
+    const setCookie1 = res1.headers.get("set-cookie")!;
+    expect(setCookie1).toContain("better-auth.session_token=");
+    const originalCookie = setCookie1.split(";")[0];
+
+    const user = await prisma.user.findUnique({
+      where: { phoneNumber: canonical },
+      include: { customerProfile: true },
+    });
+    expect(user).not.toBeNull();
+    expect(user?.customerProfile).not.toBeNull();
+
+    // Verify original session authenticates successfully through the actual session endpoint
+    const checkOriginalPre = await sessionHandler(
+      new NextRequest("http://localhost:3000/api/v1/auth/session", {
+        headers: { cookie: originalCookie },
+      })
+    );
+    expect(checkOriginalPre.status).toBe(200);
+    const preAuthJson = await checkOriginalPre.json();
+    expect(preAuthJson.authenticated).toBe(true);
+    expect(preAuthJson.user.id).toBe(user!.id);
+
+    // 2. Prepare second login
+    const lookup = computePhoneLookupHash(phone, TEST_LOOKUP_KEY);
+    await prisma.otpChallenge.updateMany({
+      where: { phoneLookupHash: lookup },
+      data: { cooldownUntil: new Date(Date.now() - 1000) },
+    });
+
+    await requestOtpChallenge(phone);
+    const code2 = testSmsAdapter.getLastOtp(phone)!;
+
+    // 3. Intercept prisma.user.findUnique:
+    // Before compensation, simulate an unrelated concurrent session being created after the snapshot,
+    // and trigger profile-invariant failure by returning customerProfile: null.
     const originalFindUnique = prisma.user.findUnique;
     let intercepted = false;
+    const concurrentToken = `concurrent-session-token-${Date.now()}`;
+
     // @ts-expect-error Mocking findUnique for invariant failure injection
     prisma.user.findUnique = async (args) => {
       const realUser = await originalFindUnique.call(prisma.user, args);
       if (realUser && realUser.phoneNumber === canonical && !intercepted) {
         intercepted = true;
+        // Simulate unrelated concurrent session created after the snapshot
+        await prisma.session.create({
+          data: {
+            userId: realUser.id,
+            token: concurrentToken,
+            expiresAt: new Date(Date.now() + 86400 * 1000),
+            lastActivityAt: new Date(),
+          },
+        });
         return {
           ...realUser,
           customerProfile: null,
@@ -1372,26 +1412,43 @@ describe("Real PostgreSQL 17 Egyptian Customer Mobile OTP & Concurrency Integrat
       const verifyReq = new NextRequest("http://localhost:3000/api/v1/auth/phone/verify", {
         method: "POST",
         headers: { "Content-Type": "application/json", Origin: "http://localhost:3000" },
-        body: JSON.stringify({ phone, code: validCode }),
+        body: JSON.stringify({ phone, code: code2 }),
       });
 
-      const res = await verifyHandler(verifyReq);
-      expect(res.status).toBe(500);
-      expect(res.headers.get("set-cookie")).toBeNull();
+      const res2 = await verifyHandler(verifyReq);
+      expect(res2.status).toBe(500);
+      expect(res2.headers.get("set-cookie")).toBeNull();
 
-      // 4. Assert: Original pre-existing session STILL EXISTS in PostgreSQL!
-      const checkOriginalSession = await prisma.session.findUnique({
-        where: { id: originalSession.id },
-      });
-      expect(checkOriginalSession).not.toBeNull();
-      expect(checkOriginalSession?.token).toBe(originalSessionToken);
-
-      // 5. Assert: Only the original session remains; the newly created session was revoked!
+      // 4. Assert: Exactly 2 sessions survive in PostgreSQL (originalSession + concurrentSession);
+      // the newly created session from login 2 was revoked by exact token deletion!
       const allUserSessions = await prisma.session.findMany({
-        where: { userId: user.id },
+        where: { userId: user!.id },
       });
-      expect(allUserSessions.length).toBe(1);
-      expect(allUserSessions[0].id).toBe(originalSession.id);
+      expect(allUserSessions.length).toBe(2);
+      const survivingTokens = allUserSessions.map((s) => s.token);
+      expect(survivingTokens).toContain(concurrentToken);
+
+      // 5. Verify both surviving sessions authenticate successfully through the actual session endpoint
+      const checkOriginalPost = await sessionHandler(
+        new NextRequest("http://localhost:3000/api/v1/auth/session", {
+          headers: { cookie: originalCookie },
+        })
+      );
+      expect(checkOriginalPost.status).toBe(200);
+      const postAuthJson = await checkOriginalPost.json();
+      expect(postAuthJson.authenticated).toBe(true);
+      expect(postAuthJson.user.id).toBe(user!.id);
+
+      const concurrentCookie = createSignedSessionCookie(concurrentToken);
+      const checkConcurrentPost = await sessionHandler(
+        new NextRequest("http://localhost:3000/api/v1/auth/session", {
+          headers: { cookie: concurrentCookie },
+        })
+      );
+      expect(checkConcurrentPost.status).toBe(200);
+      const concurrentAuthJson = await checkConcurrentPost.json();
+      expect(concurrentAuthJson.authenticated).toBe(true);
+      expect(concurrentAuthJson.user.id).toBe(user!.id);
     } finally {
       prisma.user.findUnique = originalFindUnique;
     }
@@ -1404,6 +1461,7 @@ describe("Real PostgreSQL 17 Egyptian Customer Mobile OTP & Concurrency Integrat
 
     const phone = generateRandomEgyptianPhone();
     const canonical = phone.startsWith("+20") ? phone : `+20${phone.replace(/^0/, "")}`;
+    createdUserPhones.push(canonical);
     const prisma = getPrisma();
 
     // 1. Request OTP
@@ -1414,6 +1472,9 @@ describe("Real PostgreSQL 17 Egyptian Customer Mobile OTP & Concurrency Integrat
     const originalFindUnique = prisma.user.findUnique;
     const originalDeleteMany = prisma.session.deleteMany;
     let intercepted = false;
+
+    const SENSITIVE_DB_ERROR =
+      "FATAL_DB_EXCEPTION: host=pg17.internal:5432 user=secret_admin password=super_classified query=DELETE FROM session WHERE ...";
 
     // @ts-expect-error Mocking findUnique for invariant failure injection
     prisma.user.findUnique = async (args) => {
@@ -1430,8 +1491,10 @@ describe("Real PostgreSQL 17 Egyptian Customer Mobile OTP & Concurrency Integrat
 
     // @ts-expect-error Mocking deleteMany for compensation failure injection
     prisma.session.deleteMany = async () => {
-      throw new Error("Simulated database timeout during session revocation");
+      throw new Error(SENSITIVE_DB_ERROR);
     };
+
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     try {
       const verifyReq = new NextRequest("http://localhost:3000/api/v1/auth/phone/verify", {
@@ -1445,12 +1508,22 @@ describe("Real PostgreSQL 17 Egyptian Customer Mobile OTP & Concurrency Integrat
       expect(res.status).toBe(500);
       const json = await res.json();
       expect(json.type).toBe("https://waffarhacars.com/errors/internal-error");
-      expect(json.detail).not.toContain("Simulated database timeout");
+      expect(json.detail).not.toContain(SENSITIVE_DB_ERROR);
+      expect(json.detail).not.toContain("secret_admin");
+      expect(json.detail).not.toContain("pg17.internal");
       expect(res.headers.get("set-cookie")).toBeNull();
 
-      // Note: Because the revocation query was forced to fail, the session survived;
-      // this test explicitly verifies that compensation errors are safely caught,
-      // and we truthfully record that the session survived because the query failed.
+      // Verify that compensation error was logged with a stable sanitized code,
+      // and that the sensitive internal error message was NEVER logged
+      const loggedMessages = errorSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      expect(loggedMessages).toContain(
+        "[Session Compensation Failed] Code: SESSION_COMPENSATION_EXECUTION_ERROR"
+      );
+      expect(loggedMessages).not.toContain(SENSITIVE_DB_ERROR);
+      expect(loggedMessages).not.toContain("secret_admin");
+      expect(loggedMessages).not.toContain("pg17.internal");
+      expect(loggedMessages).not.toContain("super_classified");
+
       const survivingUser = await originalFindUnique.call(prisma.user, {
         where: { phoneNumber: canonical },
       });
@@ -1463,6 +1536,104 @@ describe("Real PostgreSQL 17 Egyptian Customer Mobile OTP & Concurrency Integrat
     } finally {
       prisma.user.findUnique = originalFindUnique;
       prisma.session.deleteMany = originalDeleteMany;
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("14e. proves missing or unparseable session cookie in Better Auth response causes no broad session deletion, returns 500, and logs operational error", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+
+    const phone = generateRandomEgyptianPhone();
+    const canonical = phone.startsWith("+20") ? phone : `+20${phone.replace(/^0/, "")}`;
+    createdUserPhones.push(canonical);
+    const prisma = getPrisma();
+
+    // 1. Create existing user with an existing session
+    const user = await prisma.user.create({
+      data: {
+        phoneNumber: canonical,
+        phoneNumberVerified: true,
+        name: "Customer Without Cookie",
+        email: generatePlaceholderEmail(canonical, TEST_ALIAS_KEY),
+      },
+    });
+
+    const existingSessionToken = `existing-session-token-${Date.now()}`;
+    const existingSession = await prisma.session.create({
+      data: {
+        userId: user.id,
+        token: existingSessionToken,
+        expiresAt: new Date(Date.now() + 86400 * 1000),
+        lastActivityAt: new Date(),
+      },
+    });
+
+    // 2. Request OTP
+    await requestOtpChallenge(phone);
+    const validCode = testSmsAdapter.getLastOtp(phone)!;
+
+    // 3. Mock verifyPhoneNumber to return 200 OK but WITHOUT any Set-Cookie header
+    const auth = getAuth();
+    const phoneApi = auth.api as unknown as {
+      verifyPhoneNumber: (opts: unknown) => Promise<Response>;
+    };
+    const originalVerify = phoneApi.verifyPhoneNumber;
+
+    phoneApi.verifyPhoneNumber = async () => {
+      return new Response(JSON.stringify({ user: { id: user.id } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }, // Strictly NO Set-Cookie!
+      });
+    };
+
+    // 4. Intercept findUnique to simulate profile check failure
+    const originalFindUnique = prisma.user.findUnique;
+    let intercepted = false;
+    // @ts-expect-error Mocking findUnique
+    prisma.user.findUnique = async (args) => {
+      const realUser = await originalFindUnique.call(prisma.user, args);
+      if (realUser && realUser.phoneNumber === canonical && !intercepted) {
+        intercepted = true;
+        return {
+          ...realUser,
+          customerProfile: null,
+        };
+      }
+      return realUser;
+    };
+
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      const verifyReq = new NextRequest("http://localhost:3000/api/v1/auth/phone/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Origin: "http://localhost:3000" },
+        body: JSON.stringify({ phone, code: validCode }),
+      });
+
+      const res = await verifyHandler(verifyReq);
+      expect(res.status).toBe(500);
+      expect(res.headers.get("set-cookie")).toBeNull();
+
+      // 5. Assert: No broad deletion occurred; existing session STILL exists in PostgreSQL!
+      const checkSession = await prisma.session.findUnique({
+        where: { id: existingSession.id },
+      });
+      expect(checkSession).not.toBeNull();
+      expect(checkSession?.token).toBe(existingSessionToken);
+
+      // 6. Assert: Operational error logged with sanitized code
+      const loggedMessages = errorSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      expect(loggedMessages).toContain(
+        "[Session Compensation Failed] Code: SESSION_COMPENSATION_TOKEN_UNAVAILABLE"
+      );
+      expect(loggedMessages).not.toContain(existingSessionToken);
+    } finally {
+      phoneApi.verifyPhoneNumber = originalVerify;
+      prisma.user.findUnique = originalFindUnique;
+      errorSpy.mockRestore();
     }
   });
 

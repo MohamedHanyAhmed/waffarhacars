@@ -182,24 +182,12 @@ export async function POST(req: NextRequest): Promise<Response> {
 
   const prisma = getPrisma();
 
-  // Check whether this user exists beforehand to determine isNewCustomer and snapshot existing sessions
+  // Check whether this user exists beforehand to determine isNewCustomer
   const preExistingUser = await prisma.user.findUnique({
     where: { phoneNumber: canonicalE164 },
     select: { id: true },
   });
   const isNewCustomer = !preExistingUser;
-
-  // Snapshot existing session IDs for this user so only the newly created session is revoked on compensation
-  const preExistingSessionIds = preExistingUser
-    ? new Set(
-        (
-          await prisma.session.findMany({
-            where: { userId: preExistingUser.id },
-            select: { id: true },
-          })
-        ).map((s) => s.id)
-      )
-    : new Set<string>();
 
   // 6. Invoke Better Auth internal phone verification endpoint
   let authRes: Response;
@@ -308,28 +296,33 @@ export async function POST(req: NextRequest): Promise<Response> {
       const match = cookieStr.match(/(?:^|;\s*)(?:__Secure-)?better-auth\.session_token=([^;]+)/);
       if (match) {
         const rawVal = decodeURIComponent(match[1].trim());
-        return rawVal.split(".")[0];
+        const token = rawVal.split(".")[0];
+        return token || null;
       }
     }
     return null;
   };
 
   const revokeCurrentSessionOnly = async (userId: string): Promise<void> => {
-    const token = extractSessionTokenFromResponse(authRes);
-    if (token) {
-      await prisma.session.deleteMany({
+    try {
+      const token = extractSessionTokenFromResponse(authRes);
+      if (!token) {
+        console.error("[Session Compensation Failed] Code: SESSION_COMPENSATION_TOKEN_UNAVAILABLE");
+        return;
+      }
+
+      const deleteResult = await prisma.session.deleteMany({
         where: {
           userId,
           token,
         },
       });
-    } else {
-      await prisma.session.deleteMany({
-        where: {
-          userId,
-          id: { notIn: Array.from(preExistingSessionIds) },
-        },
-      });
+
+      if (deleteResult.count !== 1) {
+        console.error("[Session Compensation Failed] Code: SESSION_COMPENSATION_COUNT_MISMATCH");
+      }
+    } catch {
+      console.error("[Session Compensation Failed] Code: SESSION_COMPENSATION_EXECUTION_ERROR");
     }
   };
 
@@ -346,11 +339,8 @@ export async function POST(req: NextRequest): Promise<Response> {
       if (user?.id) {
         try {
           await revokeCurrentSessionOnly(user.id);
-        } catch (compensationErr) {
-          console.error(
-            "[Session Compensation Failed] Failed to revoke newly created session:",
-            compensationErr instanceof Error ? compensationErr.message : "Revocation error"
-          );
+        } catch {
+          console.error("[Session Compensation Failed] Code: SESSION_COMPENSATION_EXECUTION_ERROR");
         }
       }
       return Response.json(
@@ -369,21 +359,19 @@ export async function POST(req: NextRequest): Promise<Response> {
         }
       );
     }
-  } catch (err: unknown) {
-    console.error(
-      "[Profile Consistency Error]",
-      err instanceof Error ? err.message : "Profile check failed"
-    );
+  } catch {
+    console.error("[Profile Consistency Error] Code: PROFILE_CONSISTENCY_CHECK_FAILED");
     try {
       const u = await prisma.user.findUnique({ where: { phoneNumber: canonicalE164 } });
       if (u?.id) {
-        await revokeCurrentSessionOnly(u.id);
+        try {
+          await revokeCurrentSessionOnly(u.id);
+        } catch {
+          console.error("[Session Compensation Failed] Code: SESSION_COMPENSATION_EXECUTION_ERROR");
+        }
       }
-    } catch (compensationErr) {
-      console.error(
-        "[Session Compensation Failed] Failed to revoke newly created session:",
-        compensationErr instanceof Error ? compensationErr.message : "Revocation error"
-      );
+    } catch {
+      console.error("[Session Compensation Failed] Code: SESSION_COMPENSATION_EXECUTION_ERROR");
     }
     return Response.json(
       {
