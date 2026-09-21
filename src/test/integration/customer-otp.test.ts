@@ -906,18 +906,34 @@ describe("Real PostgreSQL 17 Egyptian Customer Mobile OTP & Concurrency Integrat
       data: { cooldownUntil: new Date(Date.now() - 1000) },
     });
 
-    // 2. Mock/intercept updateMany so that when promotion to ACTIVE is attempted, it returns count: 0
-    const originalUpdateMany = prisma.otpChallenge.updateMany;
+    // 2. Intercept $transaction to hook tx.otpChallenge.updateMany during Phase 3 promotion
+    const originalTransaction = prisma.$transaction;
     let interceptedPromotion = false;
 
-    // @ts-expect-error Mocking updateMany for forced CAS failure injection
-    prisma.otpChallenge.updateMany = async (args) => {
-      if (args?.data?.status === OtpChallengeStatus.ACTIVE && !interceptedPromotion) {
-        interceptedPromotion = true;
-        // Simulate CAS failure: return count: 0 (matched 0 rows)
-        return { count: 0 };
+    // @ts-expect-error Mocking $transaction for forced CAS failure injection
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    prisma.$transaction = async (arg1: any, arg2: any) => {
+      if (typeof arg1 === "function") {
+        return originalTransaction.call(
+          prisma,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          async (tx: any) => {
+            const originalTxUpdateMany = tx.otpChallenge.updateMany;
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            tx.otpChallenge.updateMany = async (args: any) => {
+              if (args?.data?.status === OtpChallengeStatus.ACTIVE && !interceptedPromotion) {
+                interceptedPromotion = true;
+                // Simulate CAS failure: return count: 0 (matched 0 rows)
+                return { count: 0 };
+              }
+              return originalTxUpdateMany.call(tx.otpChallenge, args);
+            };
+            return arg1(tx);
+          },
+          arg2
+        );
       }
-      return originalUpdateMany.call(prisma.otpChallenge, args);
+      return originalTransaction.call(prisma, arg1, arg2);
     };
 
     try {
@@ -935,7 +951,7 @@ describe("Real PostgreSQL 17 Egyptian Customer Mobile OTP & Concurrency Integrat
       const checkA = await prisma.otpChallenge.findUnique({ where: { id: originalRowAId } });
       expect(checkA?.status).toBe(OtpChallengeStatus.ACTIVE);
     } finally {
-      prisma.otpChallenge.updateMany = originalUpdateMany;
+      prisma.$transaction = originalTransaction;
     }
   });
 
