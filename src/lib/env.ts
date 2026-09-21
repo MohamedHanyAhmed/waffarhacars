@@ -22,6 +22,12 @@ const RawServerEnvSchema = z.object({
   BETTER_AUTH_SECRET: z.string().optional(),
   BETTER_AUTH_URL: z.string().optional(),
   AUTH_TRUSTED_ORIGINS: z.string().optional(),
+  OTP_PEPPER_SECRET: z.string().optional(),
+  PHONE_ALIAS_HMAC_KEY: z.string().optional(),
+  PHONE_LOOKUP_HMAC_KEY: z.string().optional(),
+  OTP_SMS_PROVIDER: z.enum(["test", "dev_capture", "egyptian_gateway"]).optional(),
+  OTP_DISPATCH_TIMEOUT_MS: z.coerce.number().int().min(100).max(30000).default(8000),
+  TRUSTED_PROXY_HOPS: z.coerce.number().int().min(0).max(10).default(0),
 });
 
 export interface ServerEnv {
@@ -36,6 +42,12 @@ export interface ServerEnv {
   BETTER_AUTH_SECRET: string | undefined;
   BETTER_AUTH_URL: string | undefined;
   AUTH_TRUSTED_ORIGINS: string[];
+  OTP_PEPPER_SECRET: string | undefined;
+  PHONE_ALIAS_HMAC_KEY: string | undefined;
+  PHONE_LOOKUP_HMAC_KEY: string | undefined;
+  OTP_SMS_PROVIDER: "test" | "dev_capture" | "egyptian_gateway";
+  OTP_DISPATCH_TIMEOUT_MS: number;
+  TRUSTED_PROXY_HOPS: number;
 }
 
 let cachedEnv: ServerEnv | null = null;
@@ -102,15 +114,19 @@ function validateAuthUrl(rawUrl: string, profile: AppRuntimeProfile): URL {
   return validateOriginUrl(rawUrl, profile, "BETTER_AUTH_URL");
 }
 
-function validateAuthSecret(secret: string, profile: AppRuntimeProfile): void {
+function validateAuthSecret(
+  secret: string,
+  profile: AppRuntimeProfile,
+  varName = "BETTER_AUTH_SECRET"
+): void {
   if (secret.length < 32) {
-    throw new Error("Configuration error: BETTER_AUTH_SECRET must be at least 32 characters.");
+    throw new Error(`Configuration error: ${varName} must be at least 32 characters.`);
   }
 
   // Ensure reasonable entropy: not repetitive single characters
   const uniqueChars = new Set(secret);
   if (uniqueChars.size < 8) {
-    throw new Error("Configuration error: BETTER_AUTH_SECRET must have sufficient entropy.");
+    throw new Error(`Configuration error: ${varName} must have sufficient entropy.`);
   }
 
   if (profile === "production") {
@@ -120,9 +136,7 @@ function validateAuthSecret(secret: string, profile: AppRuntimeProfile): void {
       lower.includes("placeholder") ||
       lower.includes("test-secret")
     ) {
-      throw new Error(
-        "Configuration error: BETTER_AUTH_SECRET contains non-production placeholder value."
-      );
+      throw new Error(`Configuration error: ${varName} contains non-production placeholder value.`);
     }
   }
 }
@@ -203,6 +217,54 @@ export function validateServerEnv(
     }
   }
 
+  const smsProvider =
+    data.OTP_SMS_PROVIDER ||
+    (data.APP_RUNTIME_PROFILE === "production" ? "egyptian_gateway" : "dev_capture");
+
+  if (data.APP_RUNTIME_PROFILE === "production") {
+    if (
+      smsProvider === "test" ||
+      smsProvider === "dev_capture" ||
+      smsProvider === "egyptian_gateway"
+    ) {
+      throw new Error(
+        "Configuration error: Production runtime requires an active, implemented SMS aggregator. EgyptianSmsGatewayStub is an unimplemented contract stub and cannot serve production authentication traffic."
+      );
+    }
+  }
+
+  const otpPepper = data.OTP_PEPPER_SECRET?.trim();
+  const phoneAliasKey = data.PHONE_ALIAS_HMAC_KEY?.trim();
+  const phoneLookupKey = data.PHONE_LOOKUP_HMAC_KEY?.trim();
+
+  if (data.APP_DATA_BACKEND === "postgres") {
+    if (!otpPepper) {
+      throw new Error(
+        "Configuration error: OTP_PEPPER_SECRET is required when using postgres backend."
+      );
+    }
+    if (!phoneAliasKey) {
+      throw new Error(
+        "Configuration error: PHONE_ALIAS_HMAC_KEY is required when using postgres backend."
+      );
+    }
+    if (!phoneLookupKey) {
+      throw new Error(
+        "Configuration error: PHONE_LOOKUP_HMAC_KEY is required when using postgres backend."
+      );
+    }
+
+    validateAuthSecret(otpPepper, data.APP_RUNTIME_PROFILE, "OTP_PEPPER_SECRET");
+    validateAuthSecret(phoneAliasKey, data.APP_RUNTIME_PROFILE, "PHONE_ALIAS_HMAC_KEY");
+    validateAuthSecret(phoneLookupKey, data.APP_RUNTIME_PROFILE, "PHONE_LOOKUP_HMAC_KEY");
+
+    if (new Set([data.BETTER_AUTH_SECRET, otpPepper, phoneAliasKey, phoneLookupKey]).size < 4) {
+      throw new Error(
+        "Configuration error: BETTER_AUTH_SECRET, OTP_PEPPER_SECRET, PHONE_ALIAS_HMAC_KEY, and PHONE_LOOKUP_HMAC_KEY must all be mutually distinct."
+      );
+    }
+  }
+
   return {
     APP_RUNTIME_PROFILE: data.APP_RUNTIME_PROFILE,
     APP_DATA_BACKEND: data.APP_DATA_BACKEND,
@@ -215,6 +277,12 @@ export function validateServerEnv(
     BETTER_AUTH_SECRET: data.BETTER_AUTH_SECRET?.trim(),
     BETTER_AUTH_URL: validatedAuthUrl,
     AUTH_TRUSTED_ORIGINS: trustedOrigins,
+    OTP_PEPPER_SECRET: otpPepper,
+    PHONE_ALIAS_HMAC_KEY: phoneAliasKey,
+    PHONE_LOOKUP_HMAC_KEY: phoneLookupKey,
+    OTP_SMS_PROVIDER: smsProvider,
+    OTP_DISPATCH_TIMEOUT_MS: data.OTP_DISPATCH_TIMEOUT_MS,
+    TRUSTED_PROXY_HOPS: data.TRUSTED_PROXY_HOPS,
   };
 }
 

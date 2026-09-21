@@ -1,9 +1,16 @@
 import { describe, it, expect } from "vitest";
-import { validateServerEnv } from "@/lib/env";
+import { validateServerEnv, resetServerEnvCache } from "@/lib/env";
+import { getOtpDispatchTimeoutMs } from "@/lib/otp/challenge-service";
 
 const VALID_POSTGRES_URL = "postgresql://test_user:test_password@localhost:5432/waffarhacars_test";
 const VALID_DEV_SECRET = "dev-secret-at-least-32-chars-long-with-entropy-12345";
 const VALID_PROD_SECRET = "prod-high-entropy-secret-at-least-32-chars-random-string-98765";
+const VALID_PEPPER_SECRET = "dev-pepper-secret-at-least-32-chars-long-with-entropy-12345";
+const VALID_ALIAS_KEY = "dev-alias-key-at-least-32-chars-long-with-entropy-12345";
+const VALID_LOOKUP_KEY = "dev-lookup-key-at-least-32-chars-long-with-entropy-12345";
+const VALID_PROD_PEPPER = "prod-pepper-secret-at-least-32-chars-random-string-54321";
+const VALID_PROD_ALIAS = "prod-alias-key-at-least-32-chars-random-string-54321";
+const VALID_PROD_LOOKUP = "prod-lookup-key-at-least-32-chars-random-string-54321";
 
 describe("Server Auth Environment Validation", () => {
   it("succeeds in showcase demo mode without auth variables", () => {
@@ -17,28 +24,121 @@ describe("Server Auth Environment Validation", () => {
     expect(env.BETTER_AUTH_URL).toBeUndefined();
   });
 
-  it("succeeds in showcase postgres mode with valid localhost HTTP url and secret", () => {
+  it("succeeds in showcase postgres mode with valid localhost HTTP url, secret, and independent keys", () => {
     const env = validateServerEnv({
       APP_RUNTIME_PROFILE: "showcase",
       APP_DATA_BACKEND: "postgres",
       DATABASE_URL: VALID_POSTGRES_URL,
       BETTER_AUTH_SECRET: VALID_DEV_SECRET,
       BETTER_AUTH_URL: "http://localhost:3000",
+      OTP_PEPPER_SECRET: VALID_PEPPER_SECRET,
+      PHONE_ALIAS_HMAC_KEY: VALID_ALIAS_KEY,
+      PHONE_LOOKUP_HMAC_KEY: VALID_LOOKUP_KEY,
+      OTP_SMS_PROVIDER: "test",
     });
     expect(env.BETTER_AUTH_URL).toBe("http://localhost:3000");
     expect(env.AUTH_TRUSTED_ORIGINS).toEqual(["http://localhost:3000"]);
+    expect(env.OTP_PEPPER_SECRET).toBe(VALID_PEPPER_SECRET);
+    expect(env.PHONE_ALIAS_HMAC_KEY).toBe(VALID_ALIAS_KEY);
+    expect(env.PHONE_LOOKUP_HMAC_KEY).toBe(VALID_LOOKUP_KEY);
   });
 
-  it("succeeds in production postgres mode with valid HTTPS url and high-entropy secret", () => {
-    const env = validateServerEnv({
-      APP_RUNTIME_PROFILE: "production",
-      APP_DATA_BACKEND: "postgres",
-      DATABASE_URL: VALID_POSTGRES_URL,
-      BETTER_AUTH_SECRET: VALID_PROD_SECRET,
-      BETTER_AUTH_URL: "https://waffarhacars.com",
-    });
-    expect(env.BETTER_AUTH_URL).toBe("https://waffarhacars.com");
-    expect(env.AUTH_TRUSTED_ORIGINS).toEqual(["https://waffarhacars.com"]);
+  it("fails in production postgres mode when no implemented SMS provider is configured", () => {
+    expect(() =>
+      validateServerEnv({
+        APP_RUNTIME_PROFILE: "production",
+        APP_DATA_BACKEND: "postgres",
+        DATABASE_URL: VALID_POSTGRES_URL,
+        BETTER_AUTH_SECRET: VALID_PROD_SECRET,
+        BETTER_AUTH_URL: "https://waffarhacars.com",
+        OTP_PEPPER_SECRET: VALID_PROD_PEPPER,
+        PHONE_ALIAS_HMAC_KEY: VALID_PROD_ALIAS,
+        PHONE_LOOKUP_HMAC_KEY: VALID_PROD_LOOKUP,
+      })
+    ).toThrow(
+      "Configuration error: Production runtime requires an active, implemented SMS aggregator."
+    );
+  });
+
+  it("fails in production when OTP_SMS_PROVIDER is set to test, dev_capture, or egyptian_gateway", () => {
+    for (const provider of ["test", "dev_capture", "egyptian_gateway"] as const) {
+      expect(() =>
+        validateServerEnv({
+          APP_RUNTIME_PROFILE: "production",
+          APP_DATA_BACKEND: "postgres",
+          DATABASE_URL: VALID_POSTGRES_URL,
+          BETTER_AUTH_SECRET: VALID_PROD_SECRET,
+          BETTER_AUTH_URL: "https://waffarhacars.com",
+          OTP_PEPPER_SECRET: VALID_PROD_PEPPER,
+          PHONE_ALIAS_HMAC_KEY: VALID_PROD_ALIAS,
+          PHONE_LOOKUP_HMAC_KEY: VALID_PROD_LOOKUP,
+          OTP_SMS_PROVIDER: provider,
+        })
+      ).toThrow(
+        "Configuration error: Production runtime requires an active, implemented SMS aggregator."
+      );
+    }
+  });
+
+  it("fails when OTP_PEPPER_SECRET is missing under postgres backend", () => {
+    expect(() =>
+      validateServerEnv({
+        APP_RUNTIME_PROFILE: "showcase",
+        APP_DATA_BACKEND: "postgres",
+        DATABASE_URL: VALID_POSTGRES_URL,
+        BETTER_AUTH_SECRET: VALID_DEV_SECRET,
+        BETTER_AUTH_URL: "http://localhost:3000",
+        PHONE_ALIAS_HMAC_KEY: VALID_ALIAS_KEY,
+        PHONE_LOOKUP_HMAC_KEY: VALID_LOOKUP_KEY,
+      })
+    ).toThrow("Configuration error: OTP_PEPPER_SECRET is required when using postgres backend.");
+  });
+
+  it("fails when PHONE_ALIAS_HMAC_KEY is missing under postgres backend", () => {
+    expect(() =>
+      validateServerEnv({
+        APP_RUNTIME_PROFILE: "showcase",
+        APP_DATA_BACKEND: "postgres",
+        DATABASE_URL: VALID_POSTGRES_URL,
+        BETTER_AUTH_SECRET: VALID_DEV_SECRET,
+        BETTER_AUTH_URL: "http://localhost:3000",
+        OTP_PEPPER_SECRET: VALID_PEPPER_SECRET,
+        PHONE_LOOKUP_HMAC_KEY: VALID_LOOKUP_KEY,
+      })
+    ).toThrow("Configuration error: PHONE_ALIAS_HMAC_KEY is required when using postgres backend.");
+  });
+
+  it("fails when PHONE_LOOKUP_HMAC_KEY is missing under postgres backend", () => {
+    expect(() =>
+      validateServerEnv({
+        APP_RUNTIME_PROFILE: "showcase",
+        APP_DATA_BACKEND: "postgres",
+        DATABASE_URL: VALID_POSTGRES_URL,
+        BETTER_AUTH_SECRET: VALID_DEV_SECRET,
+        BETTER_AUTH_URL: "http://localhost:3000",
+        OTP_PEPPER_SECRET: VALID_PEPPER_SECRET,
+        PHONE_ALIAS_HMAC_KEY: VALID_ALIAS_KEY,
+      })
+    ).toThrow(
+      "Configuration error: PHONE_LOOKUP_HMAC_KEY is required when using postgres backend."
+    );
+  });
+
+  it("fails when secrets are not mutually distinct under postgres backend", () => {
+    expect(() =>
+      validateServerEnv({
+        APP_RUNTIME_PROFILE: "showcase",
+        APP_DATA_BACKEND: "postgres",
+        DATABASE_URL: VALID_POSTGRES_URL,
+        BETTER_AUTH_SECRET: VALID_DEV_SECRET,
+        BETTER_AUTH_URL: "http://localhost:3000",
+        OTP_PEPPER_SECRET: VALID_DEV_SECRET, // Duplicate
+        PHONE_ALIAS_HMAC_KEY: VALID_ALIAS_KEY,
+        PHONE_LOOKUP_HMAC_KEY: VALID_LOOKUP_KEY,
+      })
+    ).toThrow(
+      "Configuration error: BETTER_AUTH_SECRET, OTP_PEPPER_SECRET, PHONE_ALIAS_HMAC_KEY, and PHONE_LOOKUP_HMAC_KEY must all be mutually distinct."
+    );
   });
 
   it("fails when BETTER_AUTH_SECRET is missing under postgres backend", () => {
@@ -217,6 +317,9 @@ describe("Server Auth Environment Validation", () => {
       DATABASE_URL: VALID_POSTGRES_URL,
       BETTER_AUTH_SECRET: VALID_DEV_SECRET,
       BETTER_AUTH_URL: "http://localhost:3000",
+      OTP_PEPPER_SECRET: VALID_PEPPER_SECRET,
+      PHONE_ALIAS_HMAC_KEY: VALID_ALIAS_KEY,
+      PHONE_LOOKUP_HMAC_KEY: VALID_LOOKUP_KEY,
       AUTH_TRUSTED_ORIGINS: "http://127.0.0.1:3000, https://admin.waffarhacars.local",
     });
     expect(env.AUTH_TRUSTED_ORIGINS).toEqual([
@@ -346,5 +449,138 @@ describe("Server Auth Environment Validation", () => {
       expect(message).not.toContain(sensitiveSecret);
       expect(message).toContain("Configuration error");
     }
+  });
+
+  describe("OTP_DISPATCH_TIMEOUT_MS validation", () => {
+    it("defaults to 8000 when missing", () => {
+      const env = validateServerEnv({
+        APP_RUNTIME_PROFILE: "showcase",
+        APP_DATA_BACKEND: "demo",
+      });
+      expect(env.OTP_DISPATCH_TIMEOUT_MS).toBe(8000);
+    });
+
+    it("parses valid integer timeout values within [100, 30000]", () => {
+      const env1 = validateServerEnv({
+        APP_RUNTIME_PROFILE: "showcase",
+        APP_DATA_BACKEND: "demo",
+        OTP_DISPATCH_TIMEOUT_MS: "100",
+      });
+      expect(env1.OTP_DISPATCH_TIMEOUT_MS).toBe(100);
+
+      const env2 = validateServerEnv({
+        APP_RUNTIME_PROFILE: "showcase",
+        APP_DATA_BACKEND: "demo",
+        OTP_DISPATCH_TIMEOUT_MS: "5000",
+      });
+      expect(env2.OTP_DISPATCH_TIMEOUT_MS).toBe(5000);
+
+      const env3 = validateServerEnv({
+        APP_RUNTIME_PROFILE: "showcase",
+        APP_DATA_BACKEND: "demo",
+        OTP_DISPATCH_TIMEOUT_MS: "30000",
+      });
+      expect(env3.OTP_DISPATCH_TIMEOUT_MS).toBe(30000);
+    });
+
+    it("fails when OTP_DISPATCH_TIMEOUT_MS is 0", () => {
+      expect(() =>
+        validateServerEnv({
+          APP_RUNTIME_PROFILE: "showcase",
+          APP_DATA_BACKEND: "demo",
+          OTP_DISPATCH_TIMEOUT_MS: "0",
+        })
+      ).toThrow();
+    });
+
+    it("fails when OTP_DISPATCH_TIMEOUT_MS is negative", () => {
+      expect(() =>
+        validateServerEnv({
+          APP_RUNTIME_PROFILE: "showcase",
+          APP_DATA_BACKEND: "demo",
+          OTP_DISPATCH_TIMEOUT_MS: "-100",
+        })
+      ).toThrow();
+    });
+
+    it("fails when OTP_DISPATCH_TIMEOUT_MS is NaN", () => {
+      expect(() =>
+        validateServerEnv({
+          APP_RUNTIME_PROFILE: "showcase",
+          APP_DATA_BACKEND: "demo",
+          OTP_DISPATCH_TIMEOUT_MS: "not-a-number",
+        })
+      ).toThrow();
+    });
+
+    it("fails when OTP_DISPATCH_TIMEOUT_MS is Infinity", () => {
+      expect(() =>
+        validateServerEnv({
+          APP_RUNTIME_PROFILE: "showcase",
+          APP_DATA_BACKEND: "demo",
+          OTP_DISPATCH_TIMEOUT_MS: "Infinity",
+        })
+      ).toThrow();
+    });
+
+    it("fails when OTP_DISPATCH_TIMEOUT_MS exceeds 30000", () => {
+      expect(() =>
+        validateServerEnv({
+          APP_RUNTIME_PROFILE: "showcase",
+          APP_DATA_BACKEND: "demo",
+          OTP_DISPATCH_TIMEOUT_MS: "30001",
+        })
+      ).toThrow();
+    });
+
+    it("getOtpDispatchTimeoutMs returns schema default 8000 when variable is unset", () => {
+      const prevProfile = process.env.APP_RUNTIME_PROFILE;
+      const prevBackend = process.env.APP_DATA_BACKEND;
+      try {
+        process.env.APP_RUNTIME_PROFILE = "showcase";
+        process.env.APP_DATA_BACKEND = "demo";
+        delete process.env.OTP_DISPATCH_TIMEOUT_MS;
+        resetServerEnvCache();
+        expect(getOtpDispatchTimeoutMs()).toBe(8000);
+      } finally {
+        process.env.APP_RUNTIME_PROFILE = prevProfile;
+        process.env.APP_DATA_BACKEND = prevBackend;
+        resetServerEnvCache();
+      }
+    });
+
+    it("getOtpDispatchTimeoutMs returns validated integer when set to valid bound", () => {
+      const prevProfile = process.env.APP_RUNTIME_PROFILE;
+      const prevBackend = process.env.APP_DATA_BACKEND;
+      try {
+        process.env.APP_RUNTIME_PROFILE = "showcase";
+        process.env.APP_DATA_BACKEND = "demo";
+        process.env.OTP_DISPATCH_TIMEOUT_MS = "5000";
+        resetServerEnvCache();
+        expect(getOtpDispatchTimeoutMs()).toBe(5000);
+      } finally {
+        delete process.env.OTP_DISPATCH_TIMEOUT_MS;
+        process.env.APP_RUNTIME_PROFILE = prevProfile;
+        process.env.APP_DATA_BACKEND = prevBackend;
+        resetServerEnvCache();
+      }
+    });
+
+    it("getOtpDispatchTimeoutMs fails closed and throws when configured with invalid value", () => {
+      const prevProfile = process.env.APP_RUNTIME_PROFILE;
+      const prevBackend = process.env.APP_DATA_BACKEND;
+      try {
+        process.env.APP_RUNTIME_PROFILE = "showcase";
+        process.env.APP_DATA_BACKEND = "demo";
+        process.env.OTP_DISPATCH_TIMEOUT_MS = "invalid-value";
+        resetServerEnvCache();
+        expect(() => getOtpDispatchTimeoutMs()).toThrow();
+      } finally {
+        delete process.env.OTP_DISPATCH_TIMEOUT_MS;
+        process.env.APP_RUNTIME_PROFILE = prevProfile;
+        process.env.APP_DATA_BACKEND = prevBackend;
+        resetServerEnvCache();
+      }
+    });
   });
 });

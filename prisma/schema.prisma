@@ -9,18 +9,23 @@ datasource db {
 }
 
 model User {
-  id            String    @id @default(dbgenerated("pg_catalog.gen_random_uuid()")) @db.Uuid
-  name          String
-  email         String
-  emailVerified Boolean   @default(false)
-  image         String?
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
-  isSuspended   Boolean   @default(false)
-  sessions      Session[]
-  accounts      Account[]
+  id              String           @id @default(dbgenerated("pg_catalog.gen_random_uuid()")) @db.Uuid
+  name            String
+  email           String
+  emailVerified   Boolean          @default(false)
+  image           String?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  isSuspended     Boolean          @default(false)
+  sessions        Session[]
+  accounts        Account[]
+  customerProfile CustomerProfile?
+
+  phoneNumber         String?
+  phoneNumberVerified Boolean?
 
   @@unique([email])
+  @@unique([phoneNumber])
   @@map("user")
 }
 
@@ -72,4 +77,64 @@ model Verification {
 
   @@index([identifier])
   @@map("verification")
+}
+
+enum OtpPurpose {
+  CUSTOMER_AUTH
+}
+
+enum OtpChallengeStatus {
+  PENDING
+  ACTIVE
+  CONSUMED
+  EXPIRED
+  LOCKED
+  SUPERSEDED
+  DELIVERY_FAILED
+  DELIVERY_UNKNOWN
+}
+
+model OtpChallenge {
+  id                     String             @id @default(dbgenerated("pg_catalog.gen_random_uuid()")) @db.Uuid
+  phoneLookupHash        String             @db.VarChar(64)
+  purpose                OtpPurpose         @default(CUSTOMER_AUTH)
+  status                 OtpChallengeStatus @default(PENDING)
+  codeHash               String             @db.VarChar(64)
+  dispatchId             String             @unique @db.VarChar(64)
+  expiresAt              DateTime
+  cooldownUntil          DateTime
+  dispatchLeaseExpiresAt DateTime?
+  lockoutUntil           DateTime?
+  failedAttemptCount     Int                @default(0)
+  sendCount              Int                @default(1)
+  consumedAt             DateTime?
+  createdAt              DateTime           @default(now())
+  updatedAt              DateTime           @updatedAt
+
+  @@index([phoneLookupHash, status])
+  @@index([expiresAt])
+  @@map("otp_challenge")
+}
+
+model CustomerProfile {
+  id                      String   @id @default(dbgenerated("pg_catalog.gen_random_uuid()")) @db.Uuid
+  userId                  String   @unique @db.Uuid
+  user                    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  preferredLanguage       String   @default("ar") @db.VarChar(5)
+  notificationPreferences Json     @default("{\"sms\": true, \"whatsapp\": false}")
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  @@map("customer_profile")
+}
+
+model RateLimitBucket {
+  key       String   @id @db.VarChar(128)
+  points    Int      @default(0)
+  expireAt  DateTime
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([expireAt])
+  @@map("rate_limit_bucket")
 }

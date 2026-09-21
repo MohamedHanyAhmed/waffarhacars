@@ -15,12 +15,12 @@ export default defineConfig({
   projects: [
     {
       name: "Desktop Chrome",
-      testMatch: /showcase\.spec\.ts/,
+      testMatch: /(showcase|customer-auth)\.spec\.ts/,
       use: { ...devices["Desktop Chrome"], viewport: { width: 1440, height: 900 } },
     },
     {
       name: "Mobile Chrome",
-      testMatch: /showcase\.spec\.ts/,
+      testMatch: /(showcase|customer-auth)\.spec\.ts/,
       use: { ...devices["Pixel 5"], viewport: { width: 390, height: 844 } },
     },
     {

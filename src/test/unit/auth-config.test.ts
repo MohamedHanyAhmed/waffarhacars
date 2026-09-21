@@ -16,6 +16,10 @@ describe("Better Auth Server Configuration and Security Invariants", () => {
       "postgresql://test_user:test_password@localhost:5432/waffarhacars_test";
     process.env.BETTER_AUTH_SECRET = "dev-secret-at-least-32-chars-long-with-entropy-12345";
     process.env.BETTER_AUTH_URL = "http://localhost:3000";
+    process.env.OTP_PEPPER_SECRET = "dev-pepper-secret-at-least-32-chars-long-12345";
+    process.env.PHONE_ALIAS_HMAC_KEY = "dev-alias-key-at-least-32-chars-long-12345";
+    process.env.PHONE_LOOKUP_HMAC_KEY = "dev-lookup-key-at-least-32-chars-long-12345";
+    process.env.OTP_SMS_PROVIDER = "test";
     resetServerEnvCache();
     resetAuth();
   });
