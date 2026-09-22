@@ -56,14 +56,16 @@ export async function POST(req: NextRequest): Promise<Response> {
   }
 
   const auth = getAuth();
+  let authRes: Response | undefined;
   try {
-    await auth.api.changePassword({
+    authRes = await auth.api.changePassword({
       body: {
         currentPassword,
         newPassword,
         revokeOtherSessions: true,
       },
       headers: req.headers,
+      asResponse: true,
     });
   } catch {
     return Response.json(
@@ -72,6 +74,16 @@ export async function POST(req: NextRequest): Promise<Response> {
         message: "Current password does not match or password policy rejected.",
       },
       { status: 400, headers: { "Cache-Control": "no-store" } }
+    );
+  }
+
+  if (!authRes || !authRes.ok) {
+    return Response.json(
+      {
+        error: "INVALID_CREDENTIALS",
+        message: "Current password does not match or password policy rejected.",
+      },
+      { status: authRes?.status ?? 400, headers: { "Cache-Control": "no-store" } }
     );
   }
 
@@ -92,6 +104,21 @@ export async function POST(req: NextRequest): Promise<Response> {
     );
   }
 
+  const responseHeaders = new Headers({
+    "Cache-Control": "no-store",
+  });
+  const cookies = authRes.headers.getSetCookie?.() ?? [];
+  if (cookies.length > 0) {
+    for (const cookie of cookies) {
+      responseHeaders.append("set-cookie", cookie);
+    }
+  } else {
+    const rawCookie = authRes.headers.get("set-cookie");
+    if (rawCookie) {
+      responseHeaders.set("set-cookie", rawCookie);
+    }
+  }
+
   return Response.json(
     {
       success: true,
@@ -99,9 +126,7 @@ export async function POST(req: NextRequest): Promise<Response> {
     },
     {
       status: 200,
-      headers: {
-        "Cache-Control": "no-store",
-      },
+      headers: responseHeaders,
     }
   );
 }
