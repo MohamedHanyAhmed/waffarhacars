@@ -24,6 +24,11 @@ model User {
   phoneNumber         String?
   phoneNumberVerified Boolean?
 
+  twoFactorEnabled Boolean?    @default(false)
+  twofactors       TwoFactor[]
+
+  internalStaffMembership InternalStaffMembership?
+
   @@unique([email])
   @@unique([phoneNumber])
   @@map("user")
@@ -137,4 +142,41 @@ model RateLimitBucket {
 
   @@index([expireAt])
   @@map("rate_limit_bucket")
+}
+
+model TwoFactor {
+  id                      String    @id @default(dbgenerated("pg_catalog.gen_random_uuid()")) @db.Uuid
+  secret                  String
+  backupCodes             String
+  userId                  String    @db.Uuid
+  user                    User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  verified                Boolean?  @default(true)
+  failedVerificationCount Int?      @default(0)
+  lockedUntil             DateTime?
+
+  @@index([secret])
+  @@index([userId])
+  @@map("twoFactor")
+}
+
+enum StaffDepartment {
+  SALES
+  OPERATIONS
+  FINANCE
+  ADMIN
+}
+
+model InternalStaffMembership {
+  id                 String          @id @default(dbgenerated("pg_catalog.gen_random_uuid()")) @db.Uuid
+  userId             String          @unique @db.Uuid
+  user               User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  employeeNumber     String          @unique @db.VarChar(64)
+  department         StaffDepartment
+  isActive           Boolean         @default(true)
+  mustChangePassword Boolean         @default(true)
+  hiredAt            DateTime        @default(now())
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+
+  @@map("internal_staff_membership")
 }

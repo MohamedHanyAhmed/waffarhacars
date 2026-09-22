@@ -1,6 +1,7 @@
 import { getAuth } from "@/lib/auth";
 import { getServerEnv } from "@/lib/env";
 import { sanitizeAuthResponse } from "@/lib/auth-response-sanitizer";
+import { getClientIp, hashIpAddress, hashEmailIdentifier, checkRateLimit } from "@/lib/rate-limit";
 import type { NextRequest } from "next/server";
 
 export async function handleAuth(req: NextRequest): Promise<Response> {
@@ -61,20 +62,117 @@ export async function handleAuth(req: NextRequest): Promise<Response> {
     );
   }
 
+  // Rate-limiting for email sign-in endpoint (staff authentication brute-force defense)
+  if (normalizedPath === "/api/auth/sign-in/email" && req.method === "POST") {
+    const ip = getClientIp(req);
+    const ipKey = `rate_limit:staff_login_ip:${hashIpAddress(ip)}`;
+    let ipLimit;
+    try {
+      ipLimit = await checkRateLimit(ipKey, 20, 900);
+    } catch {
+      return Response.json(
+        { error: "SERVICE_UNAVAILABLE", message: "Authentication service temporarily unavailable" },
+        { status: 503, headers: { "Cache-Control": "no-store" } }
+      );
+    }
+
+    if (!ipLimit.allowed) {
+      return Response.json(
+        { error: "TOO_MANY_REQUESTS", message: "Too many login attempts. Please try again later." },
+        {
+          status: 429,
+          headers: {
+            "Retry-After": String(ipLimit.retryAfterSeconds),
+            "Cache-Control": "no-store",
+          },
+        }
+      );
+    }
+
+    try {
+      const clone = req.clone();
+      const body = await clone.json();
+      if (body && typeof body.email === "string" && body.email.trim()) {
+        const hmacKey =
+          env.PHONE_LOOKUP_HMAC_KEY || env.BETTER_AUTH_SECRET || "staff-rate-limit-salt";
+        const accountKey = `rate_limit:staff_login_account:${hashEmailIdentifier(body.email, hmacKey)}`;
+        const accountLimit = await checkRateLimit(accountKey, 5, 900);
+        if (!accountLimit.allowed) {
+          return Response.json(
+            {
+              error: "TOO_MANY_REQUESTS",
+              message: "Too many login attempts. Please try again later.",
+            },
+            {
+              status: 429,
+              headers: {
+                "Retry-After": String(accountLimit.retryAfterSeconds),
+                "Cache-Control": "no-store",
+              },
+            }
+          );
+        }
+      }
+    } catch {
+      // If body is unparseable or not JSON, defer to Better Auth request validator
+    }
+  }
+
+  // Server-side boundary protection against trusted device requests
+  let effectiveReq: NextRequest = req;
+  const is2FaVerification =
+    normalizedPath === "/api/auth/two-factor/verify-totp" ||
+    normalizedPath === "/api/auth/two-factor/verify-backup-code";
+
+  if (is2FaVerification && req.method === "POST") {
+    try {
+      const clone = req.clone();
+      const body = await clone.json();
+      if (body && typeof body === "object" && "trustDevice" in body) {
+        // Rewrite body to guarantee trustDevice: false before passing to Better Auth handler
+        const sanitizedBody = { ...body, trustDevice: false };
+        const serialized = JSON.stringify(sanitizedBody);
+        const headers = new Headers(req.headers);
+        headers.set("content-length", String(Buffer.byteLength(serialized, "utf-8")));
+        effectiveReq = new Request(req.url, {
+          method: req.method,
+          headers,
+          body: serialized,
+        }) as unknown as NextRequest;
+      }
+    } catch {
+      // Let Better Auth handle invalid JSON bodies
+    }
+  }
+
   try {
     const auth = getAuth();
-    const res = await auth.handler(req);
-    const sanitized = await sanitizeAuthResponse(req, res);
-    if (!sanitized.headers.has("Cache-Control")) {
-      const headers = new Headers(sanitized.headers);
-      headers.set("Cache-Control", "no-store");
-      return new Response(sanitized.body, {
-        status: sanitized.status,
-        statusText: sanitized.statusText,
-        headers,
-      });
+    const res = await auth.handler(effectiveReq);
+    const sanitized = await sanitizeAuthResponse(effectiveReq, res);
+
+    const headers = new Headers(sanitized.headers);
+
+    // Defense-in-depth: strip any trust-device cookie from Set-Cookie headers
+    const setCookie = headers.get("set-cookie");
+    if (setCookie && setCookie.includes("better-auth.trust-device")) {
+      headers.delete("set-cookie");
+      const cookieEntries = setCookie.split(/,(?=[^;]+=[^;]+)/g);
+      for (const entry of cookieEntries) {
+        if (!entry.includes("better-auth.trust-device")) {
+          headers.append("set-cookie", entry);
+        }
+      }
     }
-    return sanitized;
+
+    if (!headers.has("Cache-Control")) {
+      headers.set("Cache-Control", "no-store");
+    }
+
+    return new Response(sanitized.body, {
+      status: sanitized.status,
+      statusText: sanitized.statusText,
+      headers,
+    });
   } catch {
     return Response.json(
       { error: "Authentication service error" },
