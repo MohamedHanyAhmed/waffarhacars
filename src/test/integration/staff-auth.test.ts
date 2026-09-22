@@ -10,6 +10,13 @@ import { handleAuth } from "@/app/api/auth/[...all]/route";
 import { POST as changePasswordHandler } from "@/app/api/v1/staff/auth/change-password/route";
 import { NextRequest } from "next/server";
 import { createOTP } from "@better-auth/utils/otp";
+import { base32 } from "@better-auth/utils/base32";
+
+function extractTotpSecret(totpURI: string): string {
+  const url = new URL(totpURI);
+  const base32Secret = url.searchParams.get("secret")!;
+  return Buffer.from(base32.decode(base32Secret)).toString("utf-8");
+}
 
 const DEFAULT_TEST_DB_URL =
   process.env.DATABASE_URL ||
@@ -305,10 +312,7 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
     expect(enableData.backupCodes.length).toBe(10);
 
     // Extract secret and generate valid 6-digit TOTP code
-    const url = new URL(enableData.totpURI);
-    const secret = url.searchParams.get("secret")!;
-    expect(secret).toBeDefined();
-
+    const secret = extractTotpSecret(enableData.totpURI);
     const totpCode = await createOTP(secret, { digits: 6, period: 30 }).totp();
 
     // 4. Verify TOTP to complete enrollment
@@ -367,7 +371,7 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
     );
     const enableData = await enableRes.json();
     const firstBackupCode = enableData.backupCodes[0];
-    const secret = new URL(enableData.totpURI).searchParams.get("secret")!;
+    const secret = extractTotpSecret(enableData.totpURI);
     const totpCode = await createOTP(secret, { digits: 6, period: 30 }).totp();
 
     await postAuthJson("/api/auth/two-factor/verify-totp", { code: totpCode }, updatedCookie);
@@ -443,7 +447,7 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
       updatedCookie
     );
     const enableData = await enableRes.json();
-    const secret = new URL(enableData.totpURI).searchParams.get("secret")!;
+    const secret = extractTotpSecret(enableData.totpURI);
     const code = await createOTP(secret, { digits: 6, period: 30 }).totp();
     await postAuthJson("/api/auth/two-factor/verify-totp", { code }, updatedCookie);
 
