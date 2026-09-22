@@ -18,6 +18,19 @@ function extractTotpSecret(totpURI: string): string {
   return Buffer.from(base32.decode(base32Secret)).toString("utf-8");
 }
 
+function extractCookieHeader(response: Response): string {
+  const setCookies = response.headers.getSetCookie?.() ?? [];
+  if (setCookies.length === 0) {
+    const raw = response.headers.get("set-cookie");
+    if (!raw) return "";
+    setCookies.push(raw);
+  }
+  return setCookies
+    .map((sc) => sc.split(";")[0].trim())
+    .filter((c) => c && !c.endsWith("="))
+    .join("; ");
+}
+
 const DEFAULT_TEST_DB_URL =
   process.env.DATABASE_URL ||
   "postgresql://test_user:test_password@localhost:5432/waffarhacars_test";
@@ -287,7 +300,7 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
     const changeRes = await changePasswordHandler(changeReq);
     expect(changeRes.status).toBe(200);
 
-    const updatedCookie = changeRes.headers.get("set-cookie") || sessionCookie!;
+    const updatedCookie = extractCookieHeader(changeRes) || sessionCookie!;
     const updatedHeaders = new Headers({ cookie: updatedCookie });
 
     // After password change, state transitions to MFA_ENROLLMENT_REQUIRED
@@ -324,8 +337,12 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
 
     expect(verifyTotpRes.status).toBe(200);
 
+    // Capture the active session cookie set upon initial TOTP verification
+    const activeCookie = extractCookieHeader(verifyTotpRes) || updatedCookie;
+    const activeHeaders = new Headers({ cookie: activeCookie });
+
     // State is now ACTIVE!
-    const status3 = await resolveStaffSession(updatedHeaders);
+    const status3 = await resolveStaffSession(activeHeaders);
     expect(status3.state).toBe("ACTIVE");
     expect(status3.canAccessStaffApp).toBe(true);
   });
@@ -362,7 +379,7 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
       })
     );
     expect(changeRes.status).toBe(200);
-    const updatedCookie = changeRes.headers.get("set-cookie") || sessionCookie;
+    const updatedCookie = extractCookieHeader(changeRes) || sessionCookie;
 
     const enableRes = await postAuthJson(
       "/api/auth/two-factor/enable",
@@ -374,14 +391,20 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
     const secret = extractTotpSecret(enableData.totpURI);
     const totpCode = await createOTP(secret, { digits: 6, period: 30 }).totp();
 
-    await postAuthJson("/api/auth/two-factor/verify-totp", { code: totpCode }, updatedCookie);
+    const verifyEnrollRes = await postAuthJson(
+      "/api/auth/two-factor/verify-totp",
+      { code: totpCode },
+      updatedCookie
+    );
+    expect(verifyEnrollRes.status).toBe(200);
 
     // Sign in afresh: 2FA challenge is issued
     const signIn2 = await postAuthJson("/api/auth/sign-in/email", {
       email,
       password: newPassword,
     });
-    const twoFactorCookie = signIn2.headers.get("set-cookie")!;
+    expect(signIn2.status).toBe(200);
+    const twoFactorCookie = extractCookieHeader(signIn2);
 
     // Verify using the single-use backup code
     const backupVerifyRes = await postAuthJson(
@@ -396,7 +419,8 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
       email,
       password: newPassword,
     });
-    const twoFactorCookie3 = signIn3.headers.get("set-cookie")!;
+    expect(signIn3.status).toBe(200);
+    const twoFactorCookie3 = extractCookieHeader(signIn3);
 
     // Second use of the same code must be rejected!
     const reuseRes = await postAuthJson(
@@ -439,24 +463,31 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
       })
     );
     expect(changeRes.status).toBe(200);
-    const updatedCookie = changeRes.headers.get("set-cookie") || sessionCookie;
+    const updatedCookie = extractCookieHeader(changeRes) || sessionCookie;
 
     const enableRes = await postAuthJson(
       "/api/auth/two-factor/enable",
       { password: newPassword, method: "totp" },
       updatedCookie
     );
+    expect(enableRes.status).toBe(200);
     const enableData = await enableRes.json();
     const secret = extractTotpSecret(enableData.totpURI);
     const code = await createOTP(secret, { digits: 6, period: 30 }).totp();
-    await postAuthJson("/api/auth/two-factor/verify-totp", { code }, updatedCookie);
+    const verifyEnrollRes = await postAuthJson(
+      "/api/auth/two-factor/verify-totp",
+      { code },
+      updatedCookie
+    );
+    expect(verifyEnrollRes.status).toBe(200);
 
     // Fresh sign in -> triggers 2FA
     const freshSignIn = await postAuthJson("/api/auth/sign-in/email", {
       email,
       password: newPassword,
     });
-    const twoFactorCookie = freshSignIn.headers.get("set-cookie")!;
+    expect(freshSignIn.status).toBe(200);
+    const twoFactorCookie = extractCookieHeader(freshSignIn);
 
     // Call verify-totp directly via HTTP route, maliciously supplying trustDevice: true
     const verifyTotpCode = await createOTP(secret, { digits: 6, period: 30 }).totp();
