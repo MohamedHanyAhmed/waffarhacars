@@ -87,6 +87,9 @@ This repository contains the interactive, responsive, bilingual showcase prototy
 - **Liveness Probe**: `GET /api/live` (returns HTTP 200 `{ "status": "ok" }` with `Cache-Control: no-store`)
 - **Readiness Probe**: `GET /api/ready` (returns HTTP 200 `{ "status": "ready" }` or HTTP 503 `{ "status": "unavailable" }`)
 - **Protected Session Probe**: `GET /api/auth/probe` (returns RFC 7807 401 Problem Details when unauthenticated, or 200 `{ "authenticated": true }` when session is valid)
+- **Staff Provisioning CLI**: `node scripts/provision-staff.mjs` (server-only credential provisioning with scrypt hashing, preflight conflict checks, compensating rollback, and bootstrap mode)
+- **Staff Authentication & Mandatory TOTP**: `/staff/login` (email/password), `/staff/activate-password` (forced initial password change), `/staff/mfa/enroll` (RFC 6238 TOTP with single-use backup codes), `/staff/mfa/verify` (two-factor challenge gate), `/staff` (landing dashboard)
+- **Server-Side Trusted Device Policy**: Zero bypass enforcement via `trustedDeviceGuardPlugin` (all `trustDevice: true` requests overridden to `false`, zero bypass cookies or records)
 
 ### Separate Verification Commands
 
@@ -158,6 +161,7 @@ Portable full-page screenshots are saved under `artifacts/screenshots/`:
 - **Provider Workshop:** `http://localhost:3000/provider/check-in` (Scanner & arrival), `/provider/complete` (Mutual PIN completion).
 - **Customer Audit & Review:** `http://localhost:3000/my-reservations/res-sunny-5688/completed` (Honored scope/price checklist).
 - **Sales & Operations:** `http://localhost:3000/sales/new-offer` (Offer draft wizard with mandatory price evidence), `http://localhost:3000/ops/approvals` (Maker-checker approvals & commission receivables ledger).
+- **Internal Staff Portal:** `http://localhost:3000/staff/login` (Staff sign-in), `/staff/activate-password` (Forced password change), `/staff/mfa/enroll` (TOTP MFA setup), `/staff/mfa/verify` (TOTP challenge), `/staff` (Internal staff dashboard).
 - **Global Control:** Click **"Demo Scenarios"** in the top navigation banner to switch roles instantly or test all 11 preset states (clean empty, loading, incompatible vehicle, confirmed, checked in unissued, checked in valid PIN, wrong PIN, expired PIN, cancelled, no show, already completed).
 
 ## Document conventions
