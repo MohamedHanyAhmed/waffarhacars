@@ -80,7 +80,7 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
     }
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     resetServerEnvCache();
     resetAuth();
     process.env = { ...originalEnv };
@@ -94,23 +94,33 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
     process.env.STAFF_LOGIN_HMAC_KEY = "test-staff-login-key-at-least-32-characters-long-12345";
     process.env.OTP_PEPPER_SECRET = "test-otp-pepper-key-at-least-32-characters-long-12345";
     process.env.PHONE_ALIAS_HMAC_KEY = "test-phone-alias-key-at-least-32-characters-long-12345";
+
+    if (isDbReachable) {
+      try {
+        const prisma = getPrisma();
+        await prisma.rateLimitBucket.deleteMany({});
+      } catch {}
+    }
   });
 
   afterEach(async () => {
-    if (isDbReachable && createdUserEmails.length > 0) {
+    if (isDbReachable) {
       try {
         const prisma = getPrisma();
-        const users = await prisma.user.findMany({
-          where: { email: { in: createdUserEmails } },
-          select: { id: true },
-        });
-        const userIds = users.map((u) => u.id);
-        if (userIds.length > 0) {
-          await prisma.twoFactor.deleteMany({ where: { userId: { in: userIds } } });
-          await prisma.internalStaffMembership.deleteMany({ where: { userId: { in: userIds } } });
-          await prisma.session.deleteMany({ where: { userId: { in: userIds } } });
-          await prisma.account.deleteMany({ where: { userId: { in: userIds } } });
-          await prisma.user.deleteMany({ where: { id: { in: userIds } } });
+        await prisma.rateLimitBucket.deleteMany({});
+        if (createdUserEmails.length > 0) {
+          const users = await prisma.user.findMany({
+            where: { email: { in: createdUserEmails } },
+            select: { id: true },
+          });
+          const userIds = users.map((u) => u.id);
+          if (userIds.length > 0) {
+            await prisma.twoFactor.deleteMany({ where: { userId: { in: userIds } } });
+            await prisma.internalStaffMembership.deleteMany({ where: { userId: { in: userIds } } });
+            await prisma.session.deleteMany({ where: { userId: { in: userIds } } });
+            await prisma.account.deleteMany({ where: { userId: { in: userIds } } });
+            await prisma.user.deleteMany({ where: { id: { in: userIds } } });
+          }
         }
       } catch (err) {
         console.error("Cleanup error in afterEach:", err);
@@ -737,7 +747,8 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
       email,
       password: temporaryPassword,
     });
-    const sessionCookie = signInRes.headers.get("set-cookie")!;
+    expect(signInRes.status).toBe(200);
+    const sessionCookie = extractCookieHeader(signInRes);
     const changeRes = await changePasswordHandler(
       new NextRequest("http://localhost:3000/api/v1/staff/auth/change-password", {
         method: "POST",
@@ -770,7 +781,8 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
       email,
       password: temporaryPassword,
     });
-    const sessionCookie = signInRes.headers.get("set-cookie")!;
+    expect(signInRes.status).toBe(200);
+    const sessionCookie = extractCookieHeader(signInRes);
     const sessionHeaders = new Headers({ cookie: sessionCookie });
     const session = await resolveStaffSession(sessionHeaders);
     expect(session.isAuthenticated).toBe(true);
@@ -798,7 +810,8 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
       email,
       password: temporaryPassword,
     });
-    const sessionCookie = signInRes.headers.get("set-cookie")!;
+    expect(signInRes.status).toBe(200);
+    const sessionCookie = extractCookieHeader(signInRes);
     // Sign out
     const signOutRes = await postAuthJson("/api/auth/sign-out", {}, sessionCookie);
     expect(signOutRes.status).toBe(200);
@@ -826,7 +839,8 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
       email,
       password: temporaryPassword,
     });
-    const sessionCookie = signInRes.headers.get("set-cookie")!;
+    expect(signInRes.status).toBe(200);
+    const sessionCookie = extractCookieHeader(signInRes);
 
     const changeRes = await changePasswordHandler(
       new NextRequest("http://localhost:3000/api/v1/staff/auth/change-password", {
@@ -886,7 +900,8 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
       email,
       password: temporaryPassword,
     });
-    const sessionCookie = signInRes.headers.get("set-cookie")!;
+    expect(signInRes.status).toBe(200);
+    const sessionCookie = extractCookieHeader(signInRes);
 
     const enableRes = await postAuthJson(
       "/api/auth/two-factor/enable",

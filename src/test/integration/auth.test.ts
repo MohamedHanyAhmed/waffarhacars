@@ -83,7 +83,7 @@ describe("Real PostgreSQL 17 Better Auth Database Session Integration Suite", ()
     }
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     resetServerEnvCache();
     resetAuth();
     process.env = { ...originalEnv };
@@ -96,7 +96,15 @@ describe("Real PostgreSQL 17 Better Auth Database Session Integration Suite", ()
     process.env.OTP_PEPPER_SECRET = "test-pepper-secret-at-least-32-characters-long-12345";
     process.env.PHONE_ALIAS_HMAC_KEY = "test-alias-key-at-least-32-characters-long-12345";
     process.env.PHONE_LOOKUP_HMAC_KEY = "test-lookup-key-at-least-32-characters-long-12345";
+    process.env.STAFF_LOGIN_HMAC_KEY = "test-staff-login-key-at-least-32-characters-long-12345";
     process.env.OTP_SMS_PROVIDER = "test";
+
+    if (isDbReachable) {
+      try {
+        const prisma = getPrisma();
+        await prisma.rateLimitBucket.deleteMany({});
+      } catch {}
+    }
 
     testAuth = createTestAuth({
       baseURL: "http://localhost:3000",
@@ -105,19 +113,22 @@ describe("Real PostgreSQL 17 Better Auth Database Session Integration Suite", ()
   });
 
   afterEach(async () => {
-    if (isDbReachable && createdUserEmails.length > 0) {
+    if (isDbReachable) {
       try {
         const prisma = getPrisma();
+        await prisma.rateLimitBucket.deleteMany({});
         // Clean database rows strictly in foreign-key order
-        const users = await prisma.user.findMany({
-          where: { email: { in: createdUserEmails } },
-          select: { id: true },
-        });
-        const userIds = users.map((u) => u.id);
-        if (userIds.length > 0) {
-          await prisma.session.deleteMany({ where: { userId: { in: userIds } } });
-          await prisma.account.deleteMany({ where: { userId: { in: userIds } } });
-          await prisma.user.deleteMany({ where: { id: { in: userIds } } });
+        if (createdUserEmails.length > 0) {
+          const users = await prisma.user.findMany({
+            where: { email: { in: createdUserEmails } },
+            select: { id: true },
+          });
+          const userIds = users.map((u) => u.id);
+          if (userIds.length > 0) {
+            await prisma.session.deleteMany({ where: { userId: { in: userIds } } });
+            await prisma.account.deleteMany({ where: { userId: { in: userIds } } });
+            await prisma.user.deleteMany({ where: { id: { in: userIds } } });
+          }
         }
       } catch (err) {
         console.error("Cleanup error in afterEach:", err);
