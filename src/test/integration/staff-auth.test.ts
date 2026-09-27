@@ -152,12 +152,12 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
       password: temporaryPassword,
       fullName,
       employeeNumber,
-      department: "OPERATIONS",
+      department: "ADMIN",
       isBootstrap: true,
     });
 
     expect(result.success).toBe(true);
-    expect(result.department).toBe("OPERATIONS");
+    expect(result.department).toBe("ADMIN");
     expect(result.mustChangePassword).toBe(true);
 
     const prisma = getPrisma();
@@ -193,7 +193,7 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
       password: staff1.temporaryPassword,
       fullName: staff1.fullName,
       employeeNumber: staff1.employeeNumber,
-      department: "SALES",
+      department: "ADMIN",
       isBootstrap: true,
     });
 
@@ -263,7 +263,7 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
       password: temporaryPassword,
       fullName,
       employeeNumber,
-      department: "OPERATIONS",
+      department: "ADMIN",
       isBootstrap: true,
     });
 
@@ -361,7 +361,7 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
       password: temporaryPassword,
       fullName,
       employeeNumber,
-      department: "SALES",
+      department: "ADMIN",
       isBootstrap: true,
     });
 
@@ -445,7 +445,7 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
       password: temporaryPassword,
       fullName,
       employeeNumber,
-      department: "FINANCE",
+      department: "ADMIN",
       isBootstrap: true,
     });
 
@@ -544,7 +544,7 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
       password: temporaryPassword,
       fullName,
       employeeNumber,
-      department: "FINANCE",
+      department: "ADMIN",
       isBootstrap: true,
     });
 
@@ -654,7 +654,7 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
       password: temporaryPassword,
       fullName,
       employeeNumber,
-      department: "OPERATIONS",
+      department: "ADMIN",
       isBootstrap: true,
     });
     const result2 = await provisionStaffMember({
@@ -662,7 +662,7 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
       password: temporaryPassword,
       fullName,
       employeeNumber,
-      department: "OPERATIONS",
+      department: "ADMIN",
       isBootstrap: false,
     });
     expect(result2.idempotent).toBe(true);
@@ -763,7 +763,7 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
       password: temporaryPassword,
       fullName,
       employeeNumber,
-      department: "OPERATIONS",
+      department: "ADMIN",
       isBootstrap: true,
     });
     const signInRes = await postAuthJson("/api/auth/sign-in/email", {
@@ -777,7 +777,7 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
     expect(session.isStaff).toBe(true);
     expect(session.state).toBe("PASSWORD_CHANGE_REQUIRED");
     expect(session.membership?.employeeNumber).toBe(employeeNumber);
-    expect(session.membership?.department).toBe("OPERATIONS");
+    expect(session.membership?.department).toBe("ADMIN");
     expect(session.user?.email).toBe(email.toLowerCase());
   });
 
@@ -819,7 +819,7 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
       password: temporaryPassword,
       fullName,
       employeeNumber,
-      department: "OPERATIONS",
+      department: "ADMIN",
       isBootstrap: true,
     });
     const signInRes = await postAuthJson("/api/auth/sign-in/email", {
