@@ -89,169 +89,175 @@ export async function provisionStaffMember(
     // Acquire dedicated connection-level session advisory lock
     await client.query("SELECT pg_advisory_lock($1::bigint)", [PROVISIONING_LOCK_ID]);
 
+    const prisma = getPrisma();
+
+    // Preflight check 1: Bootstrap validation
+    const totalStaffCount = await prisma.internalStaffMembership.count();
+    if (totalStaffCount === 0 && !isBootstrap) {
+      throw new ProvisioningError(
+        "BOOTSTRAP_REQUIRED",
+        "No staff memberships exist. The first staff account must be initialized using bootstrap mode."
+      );
+    }
+
+    if (isBootstrap && totalStaffCount > 0) {
+      throw new ProvisioningError(
+        "BOOTSTRAP_ALREADY_INITIALIZED",
+        "First admin bootstrap mode is only permitted when zero staff memberships exist."
+      );
+    }
+
+    // Preflight check 2: Check employee number uniqueness
+    const existingByEmp = await prisma.internalStaffMembership.findUnique({
+      where: { employeeNumber: normalizedEmployeeNumber },
+      include: { user: true },
+    });
+
+    // Preflight check 3: Check email uniqueness
+    const existingByUser = await prisma.user.findUnique({
+      where: { email: normalizedEmail },
+      include: {
+        customerProfile: true,
+        internalStaffMembership: true,
+      },
+    });
+
+    if (existingByUser?.customerProfile) {
+      throw new ProvisioningError(
+        "CUSTOMER_IDENTITY_COLLISION",
+        "A consumer customer account with this email already exists."
+      );
+    }
+
+    // Idempotency check: if both user and employee number match the exact same record
+    if (existingByUser && existingByEmp) {
+      if (
+        existingByUser.id === existingByEmp.userId &&
+        existingByEmp.employeeNumber === normalizedEmployeeNumber &&
+        existingByEmp.department === department
+      ) {
+        return {
+          success: true,
+          userId: existingByUser.id,
+          employeeNumber: existingByEmp.employeeNumber,
+          department: existingByEmp.department,
+          mustChangePassword: existingByEmp.mustChangePassword,
+          idempotent: true,
+        };
+      }
+      throw new ProvisioningError(
+        "IDENTITY_CONFLICT",
+        "Conflicting staff membership attributes found."
+      );
+    }
+
+    if (existingByUser && !existingByEmp) {
+      throw new ProvisioningError(
+        "EMAIL_ALREADY_IN_USE",
+        "A user account with this email address already exists."
+      );
+    }
+
+    if (!existingByUser && existingByEmp) {
+      throw new ProvisioningError(
+        "EMPLOYEE_NUMBER_ALREADY_IN_USE",
+        "A staff membership with this employee number already exists."
+      );
+    }
+
+    // Step A: Create credential account via Better Auth server API
+    const provisioningAuth = getProvisioningAuth();
+    let createdUserId: string | null = null;
+
     try {
-      const prisma = getPrisma();
-
-      // Preflight check 1: Bootstrap validation
-      const totalStaffCount = await prisma.internalStaffMembership.count();
-      if (totalStaffCount === 0 && !isBootstrap) {
-        throw new ProvisioningError(
-          "BOOTSTRAP_REQUIRED",
-          "No staff memberships exist. The first staff account must be initialized using bootstrap mode."
-        );
-      }
-
-      if (isBootstrap && totalStaffCount > 0) {
-        throw new ProvisioningError(
-          "BOOTSTRAP_ALREADY_INITIALIZED",
-          "First admin bootstrap mode is only permitted when zero staff memberships exist."
-        );
-      }
-
-      // Preflight check 2: Check employee number uniqueness
-      const existingByEmp = await prisma.internalStaffMembership.findUnique({
-        where: { employeeNumber: normalizedEmployeeNumber },
-        include: { user: true },
+      const signupResult = await provisioningAuth.api.signUpEmail({
+        body: {
+          email: normalizedEmail,
+          password: validated.password,
+          name: validated.fullName.trim(),
+        },
       });
-
-      // Preflight check 3: Check email uniqueness
-      const existingByUser = await prisma.user.findUnique({
+      createdUserId = signupResult.user.id;
+    } catch {
+      // If Better Auth threw, check if an unconfirmed identity exists in the database
+      const unconfirmed = await prisma.user.findUnique({
         where: { email: normalizedEmail },
-        include: {
-          customerProfile: true,
-          internalStaffMembership: true,
+        select: { id: true },
+      });
+      if (unconfirmed) {
+        // Fail closed without deleting unconfirmed identity; report opaque identifier for manual reconciliation
+        throw new ProvisioningOperationalError(
+          "PROVISIONING_UNCONFIRMED_IDENTITY",
+          unconfirmed.id,
+          "Better Auth credential creation returned an error but an identity with this email exists. Manual reconciliation required."
+        );
+      }
+      throw new ProvisioningError(
+        "AUTH_ACCOUNT_CREATION_FAILED",
+        "Better Auth credential creation failed."
+      );
+    }
+
+    // Step B: Create domain-owned InternalStaffMembership
+    try {
+      const membership = await prisma.internalStaffMembership.create({
+        data: {
+          userId: createdUserId,
+          employeeNumber: normalizedEmployeeNumber,
+          department,
+          isActive: true,
+          mustChangePassword: true,
+          hiredAt: new Date(),
         },
       });
 
-      if (existingByUser?.customerProfile) {
-        throw new ProvisioningError(
-          "CUSTOMER_IDENTITY_COLLISION",
-          "A consumer customer account with this email already exists."
-        );
-      }
-
-      // Idempotency check: if both user and employee number match the exact same record
-      if (existingByUser && existingByEmp) {
-        if (
-          existingByUser.id === existingByEmp.userId &&
-          existingByEmp.employeeNumber === normalizedEmployeeNumber &&
-          existingByEmp.department === department
-        ) {
-          return {
-            success: true,
-            userId: existingByUser.id,
-            employeeNumber: existingByEmp.employeeNumber,
-            department: existingByEmp.department,
-            mustChangePassword: existingByEmp.mustChangePassword,
-            idempotent: true,
-          };
-        }
-        throw new ProvisioningError(
-          "IDENTITY_CONFLICT",
-          "Conflicting staff membership attributes found."
-        );
-      }
-
-      if (existingByUser && !existingByEmp) {
-        throw new ProvisioningError(
-          "EMAIL_ALREADY_IN_USE",
-          "A user account with this email address already exists."
-        );
-      }
-
-      if (!existingByUser && existingByEmp) {
-        throw new ProvisioningError(
-          "EMPLOYEE_NUMBER_ALREADY_IN_USE",
-          "A staff membership with this employee number already exists."
-        );
-      }
-
-      // Step A: Create credential account via Better Auth server API
-      const provisioningAuth = getProvisioningAuth();
-      let createdUserId: string | null = null;
-
+      return {
+        success: true,
+        userId: createdUserId,
+        employeeNumber: membership.employeeNumber,
+        department: membership.department,
+        mustChangePassword: membership.mustChangePassword,
+        idempotent: false,
+      };
+    } catch {
+      // Step C: Compensating transaction - delete only the createdUserId proven to have been created by this invocation
+      let compensationSucceeded = false;
       try {
-        const signupResult = await provisioningAuth.api.signUpEmail({
-          body: {
-            email: normalizedEmail,
-            password: validated.password,
-            name: validated.fullName.trim(),
-          },
-        });
-        createdUserId = signupResult.user.id;
+        await prisma.session.deleteMany({ where: { userId: createdUserId } });
+        await prisma.account.deleteMany({ where: { userId: createdUserId } });
+        await prisma.user.delete({ where: { id: createdUserId } });
+        compensationSucceeded = true;
       } catch {
-        // Check if user was partially created before Better Auth threw
-        const orphaned = await prisma.user.findUnique({
-          where: { email: normalizedEmail },
-          include: { internalStaffMembership: true },
-        });
-        if (orphaned && !orphaned.internalStaffMembership) {
-          try {
-            await prisma.user.delete({ where: { id: orphaned.id } });
-          } catch {
-            throw new ProvisioningOperationalError(
-              "PROVISIONING_COMPENSATION_FAILED",
-              orphaned.id,
-              "Auth creation failed with orphan user left in database."
-            );
-          }
-        }
-        throw new ProvisioningError(
-          "AUTH_ACCOUNT_CREATION_FAILED",
-          "Better Auth credential creation failed."
+        compensationSucceeded = false;
+      }
+
+      if (!compensationSucceeded) {
+        throw new ProvisioningOperationalError(
+          "PROVISIONING_COMPENSATION_FAILED",
+          createdUserId,
+          `Membership creation failed and automated cleanup could not delete created user. Manual remediation required for userId: ${createdUserId}`
         );
       }
 
-      // Step B: Create domain-owned InternalStaffMembership
-      try {
-        const membership = await prisma.internalStaffMembership.create({
-          data: {
-            userId: createdUserId,
-            employeeNumber: normalizedEmployeeNumber,
-            department,
-            isActive: true,
-            mustChangePassword: true,
-            hiredAt: new Date(),
-          },
-        });
-
-        return {
-          success: true,
-          userId: createdUserId,
-          employeeNumber: membership.employeeNumber,
-          department: membership.department,
-          mustChangePassword: membership.mustChangePassword,
-          idempotent: false,
-        };
-      } catch {
-        // Step C: Compensating transaction - atomic cascade deletion of the created User
-        let compensationSucceeded = false;
-        try {
-          await prisma.user.delete({ where: { id: createdUserId } });
-          compensationSucceeded = true;
-        } catch {
-          compensationSucceeded = false;
-        }
-
-        if (!compensationSucceeded) {
-          throw new ProvisioningOperationalError(
-            "PROVISIONING_COMPENSATION_FAILED",
-            createdUserId,
-            "Membership creation failed and automated cleanup could not delete created user."
-          );
-        }
-
-        throw new ProvisioningError(
-          "MEMBERSHIP_CREATION_FAILED",
-          "Membership record creation failed. Compensating rollback deleted the created auth account."
-        );
-      }
-    } finally {
-      await client
-        .query("SELECT pg_advisory_unlock($1::bigint)", [PROVISIONING_LOCK_ID])
-        .catch(() => {});
+      throw new ProvisioningError(
+        "MEMBERSHIP_CREATION_FAILED",
+        "Membership record creation failed. Compensating rollback deleted the created auth account."
+      );
     }
   } finally {
-    client.release();
+    let lockReleased = false;
+    try {
+      await client.query("SELECT pg_advisory_unlock($1::bigint)", [PROVISIONING_LOCK_ID]);
+      lockReleased = true;
+    } catch {
+      lockReleased = false;
+    } finally {
+      if (!lockReleased) {
+        // If unlock failed, destroy connection so a still-locked connection is never returned to the pool
+        client.release(true);
+      } else {
+        client.release();
+      }
+    }
   }
 }

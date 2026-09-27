@@ -1,5 +1,5 @@
 import readline from "node:readline/promises";
-import { stdin as input, stdout as output } from "node:process";
+import { stdin as input, stderr } from "node:process";
 import {
   provisionStaffMember,
   ProvisioningError,
@@ -44,7 +44,7 @@ function parseArgs(args: string[]): ParsedArgs {
       console.error(
         "[Staff Provisioning] FAILED: INVALID_ARGUMENTS - Passwords cannot be passed via command line flags."
       );
-      process.exit(1);
+      process.exit(2);
     }
   }
 
@@ -53,7 +53,7 @@ function parseArgs(args: string[]): ParsedArgs {
 
 async function readMaskedPassword(promptText: string): Promise<string> {
   return new Promise((resolve) => {
-    output.write(promptText);
+    stderr.write(promptText);
     const stdin = process.stdin;
     const wasRaw = stdin.isRaw;
     if (stdin.setRawMode) {
@@ -71,7 +71,7 @@ async function readMaskedPassword(promptText: string): Promise<string> {
             stdin.setRawMode(wasRaw || false);
           }
           stdin.pause();
-          output.write("\n");
+          stderr.write("\n");
           resolve(password);
           return;
         } else if (char === "\u0003") {
@@ -81,15 +81,17 @@ async function readMaskedPassword(promptText: string): Promise<string> {
             stdin.setRawMode(wasRaw || false);
           }
           stdin.pause();
-          output.write("\n");
+          stderr.write("\n");
           process.exit(130);
         } else if (char === "\u0008" || char === "\x7f") {
           // Backspace
           if (password.length > 0) {
             password = password.slice(0, -1);
+            stderr.write("\b \b");
           }
         } else {
           password += char;
+          stderr.write("*");
         }
       }
     };
@@ -138,7 +140,7 @@ async function main() {
   let password = "";
 
   if (input.isTTY) {
-    const rl = readline.createInterface({ input, output });
+    const rl = readline.createInterface({ input, output: stderr });
     try {
       if (!args.email) {
         args.email = await rl.question("Work Email: ");
@@ -163,7 +165,7 @@ async function main() {
 
     if (pass1 !== pass2) {
       console.error("[Staff Provisioning] FAILED: PASSWORD_CONFIRMATION_MISMATCH");
-      process.exit(1);
+      process.exit(2);
     }
     password = pass1;
   } else {
@@ -172,16 +174,24 @@ async function main() {
       password = await readStdinPassword();
     } catch {
       console.error("[Staff Provisioning] FAILED: STDIN_READ_ERROR");
-      process.exit(1);
+      process.exit(2);
     }
   }
 
   if (!password) {
     console.error("[Staff Provisioning] FAILED: PASSWORD_REQUIRED");
-    process.exit(1);
+    process.exit(2);
   }
 
-  console.log("[Staff Provisioning] Processing staff provisioning...");
+  if (
+    !args.email ||
+    !args.name ||
+    !args.employeeNumber ||
+    (!args.department && !args.isBootstrap)
+  ) {
+    console.error("[Staff Provisioning] FAILED: MISSING_REQUIRED_ARGUMENTS");
+    process.exit(2);
+  }
 
   try {
     const result = await provisionStaffMember({

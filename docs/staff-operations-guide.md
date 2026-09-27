@@ -1,6 +1,6 @@
 # WaffarhaCars Internal Staff Operations Guide
 
-> **Audience:** Platform Administrators, DevOps, HR coordinators  
+> **Audience:** Platform Administrators, DevOps, HR coordinators
 > **Scope:** Staff provisioning, authentication lifecycle, TOTP MFA, suspension, and recovery procedures
 
 ---
@@ -11,10 +11,10 @@ The first staff member must be provisioned in bootstrap mode. This is only permi
 
 ```bash
 # Interactive (masked password input)
-npm run staff:provision -- --bootstrap-first-admin --email admin@waffarhacars.com --name "Admin Name"  --employee EMP-0001
+npm run staff:provision -- --bootstrap-first-admin --email admin@waffarhacars.com --name "Admin Name" --employee EMP-0001
 
-# Automated (password via stdin pipe)
-echo "SecurePassword123!" | npm run staff:provision -- --bootstrap-first-admin --email admin@waffarhacars.com --name "Admin Name" --employee EMP-0001
+# Automated (password securely piped via stdin without shell history exposure)
+npm run --silent staff:provision -- --bootstrap-first-admin --email admin@waffarhacars.com --name "Admin Name" --employee EMP-0001 < /run/secrets/admin_initial_password.txt
 ```
 
 **Requirements:**
@@ -37,6 +37,10 @@ echo "SecurePassword123!" | npm run staff:provision -- --bootstrap-first-admin -
 After the first admin exists, additional staff are provisioned without bootstrap mode:
 
 ```bash
+# Interactive mode (prompts for missing attributes and password with masking)
+npm run staff:provision
+
+# With identity flags (password prompted with double-entry confirmation)
 npm run staff:provision -- --email engineer@waffarhacars.com --name "Engineer Name" --employee EMP-1002 --department OPERATIONS
 ```
 
@@ -52,24 +56,41 @@ npm run staff:provision -- --email engineer@waffarhacars.com --name "Engineer Na
 
 ---
 
-## 3. Safe Password Entry
+## 3. Safe Password Entry & PII Boundary
 
 **Interactive mode** (`stdin.isTTY` is true):
 
-- Password is entered via masked input (asterisks echoed to stderr).
+- Password is entered via masked input (asterisks echoed to stderr via raw TTY mode).
 - Password must be entered twice for confirmation.
-- No password, email, or employee number appears in stdout or stderr.
+- Missing identity fields (`email`, `name`, `employee`, `department`) are prompted interactively on stderr if omitted.
 
 **Automated/CI mode** (`stdin.isTTY` is false):
 
-- Password is read from stdin pipe (single line, no echo).
-- Example: `echo "password" | npm run staff:provision -- [args]`
+- Password is read directly from standard input (single line, no echo).
+- Secret values must **never** be passed via shell commands like `echo "secret" | ...` because process argument lists and shell histories may expose them.
+- Instead, read from a restricted secret file or vault stream:
+  ```bash
+  # From a secure file descriptor or secret file
+  npm run --silent staff:provision -- --email staff@waffarhacars.com --name "Staff Specialist" --employee EMP-1003 --department SALES < /run/secrets/staff_temp_pw.txt
 
-**Security invariants:**
+  # From a secret vault command stream
+  vault kv get -field=initial_password secret/staff-seed | npm run --silent staff:provision -- --email staff@waffarhacars.com --name "Staff Specialist" --employee EMP-1003 --department SALES
+  ```
 
+**PII and Logging Boundary:**
+
+- The application outputs to stdout **only** structured status metadata:
+  ```text
+  [Staff Provisioning] SUCCESS
+  - User ID: <uuid>
+  - Department: <department>
+  - Must Change Password: true
+  - Idempotent: <boolean>
+  ```
+- Passwords, emails, and employee numbers are **never** printed by the provisioning application in stdout or stderr.
+- When running under npm, use `npm run --silent` (`npm run -s`) to prevent npm from echoing command arguments to the console.
 - No `--password` CLI argument exists.
 - No `STAFF_PROVISIONING_PASSWORD` environment variable is read.
-- Passwords never appear in process arguments, environment, logs, or error messages.
 
 ---
 
@@ -113,7 +134,7 @@ UPDATE "InternalStaffMembership" SET "isActive" = true WHERE "employeeNumber" = 
 
 If provisioning fails after creating the Better Auth user but before creating the staff membership, and the compensating cleanup also fails, an **orphan user** is reported:
 
-```
+```text
 [Staff Provisioning] CRITICAL [PROVISIONING_COMPENSATION_FAILED] Orphan User ID: <uuid>
 ```
 
@@ -145,7 +166,7 @@ If a staff member loses their TOTP device and all backup codes:
 
 ## 8. Rate Limiting
 
-**IP-based:** 20 login attempts per 15 minutes per IP address.  
+**IP-based:** 20 login attempts per 15 minutes per IP address.
 **Account-based:** 5 login attempts per 15 minutes per email (HMAC-hashed with `STAFF_LOGIN_HMAC_KEY`).
 
 Rate limit buckets are stored in the `rate_limit_bucket` PostgreSQL table using atomic upsert. Buckets auto-expire after the window duration.

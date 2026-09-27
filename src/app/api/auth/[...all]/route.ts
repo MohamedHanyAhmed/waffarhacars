@@ -120,41 +120,58 @@ export async function handleAuth(req: NextRequest): Promise<Response> {
       );
     }
 
+    // Parse body first to extract email for account-level rate limiting
+    let emailToRateLimit: string | null = null;
     try {
       const clone = req.clone();
       const body = await clone.json();
       if (body && typeof body.email === "string" && body.email.trim()) {
-        if (!env.STAFF_LOGIN_HMAC_KEY) {
-          return Response.json(
-            { error: "SERVICE_UNAVAILABLE", message: "Authentication service configuration error" },
-            { status: 503, headers: { "Cache-Control": "no-store" } }
-          );
-        }
-        const accountKey = `rate_limit:staff_login_account:${hashEmailIdentifier(body.email, env.STAFF_LOGIN_HMAC_KEY)}`;
-        const accountLimit = await checkRateLimit(accountKey, 5, 900);
-        if (!accountLimit.allowed) {
-          return Response.json(
-            {
-              error: "TOO_MANY_REQUESTS",
-              message: "Too many login attempts. Please try again later.",
-            },
-            {
-              status: 429,
-              headers: {
-                "Retry-After": String(accountLimit.retryAfterSeconds),
-                "Cache-Control": "no-store",
-              },
-            }
-          );
-        }
+        emailToRateLimit = body.email.trim();
       }
     } catch {
       // If body is unparseable or not JSON, defer to Better Auth request validator
     }
+
+    if (emailToRateLimit) {
+      if (!env.STAFF_LOGIN_HMAC_KEY) {
+        return Response.json(
+          { error: "SERVICE_UNAVAILABLE", message: "Authentication service configuration error" },
+          { status: 503, headers: { "Cache-Control": "no-store" } }
+        );
+      }
+      const accountKey = `rate_limit:staff_login_account:${hashEmailIdentifier(emailToRateLimit, env.STAFF_LOGIN_HMAC_KEY)}`;
+      let accountLimit;
+      try {
+        accountLimit = await checkRateLimit(accountKey, 5, 900);
+      } catch {
+        return Response.json(
+          {
+            error: "SERVICE_UNAVAILABLE",
+            message: "Authentication service temporarily unavailable",
+          },
+          { status: 503, headers: { "Cache-Control": "no-store" } }
+        );
+      }
+      if (!accountLimit.allowed) {
+        return Response.json(
+          {
+            error: "TOO_MANY_REQUESTS",
+            message: "Too many login attempts. Please try again later.",
+          },
+          {
+            status: 429,
+            headers: {
+              "Retry-After": String(accountLimit.retryAfterSeconds),
+              "Cache-Control": "no-store",
+            },
+          }
+        );
+      }
+    }
   }
 
-  // Server-side staff session state machine enforcement (P1-3)
-  // Endpoints that don't require/use session cookies (sign-in creates session, 2FA uses its own cookie)
+  // Server-side staff session state machine enforcement (P1-1 & P1-3)
+  // Endpoints that don't require/use session cookies (sign-in creates session, callback, ok)
   const isSessionExemptEndpoint =
     normalizedPath === "/api/auth/sign-in/email" ||
     normalizedPath === "/api/auth/sign-up/email" ||
@@ -162,43 +179,54 @@ export async function handleAuth(req: NextRequest): Promise<Response> {
     normalizedPath.startsWith("/api/auth/callback/") ||
     normalizedPath === "/api/auth/ok";
 
-  if (!isSessionExemptEndpoint && req.method === "POST") {
-    // Check if this is a 2FA verification with a two-factor cookie (no session required)
-    const hasTwoFactorCookie = req.headers.get("cookie")?.includes("better-auth.two_factor");
+  if (!isSessionExemptEndpoint) {
+    const { resolveStaffSession } = await import("@/lib/staff/staff-session");
+    const staffSession = await resolveStaffSession(req.headers);
 
-    if (!hasTwoFactorCookie) {
-      // Import resolveStaffSession and check session state
-      const { resolveStaffSession } = await import("@/lib/staff/staff-session");
-      const staffSession = await resolveStaffSession(req.headers);
+    if (staffSession.isAuthenticated && staffSession.isStaff) {
+      // Block /two-factor/disable for ALL staff across all HTTP methods (GET, POST, etc.)
+      // Caller cannot bypass this check by supplying a forged better-auth.two_factor cookie.
+      if (
+        normalizedPath === "/api/auth/two-factor/disable" ||
+        normalizedPath.startsWith("/api/auth/two-factor/disable/")
+      ) {
+        return Response.json(
+          {
+            error: "STAFF_SESSION_RESTRICTED",
+            message: "Operation not permitted for staff accounts.",
+          },
+          { status: 403, headers: { "Cache-Control": "no-store" } }
+        );
+      }
 
-      if (staffSession.isAuthenticated && staffSession.isStaff) {
-        // Staff session state machine enforcement via explicit allowlist
-        const staffAllowedEndpoints = getStaffAllowedEndpoints(staffSession.state);
-
-        // Block /two-factor/disable for ALL staff regardless of state
-        if (normalizedPath === "/api/auth/two-factor/disable") {
-          return Response.json(
-            {
-              error: "STAFF_SESSION_RESTRICTED",
-              message: "Operation not permitted for staff accounts.",
-            },
-            { status: 403, headers: { "Cache-Control": "no-store" } }
-          );
-        }
-
-        if (
-          !staffAllowedEndpoints.some(
-            (ep) => normalizedPath === ep || normalizedPath.startsWith(ep + "/")
-          )
-        ) {
-          return Response.json(
-            {
-              error: "STAFF_SESSION_RESTRICTED",
-              message: "Your account state does not permit this action.",
-            },
-            { status: 403, headers: { "Cache-Control": "no-store" } }
-          );
-        }
+      // Staff session state machine enforcement via explicit allowlist
+      const staffAllowedEndpoints = getStaffAllowedEndpoints(staffSession.state);
+      if (
+        !staffAllowedEndpoints.some(
+          (ep) => normalizedPath === ep || normalizedPath.startsWith(ep + "/")
+        )
+      ) {
+        return Response.json(
+          {
+            error: "STAFF_SESSION_RESTRICTED",
+            message: "Your account state does not permit this action.",
+          },
+          { status: 403, headers: { "Cache-Control": "no-store" } }
+        );
+      }
+    } else if (!staffSession.isAuthenticated) {
+      // Unauthenticated requests: /two-factor/disable is strictly rejected across all HTTP methods.
+      if (
+        normalizedPath === "/api/auth/two-factor/disable" ||
+        normalizedPath.startsWith("/api/auth/two-factor/disable/")
+      ) {
+        return Response.json(
+          {
+            error: "UNAUTHORIZED",
+            message: "Authentication required.",
+          },
+          { status: 401, headers: { "Cache-Control": "no-store" } }
+        );
       }
     }
   }
