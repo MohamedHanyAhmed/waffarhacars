@@ -87,7 +87,7 @@ This repository contains the interactive, responsive, bilingual showcase prototy
 - **Liveness Probe**: `GET /api/live` (returns HTTP 200 `{ "status": "ok" }` with `Cache-Control: no-store`)
 - **Readiness Probe**: `GET /api/ready` (returns HTTP 200 `{ "status": "ready" }` or HTTP 503 `{ "status": "unavailable" }`)
 - **Protected Session Probe**: `GET /api/auth/probe` (returns RFC 7807 401 Problem Details when unauthenticated, or 200 `{ "authenticated": true }` when session is valid)
-- **Staff Provisioning CLI**: `node scripts/provision-staff.mjs` (server-only credential provisioning with scrypt hashing, preflight conflict checks, compensating rollback, and bootstrap mode)
+- **Staff Provisioning CLI**: `npm run staff:provision` (TypeScript CLI via `tsx scripts/provision-staff.ts` with masked TTY input, stdin pipe for automation, and zero PII logging)
 - **Staff Authentication & Mandatory TOTP**: `/staff/login` (email/password), `/staff/activate-password` (forced initial password change), `/staff/mfa/enroll` (RFC 6238 TOTP with single-use backup codes), `/staff/mfa/verify` (two-factor challenge gate), `/staff` (landing dashboard)
 - **Server-Side Trusted Device Policy**: Zero bypass enforcement via `trustedDeviceGuardPlugin` (all `trustDevice: true` requests overridden to `false`, zero bypass cookies or records)
 
@@ -105,19 +105,19 @@ npm run lint
 # 3. TypeScript compiler type-check (zero type errors)
 npm run typecheck
 
-# 4. Run Vitest domain unit tests (62 unit tests under JSDOM environment)
+# 4. Run Vitest domain unit tests (182 unit tests across 19 files under JSDOM/Node environment)
 npm run test:unit
 
 # 5. Validate Prisma schema syntax
 npm run prisma:validate
 
-# 6. Run real PostgreSQL integration tests (Node environment against PostgreSQL container)
+# 6. Run real PostgreSQL integration tests (69 integration tests across 4 test suites against PostgreSQL 17 container)
 npm run test:integration
 
 # 7. Build optimized production Next.js application
 npm run build
 
-# 8. Run Playwright automated acceptance tests (21 tests across Desktop and Mobile viewports)
+# 8. Run Playwright automated acceptance tests (27 tests across Desktop and Mobile viewports)
 npm run test:e2e
 
 # 9. Run hermetic verification pipeline (format -> lint -> typecheck -> unit tests -> prisma validate -> build -> E2E)
