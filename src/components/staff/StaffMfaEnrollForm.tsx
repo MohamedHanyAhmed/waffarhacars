@@ -52,9 +52,7 @@ export function StaffMfaEnrollForm() {
 
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        setError(
-          data.message || data.error || "Failed to initiate MFA setup. Check your password."
-        );
+        setError(data.message || data.error || t("staff.mfaInitiateError"));
         setIsLoading(false);
         return;
       }
@@ -97,16 +95,14 @@ export function StaffMfaEnrollForm() {
 
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        setError(
-          data.message || data.error || "Invalid authenticator code. Please check and try again."
-        );
+        setError(data.message || data.error || t("staff.mfaVerifyError"));
         setIsLoading(false);
         return;
       }
 
       setStep("backup_codes");
     } catch {
-      setError("Verification failed. Please try again.");
+      setError(t("staff.mfaVerifyFailed"));
     } finally {
       setIsLoading(false);
     }
@@ -152,10 +148,7 @@ export function StaffMfaEnrollForm() {
         <form onSubmit={handleInitiate} className="space-y-4">
           <div className="p-4 bg-slate-50 rounded-xl border border-slate-100 text-sm text-slate-600">
             <p className="font-semibold text-slate-800 mb-1">{t("staff.mfaStep1")}</p>
-            <p className="text-xs text-slate-500">
-              For security, confirm your current password to generate your TOTP authenticator secret
-              and backup recovery keys.
-            </p>
+            <p className="text-xs text-slate-500">{t("staff.mfaStep1Desc")}</p>
           </div>
 
           <div>

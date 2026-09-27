@@ -4,7 +4,6 @@ import { getPrisma } from "@/lib/db";
 import type { StaffDepartment } from "@/generated/prisma/client";
 
 export type StaffLifecycleState =
-  | "PROVISIONED"
   | "PASSWORD_CHANGE_REQUIRED"
   | "MFA_ENROLLMENT_REQUIRED"
   | "MFA_ENROLLMENT_PENDING"
@@ -37,7 +36,6 @@ export interface StaffSessionResult {
   membership?: StaffMembershipDetails;
   session?: {
     id: string;
-    token: string;
     expiresAt: Date;
   };
   canAccessStaffApp: boolean;
@@ -197,7 +195,6 @@ export async function resolveStaffSession(
     },
     session: {
       id: sessionData.session.id,
-      token: sessionData.session.token,
       expiresAt: sessionData.session.expiresAt,
     },
     canAccessStaffApp,

@@ -95,12 +95,28 @@ export async function POST(req: NextRequest): Promise<Response> {
       data: { mustChangePassword: false },
     });
   } catch {
+    // Fail-closed: password IS changed and old sessions are revoked.
+    // Propagate the rotated cookie so the user can retry with the new password.
+    // mustChangePassword remains true, blocking all other operations until cleared.
+    const failureHeaders = new Headers({ "Cache-Control": "no-store" });
+    const cookies = authRes.headers.getSetCookie?.() ?? [];
+    if (cookies.length > 0) {
+      for (const cookie of cookies) {
+        failureHeaders.append("set-cookie", cookie);
+      }
+    } else {
+      const rawCookie = authRes.headers.get("set-cookie");
+      if (rawCookie) {
+        failureHeaders.set("set-cookie", rawCookie);
+      }
+    }
     return Response.json(
       {
-        error: "MEMBERSHIP_UPDATE_ERROR",
+        error: "MEMBERSHIP_UPDATE_FAILED",
         message: "Password changed, but status update failed. Please retry.",
+        mustRetry: true,
       },
-      { status: 500, headers: { "Cache-Control": "no-store" } }
+      { status: 500, headers: failureHeaders }
     );
   }
 

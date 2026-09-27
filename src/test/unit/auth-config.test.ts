@@ -19,6 +19,7 @@ describe("Better Auth Server Configuration and Security Invariants", () => {
     process.env.OTP_PEPPER_SECRET = "dev-pepper-secret-at-least-32-chars-long-12345";
     process.env.PHONE_ALIAS_HMAC_KEY = "dev-alias-key-at-least-32-chars-long-12345";
     process.env.PHONE_LOOKUP_HMAC_KEY = "dev-lookup-key-at-least-32-chars-long-12345";
+    process.env.STAFF_LOGIN_HMAC_KEY = "dev-staff-login-key-at-least-32-chars-12345";
     process.env.OTP_SMS_PROVIDER = "test";
     resetServerEnvCache();
     resetAuth();

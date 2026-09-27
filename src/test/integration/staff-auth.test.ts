@@ -91,6 +91,9 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
     process.env.BETTER_AUTH_SECRET = TEST_SECRET;
     process.env.BETTER_AUTH_URL = "http://localhost:3000";
     process.env.PHONE_LOOKUP_HMAC_KEY = "test-lookup-key-at-least-32-characters-long-12345";
+    process.env.STAFF_LOGIN_HMAC_KEY = "test-staff-login-key-at-least-32-characters-long-12345";
+    process.env.OTP_PEPPER_SECRET = "test-otp-pepper-key-at-least-32-characters-long-12345";
+    process.env.PHONE_ALIAS_HMAC_KEY = "test-phone-alias-key-at-least-32-characters-long-12345";
   });
 
   afterEach(async () => {
@@ -528,5 +531,370 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
     });
     const nextBody = await nextSignIn.json();
     expect(nextBody.twoFactorRedirect).toBe(true);
+  });
+
+  it("asserts trusted-device zero-bypass invariant: verify-backup-code with trustDevice: true never issues trust cookie or database record", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+
+    const { email, temporaryPassword, employeeNumber, fullName } = generateTestStaff();
+    await provisionStaffMember({
+      email,
+      password: temporaryPassword,
+      fullName,
+      employeeNumber,
+      department: "FINANCE",
+      isBootstrap: true,
+    });
+
+    const newPassword = "PermanentSecurePassword123!";
+
+    const signInRes = await postAuthJson("/api/auth/sign-in/email", {
+      email,
+      password: temporaryPassword,
+    });
+    const sessionCookie = signInRes.headers.get("set-cookie")!;
+
+    const changeRes = await changePasswordHandler(
+      new NextRequest("http://localhost:3000/api/v1/staff/auth/change-password", {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: sessionCookie },
+        body: JSON.stringify({ currentPassword: temporaryPassword, newPassword }),
+      })
+    );
+    expect(changeRes.status).toBe(200);
+    const updatedCookie = extractCookieHeader(changeRes) || sessionCookie;
+
+    const enableRes = await postAuthJson(
+      "/api/auth/two-factor/enable",
+      { password: newPassword, method: "totp" },
+      updatedCookie
+    );
+    expect(enableRes.status).toBe(200);
+    const enableData = await enableRes.json();
+    const secret = extractTotpSecret(enableData.totpURI);
+    const code = await createOTP(secret, { digits: 6, period: 30 }).totp();
+    const verifyEnrollRes = await postAuthJson(
+      "/api/auth/two-factor/verify-totp",
+      { code },
+      updatedCookie
+    );
+    expect(verifyEnrollRes.status).toBe(200);
+
+    const freshSignIn = await postAuthJson("/api/auth/sign-in/email", {
+      email,
+      password: newPassword,
+    });
+    expect(freshSignIn.status).toBe(200);
+    const twoFactorCookie = extractCookieHeader(freshSignIn);
+
+    const backupCode = enableData.backupCodes[1];
+
+    const verifyReq = new NextRequest(
+      "http://localhost:3000/api/auth/two-factor/verify-backup-code",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          cookie: twoFactorCookie,
+        },
+        body: JSON.stringify({
+          code: backupCode,
+          trustDevice: true,
+        }),
+      }
+    );
+
+    const verifyRes = await handleAuth(verifyReq);
+    expect(verifyRes.status).toBe(200);
+
+    const setCookieHeaders = verifyRes.headers.getSetCookie();
+    expect(setCookieHeaders.some((c) => c.includes("better-auth.trust-device"))).toBe(false);
+
+    const prisma = getPrisma();
+    const trustRecords = await prisma.verification.findMany({
+      where: {
+        identifier: {
+          startsWith: "trust-device-",
+        },
+      },
+    });
+    expect(trustRecords.length).toBe(0);
+
+    const nextSignIn = await postAuthJson("/api/auth/sign-in/email", {
+      email,
+      password: newPassword,
+    });
+    const nextBody = await nextSignIn.json();
+    expect(nextBody.twoFactorRedirect).toBe(true);
+  });
+
+  it("proves wrong password returns 401 without revealing whether account exists", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+    const { email } = generateTestStaff();
+    const res = await postAuthJson("/api/auth/sign-in/email", {
+      email,
+      password: "WrongPassword123!",
+    });
+    expect(res.status).toBe(401);
+    const body = await res.json();
+    expect(JSON.stringify(body)).not.toContain(email);
+  });
+
+  it("proves idempotent provisioning returns same userId when all attributes match", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+    const { email, temporaryPassword, employeeNumber, fullName } = generateTestStaff();
+    const result1 = await provisionStaffMember({
+      email,
+      password: temporaryPassword,
+      fullName,
+      employeeNumber,
+      department: "OPERATIONS",
+      isBootstrap: true,
+    });
+    const result2 = await provisionStaffMember({
+      email,
+      password: temporaryPassword,
+      fullName,
+      employeeNumber,
+      department: "OPERATIONS",
+      isBootstrap: false,
+    });
+    expect(result2.idempotent).toBe(true);
+    expect(result2.userId).toBe(result1.userId);
+  });
+
+  it("proves bootstrap mode rejects when staff memberships already exist with BOOTSTRAP_ALREADY_INITIALIZED", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+    const staff1 = generateTestStaff();
+    await provisionStaffMember({
+      email: staff1.email,
+      password: staff1.temporaryPassword,
+      fullName: staff1.fullName,
+      employeeNumber: staff1.employeeNumber,
+      department: "ADMIN",
+      isBootstrap: true,
+    });
+    const staff2 = generateTestStaff();
+    try {
+      await provisionStaffMember({
+        email: staff2.email,
+        password: staff2.temporaryPassword,
+        fullName: staff2.fullName,
+        employeeNumber: staff2.employeeNumber,
+        department: "ADMIN",
+        isBootstrap: true,
+      });
+      expect.unreachable("Should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ProvisioningError);
+      expect((err as ProvisioningError).code).toBe("BOOTSTRAP_ALREADY_INITIALIZED");
+    }
+  });
+
+  it("proves bootstrap mode requires ADMIN department and rejects with BOOTSTRAP_REQUIRES_ADMIN", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+    const staff = generateTestStaff();
+    try {
+      await provisionStaffMember({
+        email: staff.email,
+        password: staff.temporaryPassword,
+        fullName: staff.fullName,
+        employeeNumber: staff.employeeNumber,
+        department: "SALES",
+        isBootstrap: true,
+      });
+      expect.unreachable("Should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ProvisioningError);
+      expect((err as ProvisioningError).code).toBe("BOOTSTRAP_REQUIRES_ADMIN");
+    }
+  });
+
+  it("proves password change with wrong current password returns 400 INVALID_CREDENTIALS", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+    const { email, temporaryPassword, employeeNumber, fullName } = generateTestStaff();
+    await provisionStaffMember({
+      email,
+      password: temporaryPassword,
+      fullName,
+      employeeNumber,
+      department: "ADMIN",
+      isBootstrap: true,
+    });
+    const signInRes = await postAuthJson("/api/auth/sign-in/email", {
+      email,
+      password: temporaryPassword,
+    });
+    const sessionCookie = signInRes.headers.get("set-cookie")!;
+    const changeRes = await changePasswordHandler(
+      new NextRequest("http://localhost:3000/api/v1/staff/auth/change-password", {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: sessionCookie },
+        body: JSON.stringify({
+          currentPassword: "WrongCurrentPassword123!",
+          newPassword: "NewSecurePassword123!",
+        }),
+      })
+    );
+    expect(changeRes.status).toBe(400);
+    const body = await changeRes.json();
+    expect(body.error).toBe("INVALID_CREDENTIALS");
+  });
+
+  it("proves session cookie resolves to correct staff membership and lifecycle state", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+    const { email, temporaryPassword, employeeNumber, fullName } = generateTestStaff();
+    await provisionStaffMember({
+      email,
+      password: temporaryPassword,
+      fullName,
+      employeeNumber,
+      department: "OPERATIONS",
+      isBootstrap: true,
+    });
+    const signInRes = await postAuthJson("/api/auth/sign-in/email", {
+      email,
+      password: temporaryPassword,
+    });
+    const sessionCookie = signInRes.headers.get("set-cookie")!;
+    const sessionHeaders = new Headers({ cookie: sessionCookie });
+    const session = await resolveStaffSession(sessionHeaders);
+    expect(session.isAuthenticated).toBe(true);
+    expect(session.isStaff).toBe(true);
+    expect(session.state).toBe("PASSWORD_CHANGE_REQUIRED");
+    expect(session.membership?.employeeNumber).toBe(employeeNumber);
+    expect(session.membership?.department).toBe("OPERATIONS");
+    expect(session.user?.email).toBe(email.toLowerCase());
+  });
+
+  it("proves sign-out invalidates session and resolveStaffSession returns UNAUTHENTICATED", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+    const { email, temporaryPassword, employeeNumber, fullName } = generateTestStaff();
+    await provisionStaffMember({
+      email,
+      password: temporaryPassword,
+      fullName,
+      employeeNumber,
+      department: "ADMIN",
+      isBootstrap: true,
+    });
+    const signInRes = await postAuthJson("/api/auth/sign-in/email", {
+      email,
+      password: temporaryPassword,
+    });
+    const sessionCookie = signInRes.headers.get("set-cookie")!;
+    // Sign out
+    const signOutRes = await postAuthJson("/api/auth/sign-out", {}, sessionCookie);
+    expect(signOutRes.status).toBe(200);
+    // Verify session is invalidated
+    const sessionHeaders = new Headers({ cookie: sessionCookie });
+    const session = await resolveStaffSession(sessionHeaders);
+    expect(session.isAuthenticated).toBe(false);
+    expect(session.rejectionReason).toBe("UNAUTHENTICATED");
+  });
+
+  it("proves server-side state machine blocks /two-factor/disable for ACTIVE staff", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+    const { email, temporaryPassword, employeeNumber, fullName } = generateTestStaff();
+    await provisionStaffMember({
+      email,
+      password: temporaryPassword,
+      fullName,
+      employeeNumber,
+      department: "OPERATIONS",
+      isBootstrap: true,
+    });
+    const signInRes = await postAuthJson("/api/auth/sign-in/email", {
+      email,
+      password: temporaryPassword,
+    });
+    const sessionCookie = signInRes.headers.get("set-cookie")!;
+
+    const changeRes = await changePasswordHandler(
+      new NextRequest("http://localhost:3000/api/v1/staff/auth/change-password", {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: sessionCookie },
+        body: JSON.stringify({
+          currentPassword: temporaryPassword,
+          newPassword: "PermanentSecurePassword123!",
+        }),
+      })
+    );
+    expect(changeRes.status).toBe(200);
+    const updatedCookie = extractCookieHeader(changeRes) || sessionCookie;
+
+    const enableRes = await postAuthJson(
+      "/api/auth/two-factor/enable",
+      { password: "PermanentSecurePassword123!", method: "totp" },
+      updatedCookie
+    );
+    expect(enableRes.status).toBe(200);
+    const enableData = await enableRes.json();
+    const secret = extractTotpSecret(enableData.totpURI);
+    const code = await createOTP(secret, { digits: 6, period: 30 }).totp();
+
+    const verifyRes = await postAuthJson(
+      "/api/auth/two-factor/verify-totp",
+      { code },
+      updatedCookie
+    );
+    expect(verifyRes.status).toBe(200);
+    const activeCookie = extractCookieHeader(verifyRes) || updatedCookie;
+
+    const disableRes = await postAuthJson(
+      "/api/auth/two-factor/disable",
+      { password: "PermanentSecurePassword123!" },
+      activeCookie
+    );
+    expect(disableRes.status).toBe(403);
+    const disableBody = await disableRes.json();
+    expect(disableBody.error).toBe("STAFF_SESSION_RESTRICTED");
+  });
+
+  it("proves PASSWORD_CHANGE_REQUIRED state blocks two-factor/enable via server-side state machine", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+    const { email, temporaryPassword, employeeNumber, fullName } = generateTestStaff();
+    await provisionStaffMember({
+      email,
+      password: temporaryPassword,
+      fullName,
+      employeeNumber,
+      department: "ADMIN",
+      isBootstrap: true,
+    });
+    const signInRes = await postAuthJson("/api/auth/sign-in/email", {
+      email,
+      password: temporaryPassword,
+    });
+    const sessionCookie = signInRes.headers.get("set-cookie")!;
+
+    const enableRes = await postAuthJson(
+      "/api/auth/two-factor/enable",
+      { password: temporaryPassword, method: "totp" },
+      sessionCookie
+    );
+    expect(enableRes.status).toBe(403);
+    const body = await enableRes.json();
+    expect(body.error).toBe("STAFF_SESSION_RESTRICTED");
   });
 });

@@ -8,9 +8,11 @@ const VALID_PROD_SECRET = "prod-high-entropy-secret-at-least-32-chars-random-str
 const VALID_PEPPER_SECRET = "dev-pepper-secret-at-least-32-chars-long-with-entropy-12345";
 const VALID_ALIAS_KEY = "dev-alias-key-at-least-32-chars-long-with-entropy-12345";
 const VALID_LOOKUP_KEY = "dev-lookup-key-at-least-32-chars-long-with-entropy-12345";
+const VALID_STAFF_LOGIN_KEY = "dev-staff-login-key-at-least-32-chars-long-with-entropy-12345";
 const VALID_PROD_PEPPER = "prod-pepper-secret-at-least-32-chars-random-string-54321";
 const VALID_PROD_ALIAS = "prod-alias-key-at-least-32-chars-random-string-54321";
 const VALID_PROD_LOOKUP = "prod-lookup-key-at-least-32-chars-random-string-54321";
+const VALID_PROD_STAFF_LOGIN = "prod-staff-login-key-at-least-32-chars-random-string-54321";
 
 describe("Server Auth Environment Validation", () => {
   it("succeeds in showcase demo mode without auth variables", () => {
@@ -34,6 +36,7 @@ describe("Server Auth Environment Validation", () => {
       OTP_PEPPER_SECRET: VALID_PEPPER_SECRET,
       PHONE_ALIAS_HMAC_KEY: VALID_ALIAS_KEY,
       PHONE_LOOKUP_HMAC_KEY: VALID_LOOKUP_KEY,
+      STAFF_LOGIN_HMAC_KEY: VALID_STAFF_LOGIN_KEY,
       OTP_SMS_PROVIDER: "test",
     });
     expect(env.BETTER_AUTH_URL).toBe("http://localhost:3000");
@@ -41,6 +44,7 @@ describe("Server Auth Environment Validation", () => {
     expect(env.OTP_PEPPER_SECRET).toBe(VALID_PEPPER_SECRET);
     expect(env.PHONE_ALIAS_HMAC_KEY).toBe(VALID_ALIAS_KEY);
     expect(env.PHONE_LOOKUP_HMAC_KEY).toBe(VALID_LOOKUP_KEY);
+    expect(env.STAFF_LOGIN_HMAC_KEY).toBe(VALID_STAFF_LOGIN_KEY);
   });
 
   it("fails in production postgres mode when no implemented SMS provider is configured", () => {
@@ -54,6 +58,7 @@ describe("Server Auth Environment Validation", () => {
         OTP_PEPPER_SECRET: VALID_PROD_PEPPER,
         PHONE_ALIAS_HMAC_KEY: VALID_PROD_ALIAS,
         PHONE_LOOKUP_HMAC_KEY: VALID_PROD_LOOKUP,
+        STAFF_LOGIN_HMAC_KEY: VALID_PROD_STAFF_LOGIN,
       })
     ).toThrow(
       "Configuration error: Production runtime requires an active, implemented SMS aggregator."
@@ -72,6 +77,7 @@ describe("Server Auth Environment Validation", () => {
           OTP_PEPPER_SECRET: VALID_PROD_PEPPER,
           PHONE_ALIAS_HMAC_KEY: VALID_PROD_ALIAS,
           PHONE_LOOKUP_HMAC_KEY: VALID_PROD_LOOKUP,
+          STAFF_LOGIN_HMAC_KEY: VALID_PROD_STAFF_LOGIN,
           OTP_SMS_PROVIDER: provider,
         })
       ).toThrow(
@@ -90,6 +96,7 @@ describe("Server Auth Environment Validation", () => {
         BETTER_AUTH_URL: "http://localhost:3000",
         PHONE_ALIAS_HMAC_KEY: VALID_ALIAS_KEY,
         PHONE_LOOKUP_HMAC_KEY: VALID_LOOKUP_KEY,
+        STAFF_LOGIN_HMAC_KEY: VALID_STAFF_LOGIN_KEY,
       })
     ).toThrow("Configuration error: OTP_PEPPER_SECRET is required when using postgres backend.");
   });
@@ -104,6 +111,7 @@ describe("Server Auth Environment Validation", () => {
         BETTER_AUTH_URL: "http://localhost:3000",
         OTP_PEPPER_SECRET: VALID_PEPPER_SECRET,
         PHONE_LOOKUP_HMAC_KEY: VALID_LOOKUP_KEY,
+        STAFF_LOGIN_HMAC_KEY: VALID_STAFF_LOGIN_KEY,
       })
     ).toThrow("Configuration error: PHONE_ALIAS_HMAC_KEY is required when using postgres backend.");
   });
@@ -118,10 +126,26 @@ describe("Server Auth Environment Validation", () => {
         BETTER_AUTH_URL: "http://localhost:3000",
         OTP_PEPPER_SECRET: VALID_PEPPER_SECRET,
         PHONE_ALIAS_HMAC_KEY: VALID_ALIAS_KEY,
+        STAFF_LOGIN_HMAC_KEY: VALID_STAFF_LOGIN_KEY,
       })
     ).toThrow(
       "Configuration error: PHONE_LOOKUP_HMAC_KEY is required when using postgres backend."
     );
+  });
+
+  it("fails when STAFF_LOGIN_HMAC_KEY is missing under postgres backend", () => {
+    expect(() =>
+      validateServerEnv({
+        APP_RUNTIME_PROFILE: "showcase",
+        APP_DATA_BACKEND: "postgres",
+        DATABASE_URL: VALID_POSTGRES_URL,
+        BETTER_AUTH_SECRET: VALID_DEV_SECRET,
+        BETTER_AUTH_URL: "http://localhost:3000",
+        OTP_PEPPER_SECRET: VALID_PEPPER_SECRET,
+        PHONE_ALIAS_HMAC_KEY: VALID_ALIAS_KEY,
+        PHONE_LOOKUP_HMAC_KEY: VALID_LOOKUP_KEY,
+      })
+    ).toThrow("Configuration error: STAFF_LOGIN_HMAC_KEY is required when using postgres backend.");
   });
 
   it("fails when secrets are not mutually distinct under postgres backend", () => {
@@ -135,9 +159,28 @@ describe("Server Auth Environment Validation", () => {
         OTP_PEPPER_SECRET: VALID_DEV_SECRET, // Duplicate
         PHONE_ALIAS_HMAC_KEY: VALID_ALIAS_KEY,
         PHONE_LOOKUP_HMAC_KEY: VALID_LOOKUP_KEY,
+        STAFF_LOGIN_HMAC_KEY: VALID_STAFF_LOGIN_KEY,
       })
     ).toThrow(
-      "Configuration error: BETTER_AUTH_SECRET, OTP_PEPPER_SECRET, PHONE_ALIAS_HMAC_KEY, and PHONE_LOOKUP_HMAC_KEY must all be mutually distinct."
+      "Configuration error: BETTER_AUTH_SECRET, OTP_PEPPER_SECRET, PHONE_ALIAS_HMAC_KEY, PHONE_LOOKUP_HMAC_KEY, and STAFF_LOGIN_HMAC_KEY must all be mutually distinct."
+    );
+  });
+
+  it("fails when STAFF_LOGIN_HMAC_KEY is duplicate with BETTER_AUTH_SECRET", () => {
+    expect(() =>
+      validateServerEnv({
+        APP_RUNTIME_PROFILE: "showcase",
+        APP_DATA_BACKEND: "postgres",
+        DATABASE_URL: VALID_POSTGRES_URL,
+        BETTER_AUTH_SECRET: VALID_DEV_SECRET,
+        BETTER_AUTH_URL: "http://localhost:3000",
+        OTP_PEPPER_SECRET: VALID_PEPPER_SECRET,
+        PHONE_ALIAS_HMAC_KEY: VALID_ALIAS_KEY,
+        PHONE_LOOKUP_HMAC_KEY: VALID_LOOKUP_KEY,
+        STAFF_LOGIN_HMAC_KEY: VALID_DEV_SECRET, // Duplicate
+      })
+    ).toThrow(
+      "Configuration error: BETTER_AUTH_SECRET, OTP_PEPPER_SECRET, PHONE_ALIAS_HMAC_KEY, PHONE_LOOKUP_HMAC_KEY, and STAFF_LOGIN_HMAC_KEY must all be mutually distinct."
     );
   });
 
@@ -320,6 +363,7 @@ describe("Server Auth Environment Validation", () => {
       OTP_PEPPER_SECRET: VALID_PEPPER_SECRET,
       PHONE_ALIAS_HMAC_KEY: VALID_ALIAS_KEY,
       PHONE_LOOKUP_HMAC_KEY: VALID_LOOKUP_KEY,
+      STAFF_LOGIN_HMAC_KEY: VALID_STAFF_LOGIN_KEY,
       AUTH_TRUSTED_ORIGINS: "http://127.0.0.1:3000, https://admin.waffarhacars.local",
     });
     expect(env.AUTH_TRUSTED_ORIGINS).toEqual([

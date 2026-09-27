@@ -1,6 +1,11 @@
+/**
+ * UI-only mocked tests — all API endpoints are intercepted via Playwright route interception.
+ * These tests validate the client-side UI flow (navigation, form submission, visual feedback)
+ * but do NOT prove backend correctness. See integration tests for real PostgreSQL validation.
+ */
 import { test, expect } from "@playwright/test";
 
-test.describe("Internal Staff Authentication & Mandatory TOTP E2E Journey", () => {
+test.describe("Internal Staff Authentication UI Journey (Mocked Endpoints)", () => {
   test("1. Full Staff Provisioning Activation Flow (Login -> Activate Password -> MFA Enroll -> Staff Landing)", async ({
     page,
   }) => {

@@ -3,6 +3,37 @@ import { getServerEnv } from "@/lib/env";
 import { sanitizeAuthResponse } from "@/lib/auth-response-sanitizer";
 import { getClientIp, hashIpAddress, hashEmailIdentifier, checkRateLimit } from "@/lib/rate-limit";
 import type { NextRequest } from "next/server";
+import type { StaffLifecycleState } from "@/lib/staff/staff-session";
+
+function getStaffAllowedEndpoints(state: StaffLifecycleState): string[] {
+  // Explicit allowlist: staff sessions can only access endpoints matching their lifecycle state.
+  // Customer OTP sessions never reach this check because non-staff sessions are exempt.
+  const commonEndpoints = ["/api/auth/sign-out", "/api/auth/get-session"];
+
+  switch (state) {
+    case "PASSWORD_CHANGE_REQUIRED":
+      // Password change goes through /api/v1/staff/auth/change-password, not the catch-all.
+      return [...commonEndpoints];
+    case "MFA_ENROLLMENT_REQUIRED":
+    case "MFA_ENROLLMENT_PENDING":
+      return [
+        ...commonEndpoints,
+        "/api/auth/two-factor/enable",
+        "/api/auth/two-factor/verify-totp",
+      ];
+    case "ACTIVE":
+      return [
+        ...commonEndpoints,
+        "/api/auth/two-factor/verify-totp",
+        "/api/auth/two-factor/verify-backup-code",
+        "/api/auth/change-password",
+      ];
+    case "SUSPENDED":
+      return [...commonEndpoints];
+    default:
+      return [...commonEndpoints];
+  }
+}
 
 export async function handleAuth(req: NextRequest): Promise<Response> {
   let env;
@@ -93,9 +124,13 @@ export async function handleAuth(req: NextRequest): Promise<Response> {
       const clone = req.clone();
       const body = await clone.json();
       if (body && typeof body.email === "string" && body.email.trim()) {
-        const hmacKey =
-          env.PHONE_LOOKUP_HMAC_KEY || env.BETTER_AUTH_SECRET || "staff-rate-limit-salt";
-        const accountKey = `rate_limit:staff_login_account:${hashEmailIdentifier(body.email, hmacKey)}`;
+        if (!env.STAFF_LOGIN_HMAC_KEY) {
+          return Response.json(
+            { error: "SERVICE_UNAVAILABLE", message: "Authentication service configuration error" },
+            { status: 503, headers: { "Cache-Control": "no-store" } }
+          );
+        }
+        const accountKey = `rate_limit:staff_login_account:${hashEmailIdentifier(body.email, env.STAFF_LOGIN_HMAC_KEY)}`;
         const accountLimit = await checkRateLimit(accountKey, 5, 900);
         if (!accountLimit.allowed) {
           return Response.json(
@@ -115,6 +150,56 @@ export async function handleAuth(req: NextRequest): Promise<Response> {
       }
     } catch {
       // If body is unparseable or not JSON, defer to Better Auth request validator
+    }
+  }
+
+  // Server-side staff session state machine enforcement (P1-3)
+  // Endpoints that don't require/use session cookies (sign-in creates session, 2FA uses its own cookie)
+  const isSessionExemptEndpoint =
+    normalizedPath === "/api/auth/sign-in/email" ||
+    normalizedPath === "/api/auth/sign-up/email" ||
+    normalizedPath === "/api/auth/callback" ||
+    normalizedPath.startsWith("/api/auth/callback/") ||
+    normalizedPath === "/api/auth/ok";
+
+  if (!isSessionExemptEndpoint && req.method === "POST") {
+    // Check if this is a 2FA verification with a two-factor cookie (no session required)
+    const hasTwoFactorCookie = req.headers.get("cookie")?.includes("better-auth.two_factor");
+
+    if (!hasTwoFactorCookie) {
+      // Import resolveStaffSession and check session state
+      const { resolveStaffSession } = await import("@/lib/staff/staff-session");
+      const staffSession = await resolveStaffSession(req.headers);
+
+      if (staffSession.isAuthenticated && staffSession.isStaff) {
+        // Staff session state machine enforcement via explicit allowlist
+        const staffAllowedEndpoints = getStaffAllowedEndpoints(staffSession.state);
+
+        // Block /two-factor/disable for ALL staff regardless of state
+        if (normalizedPath === "/api/auth/two-factor/disable") {
+          return Response.json(
+            {
+              error: "STAFF_SESSION_RESTRICTED",
+              message: "Operation not permitted for staff accounts.",
+            },
+            { status: 403, headers: { "Cache-Control": "no-store" } }
+          );
+        }
+
+        if (
+          !staffAllowedEndpoints.some(
+            (ep) => normalizedPath === ep || normalizedPath.startsWith(ep + "/")
+          )
+        ) {
+          return Response.json(
+            {
+              error: "STAFF_SESSION_RESTRICTED",
+              message: "Your account state does not permit this action.",
+            },
+            { status: 403, headers: { "Cache-Control": "no-store" } }
+          );
+        }
+      }
     }
   }
 
