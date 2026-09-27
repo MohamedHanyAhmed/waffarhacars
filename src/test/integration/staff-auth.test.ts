@@ -43,6 +43,11 @@ const DEFAULT_TEST_DB_URL =
 const TEST_SECRET = "test-secret-at-least-32-characters-long-12345";
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+function createSignedSessionCookie(token: string, secret: string = TEST_SECRET): string {
+  const signature = crypto.createHmac("sha256", secret).update(token).digest("base64");
+  return `better-auth.session_token=${encodeURIComponent(`${token}.${signature}`)}`;
+}
+
 async function postAuthJson(
   path: string,
   body: Record<string, unknown>,
@@ -1416,7 +1421,7 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
     });
 
     const headers = new Headers({
-      cookie: `better-auth.session_token=${session.token}`,
+      cookie: createSignedSessionCookie(session.token),
     });
 
     const staffSession = await resolveStaffSession(headers);
