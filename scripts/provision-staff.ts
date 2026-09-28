@@ -11,6 +11,7 @@ interface ParsedArgs {
   name: string;
   employeeNumber: string;
   department: string;
+  role: string;
   isBootstrap: boolean;
   help: boolean;
 }
@@ -21,6 +22,7 @@ function parseArgs(args: string[]): ParsedArgs {
     name: "",
     employeeNumber: "",
     department: "",
+    role: "",
     isBootstrap: false,
     help: false,
   };
@@ -32,6 +34,7 @@ function parseArgs(args: string[]): ParsedArgs {
     } else if (arg === "--bootstrap-first-admin") {
       parsed.isBootstrap = true;
       parsed.department = "ADMIN";
+      parsed.role = "PLATFORM_ADMIN";
     } else if (arg === "--email" && i + 1 < args.length) {
       parsed.email = args[++i];
     } else if (arg === "--name" && i + 1 < args.length) {
@@ -40,6 +43,8 @@ function parseArgs(args: string[]): ParsedArgs {
       parsed.employeeNumber = args[++i];
     } else if (arg === "--department" && i + 1 < args.length) {
       parsed.department = args[++i].toUpperCase();
+    } else if (arg === "--role" && i + 1 < args.length) {
+      parsed.role = args[++i].toUpperCase();
     } else if (arg === "--password") {
       console.error(
         "[Staff Provisioning] FAILED: INVALID_ARGUMENTS - Passwords cannot be passed via command line flags."
@@ -129,6 +134,9 @@ async function main() {
     console.log("  --name <name>             Staff full name");
     console.log("  --employee <number>       Staff employee number");
     console.log("  --department <dept>       Staff department (SALES, OPERATIONS, FINANCE, ADMIN)");
+    console.log(
+      "  --role <role>             Staff internal role (SALES_AGENT, OPS_SUPERVISOR, FINANCE_OFFICER)"
+    );
     console.log("  --help, -h                Show this help message");
     console.log("");
     console.log("Password Entry:");
@@ -155,6 +163,18 @@ async function main() {
         args.department = (
           await rl.question("Department (SALES/OPERATIONS/FINANCE/ADMIN): ")
         ).toUpperCase();
+      }
+      if (!args.role && !args.isBootstrap) {
+        const promptedRole = (
+          await rl.question(
+            "Role (SALES_AGENT/OPS_SUPERVISOR/FINANCE_OFFICER) [press enter to derive from department]: "
+          )
+        )
+          .trim()
+          .toUpperCase();
+        if (promptedRole) {
+          args.role = promptedRole;
+        }
       }
     } finally {
       rl.close();
@@ -199,6 +219,7 @@ async function main() {
       fullName: args.name,
       employeeNumber: args.employeeNumber,
       department: (args.department || "ADMIN") as "SALES" | "OPERATIONS" | "FINANCE" | "ADMIN",
+      role: args.role ? (args.role as any) : undefined,
       password,
       isBootstrap: args.isBootstrap,
     });
@@ -206,6 +227,7 @@ async function main() {
     console.log("[Staff Provisioning] SUCCESS");
     console.log(`- User ID: ${result.userId}`);
     console.log(`- Department: ${result.department}`);
+    console.log(`- Role: ${result.role}`);
     console.log(`- Must Change Password: ${result.mustChangePassword}`);
     console.log(`- Idempotent: ${result.idempotent}`);
     process.exit(0);

@@ -67,7 +67,11 @@ describe("Real CLI Subprocess Staff Provisioning Integration Suite", () => {
           const userIds = users.map((u) => u.id);
           if (userIds.length > 0) {
             await prisma.twoFactor.deleteMany({ where: { userId: { in: userIds } } });
+            await prisma.internalRoleAssignment.deleteMany({
+              where: { staffMembership: { userId: { in: userIds } } },
+            });
             await prisma.internalStaffMembership.deleteMany({ where: { userId: { in: userIds } } });
+            await prisma.securityAuditEvent.deleteMany({ where: { actorUserId: { in: userIds } } });
             await prisma.session.deleteMany({ where: { userId: { in: userIds } } });
             await prisma.account.deleteMany({ where: { userId: { in: userIds } } });
             await prisma.user.deleteMany({ where: { id: { in: userIds } } });
@@ -217,6 +221,7 @@ describe("Real CLI Subprocess Staff Provisioning Integration Suite", () => {
     expect(code).toBe(0);
     expect(stdout).toContain("[Staff Provisioning] SUCCESS");
     expect(stdout).toContain("- Department: ADMIN");
+    expect(stdout).toContain("- Role: PLATFORM_ADMIN");
     expect(stdout).toContain("- Must Change Password: true");
     expect(stdout).toContain("- Idempotent: false");
 
@@ -232,7 +237,12 @@ describe("Real CLI Subprocess Staff Provisioning Integration Suite", () => {
     const prisma = getPrisma();
     const dbUser = await prisma.user.findUnique({
       where: { email },
-      include: { internalStaffMembership: true, accounts: true },
+      include: {
+        internalStaffMembership: {
+          include: { roleAssignments: true },
+        },
+        accounts: true,
+      },
     });
     expect(dbUser).not.toBeNull();
     // Proves literal data preservation: & was not interpreted as backgrounding or shell command chaining
@@ -242,6 +252,15 @@ describe("Real CLI Subprocess Staff Provisioning Integration Suite", () => {
     expect(dbUser!.internalStaffMembership!.department).toBe("ADMIN");
     expect(dbUser!.internalStaffMembership!.mustChangePassword).toBe(true);
     expect(dbUser!.internalStaffMembership!.isActive).toBe(true);
+    expect(dbUser!.internalStaffMembership!.roleAssignments.length).toBe(1);
+    expect(dbUser!.internalStaffMembership!.roleAssignments[0].role).toBe("PLATFORM_ADMIN");
+    expect(dbUser!.internalStaffMembership!.roleAssignments[0].isActive).toBe(true);
+
+    const auditEvent = await prisma.securityAuditEvent.findFirst({
+      where: { actorUserId: dbUser!.id },
+    });
+    expect(auditEvent).not.toBeNull();
+    expect(auditEvent!.eventType).toBe("STAFF_PROVISIONED");
     expect(dbUser!.accounts.length).toBeGreaterThanOrEqual(1);
     expect(dbUser!.accounts[0].password).not.toBe(password); // scrypt hashed
   });

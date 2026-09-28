@@ -28,6 +28,7 @@ model User {
   twofactors       TwoFactor[]
 
   internalStaffMembership InternalStaffMembership?
+  securityAuditEvents     SecurityAuditEvent[]
 
   @@unique([email])
   @@unique([phoneNumber])
@@ -166,17 +167,57 @@ enum StaffDepartment {
   ADMIN
 }
 
+enum StaffRole {
+  SALES_AGENT
+  OPS_SUPERVISOR
+  FINANCE_OFFICER
+  PLATFORM_ADMIN
+}
+
 model InternalStaffMembership {
-  id                 String          @id @default(dbgenerated("pg_catalog.gen_random_uuid()")) @db.Uuid
-  userId             String          @unique @db.Uuid
-  user               User            @relation(fields: [userId], references: [id], onDelete: Cascade)
-  employeeNumber     String          @unique @db.VarChar(64)
+  id                 String                   @id @default(dbgenerated("pg_catalog.gen_random_uuid()")) @db.Uuid
+  userId             String                   @unique @db.Uuid
+  user               User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  employeeNumber     String                   @unique @db.VarChar(64)
   department         StaffDepartment
-  isActive           Boolean         @default(true)
-  mustChangePassword Boolean         @default(true)
-  hiredAt            DateTime        @default(now())
-  createdAt          DateTime        @default(now())
-  updatedAt          DateTime        @updatedAt
+  isActive           Boolean                  @default(true)
+  mustChangePassword Boolean                  @default(true)
+  hiredAt            DateTime                 @default(now())
+  createdAt          DateTime                 @default(now())
+  updatedAt          DateTime                 @updatedAt
+  roleAssignments    InternalRoleAssignment[]
 
   @@map("internal_staff_membership")
+}
+
+model InternalRoleAssignment {
+  id                String                  @id @default(dbgenerated("pg_catalog.gen_random_uuid()")) @db.Uuid
+  staffMembershipId String                  @db.Uuid
+  staffMembership   InternalStaffMembership @relation(fields: [staffMembershipId], references: [id], onDelete: Cascade)
+  role              StaffRole
+  isActive          Boolean                 @default(true)
+  assignedAt        DateTime                @default(now())
+  assignedBy        String?                 @db.VarChar(64)
+  createdAt         DateTime                @default(now())
+  updatedAt         DateTime                @updatedAt
+
+  @@index([staffMembershipId, isActive])
+  @@map("internal_role_assignments")
+}
+
+model SecurityAuditEvent {
+  id            String   @id @default(dbgenerated("pg_catalog.gen_random_uuid()")) @db.Uuid
+  actorUserId   String?  @db.Uuid
+  actorUser     User?    @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+  eventType     String   @db.VarChar(64)
+  targetEntity  String?  @db.VarChar(128)
+  ipFingerprint String?  @db.VarChar(64)
+  metadata      Json     @default("{}")
+  timestamp     DateTime @default(now())
+
+  @@index([timestamp])
+  @@index([eventType, timestamp])
+  @@index([actorUserId, timestamp])
+  @@index([ipFingerprint, eventType, timestamp])
+  @@map("security_audit_events")
 }

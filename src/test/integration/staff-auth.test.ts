@@ -127,7 +127,11 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
           const userIds = users.map((u) => u.id);
           if (userIds.length > 0) {
             await prisma.twoFactor.deleteMany({ where: { userId: { in: userIds } } });
+            await prisma.internalRoleAssignment.deleteMany({
+              where: { staffMembership: { userId: { in: userIds } } },
+            });
             await prisma.internalStaffMembership.deleteMany({ where: { userId: { in: userIds } } });
+            await prisma.securityAuditEvent.deleteMany({ where: { actorUserId: { in: userIds } } });
             await prisma.session.deleteMany({ where: { userId: { in: userIds } } });
             await prisma.account.deleteMany({ where: { userId: { in: userIds } } });
             await prisma.user.deleteMany({ where: { id: { in: userIds } } });

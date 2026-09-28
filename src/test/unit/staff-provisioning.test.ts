@@ -73,4 +73,35 @@ describe("Staff Provisioning Input Schema Validation Unit Tests", () => {
     const parsed = ProvisionStaffSchema.safeParse(payload);
     expect(parsed.success).toBe(false);
   });
+
+  it("accepts valid explicit staff role enum values", () => {
+    const validWithRole = {
+      email: "sales@waffarhacars.com",
+      fullName: "Sales Agent",
+      department: "SALES",
+      role: "SALES_AGENT",
+      employeeNumber: "EMP-SALES-01",
+      password: "ValidPassword123456!",
+    };
+
+    const parsed = ProvisionStaffSchema.safeParse(validWithRole);
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      expect(parsed.data.role).toBe("SALES_AGENT");
+    }
+  });
+
+  it("rejects invalid role enum value", () => {
+    const payload = {
+      email: "staff@waffarhacars.com",
+      fullName: "Staff Member",
+      department: "SALES",
+      role: "SUPER_USER",
+      employeeNumber: "EMP-100200",
+      password: "ValidPassword123456!",
+    };
+
+    const parsed = ProvisionStaffSchema.safeParse(payload);
+    expect(parsed.success).toBe(false);
+  });
 });
