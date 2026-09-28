@@ -106,9 +106,14 @@ describe("Central Authorization DAL & Security Audit PostgreSQL Integration Suit
         });
         const userIds = users.map((u) => u.id);
         if (userIds.length > 0) {
+          await prisma.twoFactor.deleteMany({ where: { userId: { in: userIds } } });
+          await prisma.internalRoleAssignment.deleteMany({
+            where: { staffMembership: { userId: { in: userIds } } },
+          });
+          await prisma.internalStaffMembership.deleteMany({ where: { userId: { in: userIds } } });
+          await prisma.securityAuditEvent.deleteMany({ where: { actorUserId: { in: userIds } } });
           await prisma.session.deleteMany({ where: { userId: { in: userIds } } });
           await prisma.account.deleteMany({ where: { userId: { in: userIds } } });
-          await prisma.internalStaffMembership.deleteMany({ where: { userId: { in: userIds } } });
           await prisma.user.deleteMany({ where: { id: { in: userIds } } });
         }
       } catch {}
@@ -133,11 +138,31 @@ describe("Central Authorization DAL & Security Audit PostgreSQL Integration Suit
     };
   }
 
+  async function ensureBootstrapped() {
+    const prisma = getPrisma();
+    const count = await prisma.internalStaffMembership.count();
+    if (count === 0) {
+      const admin = generateStaffData("bootstrap_admin");
+      await provisionStaffMember({
+        email: admin.email,
+        fullName: admin.fullName,
+        employeeNumber: admin.employeeNumber,
+        department: "ADMIN",
+        role: "PLATFORM_ADMIN",
+        password: admin.temporaryPassword,
+        isBootstrap: true,
+      });
+    }
+  }
+
   async function provisionAndActivateStaff(params: {
     department: StaffDepartment;
     role?: StaffRole;
     isBootstrap?: boolean;
   }) {
+    if (!params.isBootstrap) {
+      await ensureBootstrapped();
+    }
     const staff = generateStaffData(params.department.toLowerCase());
 
     // 1. Provision staff member (transactional User + Membership + RoleAssignment + AuditEvent)
@@ -303,12 +328,28 @@ describe("Central Authorization DAL & Security Audit PostgreSQL Integration Suit
 
     const prisma = getPrisma();
     const count = await prisma.internalStaffMembership.count();
-    const isBootstrap = count === 0;
+    if (count > 0) {
+      const existingStaff = await prisma.internalStaffMembership.findMany({
+        select: { userId: true },
+      });
+      const userIds = existingStaff.map((s) => s.userId);
+      if (userIds.length > 0) {
+        await prisma.twoFactor.deleteMany({ where: { userId: { in: userIds } } });
+        await prisma.internalRoleAssignment.deleteMany({
+          where: { staffMembership: { userId: { in: userIds } } },
+        });
+        await prisma.internalStaffMembership.deleteMany({ where: { userId: { in: userIds } } });
+        await prisma.securityAuditEvent.deleteMany({ where: { actorUserId: { in: userIds } } });
+        await prisma.session.deleteMany({ where: { userId: { in: userIds } } });
+        await prisma.account.deleteMany({ where: { userId: { in: userIds } } });
+        await prisma.user.deleteMany({ where: { id: { in: userIds } } });
+      }
+    }
 
     const { headers, provisionResult } = await provisionAndActivateStaff({
       department: "ADMIN",
       role: "PLATFORM_ADMIN",
-      isBootstrap,
+      isBootstrap: true,
     });
 
     expect(provisionResult.role).toBe("PLATFORM_ADMIN");
@@ -519,6 +560,7 @@ describe("Central Authorization DAL & Security Audit PostgreSQL Integration Suit
       throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
     }
 
+    await ensureBootstrapped();
     const staff = generateStaffData("hacker");
 
     try {
@@ -543,6 +585,7 @@ describe("Central Authorization DAL & Security Audit PostgreSQL Integration Suit
       throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
     }
 
+    await ensureBootstrapped();
     const staff = generateStaffData("mismatch");
 
     try {
