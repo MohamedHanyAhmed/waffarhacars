@@ -704,7 +704,7 @@ describe("Central Authorization DAL & Security Audit PostgreSQL Integration Suit
     // Metadata must contain ONLY allowlisted fields
     const persistedMeta = persistedRow?.metadata as Record<string, unknown>;
     expect(persistedMeta.reason).toBe("INVALID_CREDENTIALS");
-    expect(persistedMeta.failureCount).toBe(3);
+    expect(persistedMeta).not.toHaveProperty("failureCount");
     expect(persistedMeta).not.toHaveProperty("password");
     expect(persistedMeta).not.toHaveProperty("token");
     expect(persistedMeta).not.toHaveProperty("email");
