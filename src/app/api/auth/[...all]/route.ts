@@ -180,8 +180,29 @@ export async function handleAuth(req: NextRequest): Promise<Response> {
     normalizedPath === "/api/auth/ok";
 
   if (!isSessionExemptEndpoint) {
-    const { resolveStaffSession } = await import("@/lib/staff/staff-session");
-    const staffSession = await resolveStaffSession(req.headers);
+    let staffSession;
+    try {
+      const { resolveStaffSession } = await import("@/lib/staff/staff-session");
+      staffSession = await resolveStaffSession(req.headers);
+    } catch {
+      return Response.json(
+        {
+          error: "SERVICE_UNAVAILABLE",
+          message: "Authentication service temporarily unavailable",
+        },
+        { status: 503, headers: { "Cache-Control": "no-store" } }
+      );
+    }
+
+    if (staffSession.rejectionReason === "SESSION_RESOLUTION_ERROR") {
+      return Response.json(
+        {
+          error: "SERVICE_UNAVAILABLE",
+          message: "Authentication service temporarily unavailable",
+        },
+        { status: 503, headers: { "Cache-Control": "no-store" } }
+      );
+    }
 
     if (staffSession.isAuthenticated && staffSession.isStaff) {
       // Block /two-factor/disable for ALL staff across all HTTP methods (GET, POST, etc.)

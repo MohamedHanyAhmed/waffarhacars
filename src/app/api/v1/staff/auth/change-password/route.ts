@@ -34,6 +34,15 @@ export async function POST(req: NextRequest): Promise<Response> {
   const { currentPassword, newPassword } = parseResult.data;
 
   const staffSession = await resolveStaffSession(req.headers);
+  if (staffSession.rejectionReason === "SESSION_RESOLUTION_ERROR") {
+    return Response.json(
+      {
+        error: "SERVICE_UNAVAILABLE",
+        message: "Authentication service temporarily unavailable",
+      },
+      { status: 503, headers: { "Cache-Control": "no-store" } }
+    );
+  }
   if (!staffSession.isAuthenticated) {
     return Response.json(
       { error: "UNAUTHORIZED", message: "Authentication required." },

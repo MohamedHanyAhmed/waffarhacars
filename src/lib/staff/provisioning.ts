@@ -64,10 +64,20 @@ function getProvisioningAuth() {
   );
 }
 
-const PROVISIONING_LOCK_ID = "7301483920";
+export const PROVISIONING_LOCK_ID = "7301483920";
+
+export interface ProvisionStaffOptions {
+  /**
+   * Deterministic test barrier hook executed immediately after acquiring the advisory lock,
+   * before running the critical section checks. Allows concurrency tests to force overlapping
+   * lock acquisition and assert serialization on the database server.
+   */
+  _testBarrier?: () => Promise<void>;
+}
 
 export async function provisionStaffMember(
-  input: ProvisionStaffInput
+  input: ProvisionStaffInput,
+  options?: ProvisionStaffOptions
 ): Promise<ProvisionStaffResult> {
   const validated = ProvisionStaffSchema.parse(input);
   const normalizedEmail = validated.email.trim().toLowerCase();
@@ -88,6 +98,10 @@ export async function provisionStaffMember(
   try {
     // Acquire dedicated connection-level session advisory lock
     await client.query("SELECT pg_advisory_lock($1::bigint)", [PROVISIONING_LOCK_ID]);
+
+    if (options?._testBarrier) {
+      await options._testBarrier();
+    }
 
     const prisma = getPrisma();
 

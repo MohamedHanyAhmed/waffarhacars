@@ -92,13 +92,104 @@ export function resolveStaffLifecycleState(params: {
 export async function resolveStaffSession(
   headers: Headers | Record<string, string | string[] | undefined>
 ): Promise<StaffSessionResult> {
-  const auth = getAuth();
-  let sessionData;
   try {
-    sessionData = await auth.api.getSession({
+    const auth = getAuth();
+    const sessionData = await auth.api.getSession({
       headers:
         headers instanceof Headers ? headers : new Headers(headers as Record<string, string>),
     });
+
+    if (!sessionData || !sessionData.user) {
+      return {
+        isAuthenticated: false,
+        isStaff: false,
+        state: "SUSPENDED",
+        canAccessStaffApp: false,
+        canAccessEnrollment: false,
+        canAccessPasswordChange: false,
+        rejectionReason: "UNAUTHENTICATED",
+      };
+    }
+
+    const prisma = getPrisma();
+    const user = await prisma.user.findUnique({
+      where: { id: sessionData.user.id },
+      include: {
+        internalStaffMembership: true,
+        twofactors: {
+          take: 1,
+          orderBy: { id: "desc" },
+        },
+      },
+    });
+
+    if (!user || !user.internalStaffMembership) {
+      return {
+        isAuthenticated: true,
+        isStaff: false,
+        state: "SUSPENDED",
+        user: {
+          id: sessionData.user.id,
+          email: sessionData.user.email,
+          name: sessionData.user.name,
+          isSuspended: user?.isSuspended ?? false,
+          twoFactorEnabled: !!user?.twoFactorEnabled,
+        },
+        canAccessStaffApp: false,
+        canAccessEnrollment: false,
+        canAccessPasswordChange: false,
+        rejectionReason: "NOT_STAFF",
+      };
+    }
+
+    const membership = user.internalStaffMembership;
+    const twoFactor = user.twofactors[0] || null;
+
+    const state = resolveStaffLifecycleState({
+      isSuspended: user.isSuspended,
+      isActive: membership.isActive,
+      mustChangePassword: membership.mustChangePassword,
+      twoFactorEnabled: !!user.twoFactorEnabled,
+      twoFactorVerified: twoFactor ? twoFactor.verified : null,
+      hasTwoFactorSecret: !!twoFactor?.secret,
+    });
+
+    const canAccessStaffApp = state === "ACTIVE";
+    const canAccessEnrollment =
+      state === "MFA_ENROLLMENT_REQUIRED" || state === "MFA_ENROLLMENT_PENDING";
+    const canAccessPasswordChange = state === "PASSWORD_CHANGE_REQUIRED";
+
+    return {
+      isAuthenticated: true,
+      isStaff: true,
+      state,
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        isSuspended: user.isSuspended,
+        twoFactorEnabled: !!user.twoFactorEnabled,
+      },
+      membership: {
+        id: membership.id,
+        userId: membership.userId,
+        employeeNumber: membership.employeeNumber,
+        department: membership.department,
+        isActive: membership.isActive,
+        mustChangePassword: membership.mustChangePassword,
+        hiredAt: membership.hiredAt,
+        createdAt: membership.createdAt,
+        updatedAt: membership.updatedAt,
+      },
+      session: {
+        id: sessionData.session.id,
+        expiresAt: sessionData.session.expiresAt,
+      },
+      canAccessStaffApp,
+      canAccessEnrollment,
+      canAccessPasswordChange,
+      rejectionReason: state === "SUSPENDED" ? "SUSPENDED" : undefined,
+    };
   } catch {
     return {
       isAuthenticated: false,
@@ -110,96 +201,4 @@ export async function resolveStaffSession(
       rejectionReason: "SESSION_RESOLUTION_ERROR",
     };
   }
-
-  if (!sessionData || !sessionData.user) {
-    return {
-      isAuthenticated: false,
-      isStaff: false,
-      state: "SUSPENDED",
-      canAccessStaffApp: false,
-      canAccessEnrollment: false,
-      canAccessPasswordChange: false,
-      rejectionReason: "UNAUTHENTICATED",
-    };
-  }
-
-  const prisma = getPrisma();
-  const user = await prisma.user.findUnique({
-    where: { id: sessionData.user.id },
-    include: {
-      internalStaffMembership: true,
-      twofactors: {
-        take: 1,
-        orderBy: { id: "desc" },
-      },
-    },
-  });
-
-  if (!user || !user.internalStaffMembership) {
-    return {
-      isAuthenticated: true,
-      isStaff: false,
-      state: "SUSPENDED",
-      user: {
-        id: sessionData.user.id,
-        email: sessionData.user.email,
-        name: sessionData.user.name,
-        isSuspended: user?.isSuspended ?? false,
-        twoFactorEnabled: !!user?.twoFactorEnabled,
-      },
-      canAccessStaffApp: false,
-      canAccessEnrollment: false,
-      canAccessPasswordChange: false,
-      rejectionReason: "NOT_STAFF",
-    };
-  }
-
-  const membership = user.internalStaffMembership;
-  const twoFactor = user.twofactors[0] || null;
-
-  const state = resolveStaffLifecycleState({
-    isSuspended: user.isSuspended,
-    isActive: membership.isActive,
-    mustChangePassword: membership.mustChangePassword,
-    twoFactorEnabled: !!user.twoFactorEnabled,
-    twoFactorVerified: twoFactor ? twoFactor.verified : null,
-    hasTwoFactorSecret: !!twoFactor?.secret,
-  });
-
-  const canAccessStaffApp = state === "ACTIVE";
-  const canAccessEnrollment =
-    state === "MFA_ENROLLMENT_REQUIRED" || state === "MFA_ENROLLMENT_PENDING";
-  const canAccessPasswordChange = state === "PASSWORD_CHANGE_REQUIRED";
-
-  return {
-    isAuthenticated: true,
-    isStaff: true,
-    state,
-    user: {
-      id: user.id,
-      email: user.email,
-      name: user.name,
-      isSuspended: user.isSuspended,
-      twoFactorEnabled: !!user.twoFactorEnabled,
-    },
-    membership: {
-      id: membership.id,
-      userId: membership.userId,
-      employeeNumber: membership.employeeNumber,
-      department: membership.department,
-      isActive: membership.isActive,
-      mustChangePassword: membership.mustChangePassword,
-      hiredAt: membership.hiredAt,
-      createdAt: membership.createdAt,
-      updatedAt: membership.updatedAt,
-    },
-    session: {
-      id: sessionData.session.id,
-      expiresAt: sessionData.session.expiresAt,
-    },
-    canAccessStaffApp,
-    canAccessEnrollment,
-    canAccessPasswordChange,
-    rejectionReason: state === "SUSPENDED" ? "SUSPENDED" : undefined,
-  };
 }

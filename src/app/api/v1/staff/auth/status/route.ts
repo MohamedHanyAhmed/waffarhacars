@@ -3,6 +3,15 @@ import { resolveStaffSession } from "@/lib/staff/staff-session";
 
 export async function GET(req: NextRequest): Promise<Response> {
   const staffSession = await resolveStaffSession(req.headers);
+  if (staffSession.rejectionReason === "SESSION_RESOLUTION_ERROR") {
+    return Response.json(
+      {
+        error: "SERVICE_UNAVAILABLE",
+        message: "Authentication service temporarily unavailable",
+      },
+      { status: 503, headers: { "Cache-Control": "no-store" } }
+    );
+  }
 
   if (!staffSession.isAuthenticated) {
     return Response.json(

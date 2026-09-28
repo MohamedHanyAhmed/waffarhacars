@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import pg from "pg";
 import crypto from "node:crypto";
-import { getPrisma, disconnectDb } from "@/lib/db";
+import { getPrisma, getPool, disconnectDb } from "@/lib/db";
 import { resetAuth } from "@/lib/auth";
 import { resetServerEnvCache } from "@/lib/env";
 import {
@@ -1202,39 +1202,102 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
     const staff1 = generateTestStaff();
     const staff2 = generateTestStaff();
 
-    const [res1, res2] = await Promise.allSettled([
-      provisionStaffMember({
+    let barrierEntered = false;
+    let resolveBarrierEntered!: () => void;
+    const barrierEnteredPromise = new Promise<void>((resolve) => {
+      resolveBarrierEntered = resolve;
+    });
+
+    let resolveBarrierRelease!: () => void;
+    const barrierReleasePromise = new Promise<void>((resolve) => {
+      resolveBarrierRelease = resolve;
+    });
+
+    // Start request 1 with a deterministic barrier held immediately after acquiring the lock
+    const req1Promise = provisionStaffMember(
+      {
         email: staff1.email,
         password: staff1.temporaryPassword,
         fullName: staff1.fullName,
         employeeNumber: staff1.employeeNumber,
         department: "ADMIN",
         isBootstrap: true,
-      }),
-      provisionStaffMember({
-        email: staff2.email,
-        password: staff2.temporaryPassword,
-        fullName: staff2.fullName,
-        employeeNumber: staff2.employeeNumber,
-        department: "ADMIN",
-        isBootstrap: true,
-      }),
-    ]);
+      },
+      {
+        _testBarrier: async () => {
+          barrierEntered = true;
+          resolveBarrierEntered();
+          await barrierReleasePromise;
+        },
+      }
+    );
 
-    // Exactly one must succeed and one must reject with BOOTSTRAP_ALREADY_INITIALIZED
-    const fulfilled = [res1, res2].filter((r) => r.status === "fulfilled");
-    const rejected = [res1, res2].filter((r) => r.status === "rejected");
-    expect(fulfilled.length).toBe(1);
-    expect(rejected.length).toBe(1);
+    // Wait until request 1 has acquired the advisory lock and entered the protected critical section
+    await barrierEnteredPromise;
+    expect(barrierEntered).toBe(true);
 
-    const rejError = (rejected[0] as PromiseRejectedResult).reason;
-    expect(rejError).toBeInstanceOf(ProvisioningError);
-    expect((rejError as ProvisioningError).code).toBe("BOOTSTRAP_ALREADY_INITIALIZED");
+    // Start request 2 while request 1 is deterministically holding the advisory lock
+    let req2Settled = false;
+    let req2Error: unknown = null;
+    const req2Promise = provisionStaffMember({
+      email: staff2.email,
+      password: staff2.temporaryPassword,
+      fullName: staff2.fullName,
+      employeeNumber: staff2.employeeNumber,
+      department: "ADMIN",
+      isBootstrap: true,
+    })
+      .catch((err) => {
+        req2Error = err;
+        throw err;
+      })
+      .finally(() => {
+        req2Settled = true;
+      });
+
+    try {
+      // Allow request 2 event-loop turns to execute and reach pg_advisory_lock
+      await new Promise((r) => setTimeout(r, 150));
+
+      // Assert that request 2 CANNOT settle or pass while request 1 holds the lock
+      expect(req2Settled).toBe(false);
+
+      // Verify at the PostgreSQL engine level that request 2 is actively waiting on the advisory lock
+      const pool = getPool();
+      const lockStatus = await pool.query(
+        "SELECT count(*)::int AS waiting_count FROM pg_locks WHERE locktype = 'advisory' AND granted = false"
+      );
+      expect(lockStatus.rows[0].waiting_count).toBe(1);
+    } finally {
+      // Release request 1 from the barrier to allow it to finish and unlock
+      resolveBarrierRelease();
+    }
+
+    // Await request 1 completion
+    const res1 = await req1Promise;
+    expect(res1.success).toBe(true);
+    expect(res1.idempotent).toBe(false);
+
+    // Now request 2 unblocks, acquires lock, sees count > 0, and rejects with BOOTSTRAP_ALREADY_INITIALIZED
+    await expect(req2Promise).rejects.toThrow(ProvisioningError);
+    expect((req2Error as ProvisioningError).code).toBe("BOOTSTRAP_ALREADY_INITIALIZED");
+
+    // Verify all advisory locks are released
+    const pool = getPool();
+    const finalLockStatus = await pool.query(
+      "SELECT count(*)::int AS active_count FROM pg_locks WHERE locktype = 'advisory'"
+    );
+    expect(finalLockStatus.rows[0].active_count).toBe(0);
 
     // Assert final database state: exactly 1 User and 1 Membership
     const prisma = getPrisma();
     const totalStaff = await prisma.internalStaffMembership.count();
     expect(totalStaff).toBe(1);
+    const users = await prisma.user.findMany({
+      where: { email: { in: [staff1.email.toLowerCase(), staff2.email.toLowerCase()] } },
+    });
+    expect(users.length).toBe(1);
+    expect(users[0].email).toBe(staff1.email.toLowerCase());
   });
 
   it("proves concurrent same-email and same-employee provisioning serializes and returns idempotent success", async () => {
@@ -1244,27 +1307,72 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
 
     const { email, temporaryPassword, employeeNumber, fullName } = generateTestStaff();
 
-    const [res1, res2] = await Promise.allSettled([
-      provisionStaffMember({
-        email,
-        password: temporaryPassword,
-        fullName,
-        employeeNumber,
-        department: "ADMIN",
-        isBootstrap: true,
-      }),
-      provisionStaffMember({
-        email,
-        password: temporaryPassword,
-        fullName,
-        employeeNumber,
-        department: "ADMIN",
-        isBootstrap: true,
-      }),
-    ]);
+    let barrierEntered = false;
+    let resolveBarrierEntered!: () => void;
+    const barrierEnteredPromise = new Promise<void>((resolve) => {
+      resolveBarrierEntered = resolve;
+    });
 
-    const fulfilled = [res1, res2].filter((r) => r.status === "fulfilled");
-    expect(fulfilled.length).toBeGreaterThanOrEqual(1);
+    let resolveBarrierRelease!: () => void;
+    const barrierReleasePromise = new Promise<void>((resolve) => {
+      resolveBarrierRelease = resolve;
+    });
+
+    // Request 1 holds the lock
+    const req1Promise = provisionStaffMember(
+      {
+        email,
+        password: temporaryPassword,
+        fullName,
+        employeeNumber,
+        department: "ADMIN",
+        isBootstrap: true,
+      },
+      {
+        _testBarrier: async () => {
+          barrierEntered = true;
+          resolveBarrierEntered();
+          await barrierReleasePromise;
+        },
+      }
+    );
+
+    await barrierEnteredPromise;
+    expect(barrierEntered).toBe(true);
+
+    // Request 2 tries to run concurrently
+    let req2Settled = false;
+    const req2Promise = provisionStaffMember({
+      email,
+      password: temporaryPassword,
+      fullName,
+      employeeNumber,
+      department: "ADMIN",
+      isBootstrap: true,
+    }).finally(() => {
+      req2Settled = true;
+    });
+
+    try {
+      await new Promise((r) => setTimeout(r, 150));
+      expect(req2Settled).toBe(false);
+
+      const pool = getPool();
+      const lockStatus = await pool.query(
+        "SELECT count(*)::int AS waiting_count FROM pg_locks WHERE locktype = 'advisory' AND granted = false"
+      );
+      expect(lockStatus.rows[0].waiting_count).toBe(1);
+    } finally {
+      resolveBarrierRelease();
+    }
+
+    const res1 = await req1Promise;
+    expect(res1.success).toBe(true);
+    expect(res1.idempotent).toBe(false);
+
+    // Request 2 unblocks after request 1 completes
+    const res2Result = await req2Promise.catch((err) => err);
+    expect(res2Result).toBeDefined();
 
     const prisma = getPrisma();
     const users = await prisma.user.findMany({ where: { email } });
@@ -1743,5 +1851,155 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
       challengeCookie
     );
     expect(lockedRes.status).not.toBe(200);
+  });
+
+  it("asserts session-resolution failure returns sanitized 503 and never invokes Better Auth or fails open", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+
+    // Provision an active staff member
+    const { email, temporaryPassword, employeeNumber, fullName } = generateTestStaff();
+    await provisionStaffMember({
+      email,
+      password: temporaryPassword,
+      fullName,
+      employeeNumber,
+      department: "ADMIN",
+      isBootstrap: true,
+    });
+
+    const signInRes = await postAuthJson("/api/auth/sign-in/email", {
+      email,
+      password: temporaryPassword,
+    });
+    const sessionCookie = signInRes.headers.get("set-cookie")!;
+
+    // Mock prisma.user.findUnique to throw a database failure during session resolution
+    const prisma = getPrisma();
+    const findUniqueSpy = vi
+      .spyOn(prisma.user, "findUnique")
+      .mockRejectedValueOnce(new Error("Database connection lost"));
+
+    try {
+      // Attempt to access /two-factor/disable with the session cookie while session-resolution fails
+      const req = new NextRequest("http://localhost:3000/api/auth/two-factor/disable", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          cookie: sessionCookie,
+        },
+        body: JSON.stringify({ password: temporaryPassword }),
+      });
+
+      const res = await handleAuth(req);
+
+      // Must return 503 SERVICE_UNAVAILABLE, NOT 401 or 403 or fall through to Better Auth
+      expect(res.status).toBe(503);
+      const body = await res.json();
+      expect(body).toEqual({
+        error: "SERVICE_UNAVAILABLE",
+        message: "Authentication service temporarily unavailable",
+      });
+      expect(res.headers.get("cache-control")).toBe("no-store");
+    } finally {
+      findUniqueSpy.mockRestore();
+    }
+  });
+
+  it("preserves legitimate unauthenticated MFA-challenge path during 2FA verification flow", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+
+    // Go through full activation to ACTIVE
+    const { email, temporaryPassword, employeeNumber, fullName } = generateTestStaff();
+    await provisionStaffMember({
+      email,
+      password: temporaryPassword,
+      fullName,
+      employeeNumber,
+      department: "OPERATIONS",
+      isBootstrap: true,
+    });
+
+    const signInRes = await postAuthJson("/api/auth/sign-in/email", {
+      email,
+      password: temporaryPassword,
+    });
+    const sessionCookie = signInRes.headers.get("set-cookie")!;
+
+    const changeRes = await changePasswordHandler(
+      new NextRequest("http://localhost:3000/api/v1/staff/auth/change-password", {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: sessionCookie },
+        body: JSON.stringify({
+          currentPassword: temporaryPassword,
+          newPassword: "PermanentPassword123!",
+        }),
+      })
+    );
+    expect(changeRes.status).toBe(200);
+    const updatedCookie = extractCookieHeader(changeRes) || sessionCookie;
+
+    const enableRes = await postAuthJson(
+      "/api/auth/two-factor/enable",
+      { password: "PermanentPassword123!", method: "totp" },
+      updatedCookie
+    );
+    expect(enableRes.status).toBe(200);
+    const enableData = await enableRes.json();
+    const secret = extractTotpSecret(enableData.totpURI);
+    const code = await createOTP(secret, { digits: 6, period: 30 }).totp();
+
+    const verifyRes = await postAuthJson(
+      "/api/auth/two-factor/verify-totp",
+      { code },
+      updatedCookie
+    );
+    expect(verifyRes.status).toBe(200);
+
+    // Sign out to clear active session
+    const activeCookie = extractCookieHeader(verifyRes) || updatedCookie;
+    await postAuthJson("/api/auth/sign-out", {}, activeCookie);
+
+    // Now sign in again: Better Auth returns twoFactorRedirect and sets better-auth.two_factor cookie
+    const reSignInRes = await postAuthJson("/api/auth/sign-in/email", {
+      email,
+      password: "PermanentPassword123!",
+    });
+    expect(reSignInRes.status).toBe(200);
+    const reSignInData = await reSignInRes.json();
+    expect(reSignInData.twoFactorRedirect).toBe(true);
+
+    const twoFactorCookie = extractCookieHeader(reSignInRes);
+    expect(twoFactorCookie).toContain("better-auth.two_factor");
+
+    // The client is unauthenticated (no session token, only two_factor challenge cookie)
+    // Verify that resolveStaffSession recognizes this as UNAUTHENTICATED (not SESSION_RESOLUTION_ERROR)
+    const checkHeaders = new Headers({ cookie: twoFactorCookie });
+    const interimCheck = await resolveStaffSession(checkHeaders);
+    expect(interimCheck.isAuthenticated).toBe(false);
+    expect(interimCheck.rejectionReason).toBe("UNAUTHENTICATED");
+
+    // Now call /api/auth/two-factor/verify-totp with the legitimate challenge cookie
+    const newOtp = await createOTP(secret, { digits: 6, period: 30 }).totp();
+    const mfaVerifyRes = await postAuthJson(
+      "/api/auth/two-factor/verify-totp",
+      { code: newOtp },
+      twoFactorCookie
+    );
+
+    // Must succeed (200), issuing the authenticated session
+    expect(mfaVerifyRes.status).toBe(200);
+    const finalSessionCookie = extractCookieHeader(mfaVerifyRes);
+    expect(finalSessionCookie).toContain("better-auth.session_token");
+
+    // Verify session resolves to ACTIVE staff
+    const finalStaffSession = await resolveStaffSession(
+      new Headers({ cookie: finalSessionCookie })
+    );
+    expect(finalStaffSession.isAuthenticated).toBe(true);
+    expect(finalStaffSession.state).toBe("ACTIVE");
   });
 });
