@@ -1,14 +1,9 @@
 import "server-only";
 import { getAuth } from "@/lib/auth";
 import { getPrisma } from "@/lib/db";
-import type { StaffDepartment } from "@/generated/prisma/client";
+import type { StaffDepartment, StaffLifecycleState } from "@/lib/staff/status-contract";
 
-export type StaffLifecycleState =
-  | "PASSWORD_CHANGE_REQUIRED"
-  | "MFA_ENROLLMENT_REQUIRED"
-  | "MFA_ENROLLMENT_PENDING"
-  | "ACTIVE"
-  | "SUSPENDED";
+export type { StaffDepartment, StaffLifecycleState };
 
 export interface StaffMembershipDetails {
   id: string;

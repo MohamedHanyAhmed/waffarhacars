@@ -13,6 +13,7 @@ import * as rateLimitModule from "@/lib/rate-limit";
 import { resolveStaffSession } from "@/lib/staff/staff-session";
 import { handleAuth } from "@/app/api/auth/[...all]/route";
 import { POST as changePasswordHandler } from "@/app/api/v1/staff/auth/change-password/route";
+import { GET as getStaffStatusHandler } from "@/app/api/v1/staff/auth/status/route";
 import { NextRequest } from "next/server";
 import { createOTP } from "@better-auth/utils/otp";
 import { base32 } from "@better-auth/utils/base32";
@@ -2001,5 +2002,102 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
     );
     expect(finalStaffSession.isAuthenticated).toBe(true);
     expect(finalStaffSession.state).toBe("ACTIVE");
+  });
+
+  it("asserts real GET /api/v1/staff/auth/status returns flat contract fields for authenticated active admin", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+
+    const { email, temporaryPassword, employeeNumber, fullName } = generateTestStaff();
+
+    // 1. Provision staff admin
+    const provisionResult = await provisionStaffMember({
+      email,
+      password: temporaryPassword,
+      fullName,
+      employeeNumber,
+      department: "ADMIN",
+      isBootstrap: true,
+    });
+    expect(provisionResult.success).toBe(true);
+
+    // 2. Initial sign-in with temporary password
+    const signInRes = await postAuthJson("/api/auth/sign-in/email", {
+      email,
+      password: temporaryPassword,
+    });
+    expect(signInRes.status).toBe(200);
+    const initialSessionCookie = extractCookieHeader(signInRes);
+
+    // 3. Change temporary password
+    const permanentPassword = "PermanentSecurePassword123!";
+    const changeReq = new NextRequest("http://localhost:3000/api/v1/staff/auth/change-password", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        cookie: initialSessionCookie,
+      },
+      body: JSON.stringify({
+        currentPassword: temporaryPassword,
+        newPassword: permanentPassword,
+      }),
+    });
+    const changeRes = await changePasswordHandler(changeReq);
+    expect(changeRes.status).toBe(200);
+    const mfaRequiredCookie = extractCookieHeader(changeRes) || initialSessionCookie;
+
+    // 4. Enable TOTP
+    const enableRes = await postAuthJson(
+      "/api/auth/two-factor/enable",
+      { password: permanentPassword, method: "totp" },
+      mfaRequiredCookie
+    );
+    expect(enableRes.status).toBe(200);
+    const enableData = await enableRes.json();
+    const secret = extractTotpSecret(enableData.totpURI);
+
+    // 5. Verify TOTP to reach ACTIVE state
+    const code = await createOTP(secret, { digits: 6, period: 30 }).totp();
+    const verifyRes = await postAuthJson(
+      "/api/auth/two-factor/verify-totp",
+      { code },
+      mfaRequiredCookie
+    );
+    expect(verifyRes.status).toBe(200);
+    const activeSessionCookie = extractCookieHeader(verifyRes) || mfaRequiredCookie;
+
+    // 6. Invoke real status route GET /api/v1/staff/auth/status
+    const statusReq = new NextRequest("http://localhost:3000/api/v1/staff/auth/status", {
+      method: "GET",
+      headers: {
+        cookie: activeSessionCookie,
+      },
+    });
+    const statusRes = await getStaffStatusHandler(statusReq);
+
+    // 7. Assertions: 200, no-store, and flat response fields
+    expect(statusRes.status).toBe(200);
+    expect(statusRes.headers.get("Cache-Control")).toBe("no-store");
+
+    const statusBody = await statusRes.json();
+
+    // Verify authoritative flat contract fields
+    expect(statusBody.state).toBe("ACTIVE");
+    expect(statusBody.name).toBe(fullName);
+    expect(statusBody.email).toBe(email.toLowerCase());
+    expect(statusBody.department).toBe("ADMIN");
+    expect(statusBody.employeeNumber).toBe(employeeNumber);
+    expect(statusBody.mustChangePassword).toBe(false);
+    expect(statusBody.twoFactorEnabled).toBe(true);
+    expect(statusBody.canAccessStaffApp).toBe(true);
+    expect(statusBody.canAccessEnrollment).toBe(false);
+    expect(statusBody.canAccessPasswordChange).toBe(false);
+
+    // Verify that legacy nested objects are absent (prevent contract regression)
+    const rawBody = statusBody as Record<string, unknown>;
+    expect(rawBody.user).toBeUndefined();
+    expect(rawBody.membership).toBeUndefined();
+    expect(rawBody.authenticated).toBeUndefined();
   });
 });

@@ -2,6 +2,9 @@
  * UI-only mocked tests — all API endpoints are intercepted via Playwright route interception.
  * These tests validate the client-side UI flow (navigation, form submission, visual feedback)
  * but do NOT prove backend correctness. See integration tests for real PostgreSQL validation.
+ *
+ * NOTE: The real-browser-plus-PostgreSQL end-to-end acceptance gate remains explicitly deferred.
+ * These mocked browser tests validate UI component rendering and routing contracts only.
  */
 import { test, expect } from "@playwright/test";
 
@@ -36,24 +39,22 @@ test.describe("Internal Staff Authentication UI Journey (Mocked Endpoints)", () 
       }
     });
 
-    // Intercept Staff Status
+    // Intercept Staff Status using flat contract
     await page.route("**/api/v1/staff/auth/status", async (route) => {
       await route.fulfill({
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
-          authenticated: true,
           state: lifecycleState,
-          user: {
-            id: "user-uuid-1",
-            email: "engineer@waffarhacars.com",
-            name: "Tarek Mostafa",
-          },
-          membership: {
-            department: "OPERATIONS",
-            employeeNumber: "EMP-100200",
-            status: "ACTIVE",
-          },
+          email: "engineer@waffarhacars.com",
+          name: "Tarek Mostafa",
+          department: "OPERATIONS",
+          employeeNumber: "EMP-100200",
+          mustChangePassword: lifecycleState === "PASSWORD_CHANGE_REQUIRED",
+          twoFactorEnabled: lifecycleState === "ACTIVE",
+          canAccessStaffApp: lifecycleState === "ACTIVE",
+          canAccessEnrollment: lifecycleState === "MFA_ENROLLMENT_REQUIRED",
+          canAccessPasswordChange: lifecycleState === "PASSWORD_CHANGE_REQUIRED",
         }),
       });
     });
@@ -174,6 +175,8 @@ test.describe("Internal Staff Authentication UI Journey (Mocked Endpoints)", () 
       page.getByRole("heading", { name: "WaffarhaCars Internal Staff Portal" })
     ).toBeVisible();
     await expect(page.getByText("Tarek Mostafa")).toBeVisible();
+    await expect(page.getByText("engineer@waffarhacars.com")).toBeVisible();
+    await expect(page.getByText("OPERATIONS", { exact: true })).toBeVisible();
     await expect(page.getByText("EMP-100200")).toBeVisible();
     await expect(page.getByText("Mandatory TOTP Enforced")).toBeVisible();
     await expect(
@@ -220,16 +223,22 @@ test.describe("Internal Staff Authentication UI Journey (Mocked Endpoints)", () 
       }
     });
 
-    // Intercept Staff Status as Active
+    // Intercept Staff Status as Active with flat contract and ADMIN department
     await page.route("**/api/v1/staff/auth/status", async (route) => {
       await route.fulfill({
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
-          authenticated: true,
           state: "ACTIVE",
-          user: { id: "user-uuid-1", email: "admin@waffarhacars.com", name: "Staff Specialist" },
-          membership: { department: "ADMIN", employeeNumber: "EMP-999888", status: "ACTIVE" },
+          email: "admin@waffarhacars.com",
+          name: "Staff Specialist",
+          department: "ADMIN",
+          employeeNumber: "EMP-999888",
+          mustChangePassword: false,
+          twoFactorEnabled: true,
+          canAccessStaffApp: true,
+          canAccessEnrollment: false,
+          canAccessPasswordChange: false,
         }),
       });
     });
@@ -251,6 +260,51 @@ test.describe("Internal Staff Authentication UI Journey (Mocked Endpoints)", () 
     await expect(
       page.getByRole("heading", { name: "WaffarhaCars Internal Staff Portal" })
     ).toBeVisible();
+    await expect(page.getByText("Staff Specialist")).toBeVisible();
+    await expect(page.getByText("admin@waffarhacars.com")).toBeVisible();
+    await expect(page.getByText("ADMIN", { exact: true })).toBeVisible();
     await expect(page.getByText("EMP-999888")).toBeVisible();
+    await expect(page.getByText("Mandatory TOTP Enforced")).toBeVisible();
+    await expect(
+      page.getByText("Zero-Bypass Policy: Re-verification required on every session")
+    ).toBeVisible();
+  });
+
+  test("3. Malformed or missing department denies portal access without fallback or active badges", async ({
+    page,
+  }) => {
+    // Intercept Staff Status returning malformed payload (missing department)
+    await page.route("**/api/v1/staff/auth/status", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          state: "ACTIVE",
+          email: "admin@waffarhacars.com",
+          name: "Staff Specialist",
+          // department is intentionally omitted / missing
+          employeeNumber: "EMP-999888",
+          mustChangePassword: false,
+          twoFactorEnabled: true,
+          canAccessStaffApp: true,
+          canAccessEnrollment: false,
+          canAccessPasswordChange: false,
+        }),
+      });
+    });
+
+    await page.goto("/staff");
+
+    // Must show Access Restricted error screen
+    await expect(page.getByText("Access Restricted")).toBeVisible();
+    await expect(page.getByText("Incomplete or malformed staff identity record")).toBeVisible();
+
+    // Must NOT display "OPERATIONS" fallback department
+    await expect(page.locator("body")).not.toContainText("OPERATIONS");
+
+    // Must NOT display active assurance badges or portal title
+    await expect(page.locator("body")).not.toContainText("Mandatory TOTP Enforced");
+    await expect(page.locator("body")).not.toContainText("ZERO-BYPASS");
+    await expect(page.locator("body")).not.toContainText("WaffarhaCars Internal Staff Portal");
   });
 });

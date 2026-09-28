@@ -13,44 +13,60 @@ import {
   Lock,
   AlertTriangle,
 } from "lucide-react";
-
-interface StaffStatusResponse {
-  authenticated: boolean;
-  state: string;
-  user?: {
-    id: string;
-    email: string;
-    name: string;
-  };
-  membership?: {
-    department: string;
-    employeeNumber: string;
-    status: string;
-  };
-}
+import {
+  isCompleteActiveStaffStatus,
+  type ActiveStaffStatus,
+  type StaffAuthStatusResponse,
+} from "@/lib/staff/status-contract";
 
 export function StaffDashboard() {
   const { t, dir } = useI18n();
   const router = useRouter();
 
-  const [data, setData] = useState<StaffStatusResponse | null>(null);
+  const [data, setData] = useState<ActiveStaffStatus | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSigningOut, setIsSigningOut] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    let mounted = true;
+    const controller = new AbortController();
 
     async function loadStatus() {
       try {
-        const res = await fetch("/api/v1/staff/auth/status");
-        if (!res.ok) {
-          if (mounted) router.replace("/staff/login");
+        const res = await fetch("/api/v1/staff/auth/status", {
+          signal: controller.signal,
+          headers: {
+            Accept: "application/json",
+          },
+        });
+
+        if (controller.signal.aborted) return;
+
+        if (res.status === 401) {
+          router.replace("/staff/login");
           return;
         }
 
-        const json = await res.json();
-        if (!mounted) return;
+        if (res.status === 403) {
+          setError(t("staff.unauthorized") || "Not authorized for staff portal");
+          setIsLoading(false);
+          return;
+        }
+
+        if (res.status === 503) {
+          setError("Authentication service temporarily unavailable");
+          setIsLoading(false);
+          return;
+        }
+
+        if (!res.ok) {
+          setError("Failed to load staff session status");
+          setIsLoading(false);
+          return;
+        }
+
+        const json = (await res.json()) as StaffAuthStatusResponse;
+        if (controller.signal.aborted) return;
 
         if (json.state === "PASSWORD_CHANGE_REQUIRED") {
           router.replace("/staff/activate-password");
@@ -61,23 +77,34 @@ export function StaffDashboard() {
           return;
         }
         if (json.state === "SUSPENDED") {
-          setError(t("staff.suspended"));
+          setError(t("staff.suspended") || "Account suspended");
+          setIsLoading(false);
+          return;
+        }
+
+        if (json.state !== "ACTIVE" || !isCompleteActiveStaffStatus(json)) {
+          setError("Incomplete or malformed staff identity record");
           setIsLoading(false);
           return;
         }
 
         setData(json);
       } catch {
-        if (mounted) setError("Failed to load staff session status");
+        if (controller.signal.aborted) {
+          return;
+        }
+        setError("Failed to load staff session status");
       } finally {
-        if (mounted) setIsLoading(false);
+        if (!controller.signal.aborted) {
+          setIsLoading(false);
+        }
       }
     }
 
     loadStatus();
 
     return () => {
-      mounted = false;
+      controller.abort();
     };
   }, [router, t]);
 
@@ -101,7 +128,7 @@ export function StaffDashboard() {
     );
   }
 
-  if (error) {
+  if (error || !data) {
     return (
       <div
         className="w-full max-w-md mx-auto p-6 bg-rose-50 border border-rose-200 rounded-2xl text-rose-800"
@@ -111,7 +138,7 @@ export function StaffDashboard() {
           <AlertTriangle className="w-6 h-6 text-rose-600" />
           <span>Access Restricted</span>
         </div>
-        <p className="text-sm">{error}</p>
+        <p className="text-sm">{error || "Access Restricted"}</p>
         <button
           onClick={handleSignOut}
           className="mt-4 px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-sm font-medium transition-colors"
@@ -158,10 +185,8 @@ export function StaffDashboard() {
               <User className="w-3.5 h-3.5" />
               <span>{t("staff.nameLabel")} / Email</span>
             </span>
-            <p className="text-base font-semibold text-slate-900">
-              {data?.user?.name || "Staff Member"}
-            </p>
-            <p className="text-xs text-slate-500 font-mono">{data?.user?.email}</p>
+            <p className="text-base font-semibold text-slate-900">{data.name}</p>
+            <p className="text-xs text-slate-500 font-mono">{data.email}</p>
           </div>
 
           <div className="p-4 bg-slate-50 rounded-xl border border-slate-100 space-y-1">
@@ -169,11 +194,9 @@ export function StaffDashboard() {
               <Building2 className="w-3.5 h-3.5" />
               <span>{t("staff.departmentLabel")}</span>
             </span>
-            <p className="text-base font-semibold text-slate-900">
-              {data?.membership?.department || "OPERATIONS"}
-            </p>
+            <p className="text-base font-semibold text-slate-900">{data.department}</p>
             <p className="text-xs text-slate-500 font-mono">
-              {t("staff.employeeNumberLabel")}: {data?.membership?.employeeNumber}
+              {t("staff.employeeNumberLabel")}: {data.employeeNumber}
             </p>
           </div>
         </div>
