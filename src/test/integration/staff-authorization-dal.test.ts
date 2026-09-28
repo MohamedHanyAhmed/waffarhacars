@@ -6,6 +6,7 @@ import { resetAuth } from "@/lib/auth";
 import { resetServerEnvCache } from "@/lib/env";
 import { provisionStaffMember, ProvisioningError } from "@/lib/staff/provisioning";
 import { assertStaffPermission, assertAuthenticated, AuthorizationError } from "@/lib/dal";
+import { logAuditEvent, createAuditFingerprint } from "@/lib/dal/audit";
 import { handleAuth } from "@/app/api/auth/[...all]/route";
 import { POST as changePasswordHandler } from "@/app/api/v1/staff/auth/change-password/route";
 import { NextRequest } from "next/server";
@@ -603,5 +604,321 @@ describe("Central Authorization DAL & Security Audit PostgreSQL Integration Suit
       expect(err).toBeInstanceOf(ProvisioningError);
       expect((err as ProvisioningError).code).toBe("INCOMPATIBLE_ROLE_DEPARTMENT");
     }
+  });
+
+  it("proves repeated and concurrent anonymous requests produce zero database audit rows even with spoofed IPs", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+
+    const prisma = getPrisma();
+    const initialCount = await prisma.securityAuditEvent.count();
+
+    // Fire repeated and concurrent unauthenticated requests with varied caller-supplied IPs
+    const anonymousRequests = Array.from({ length: 20 }, (_, idx) => {
+      const headers = new Headers({
+        "x-forwarded-for": `192.168.1.${idx}, 10.0.0.${idx}`,
+        "user-agent": `AttackerProbe/${idx}`,
+      });
+      return assertStaffPermission(headers, "staff:read").catch((err) => err);
+    });
+
+    const results = await Promise.all(anonymousRequests);
+    for (const res of results) {
+      expect(res).toBeInstanceOf(AuthorizationError);
+      expect((res as AuthorizationError).status).toBe(401);
+      expect((res as AuthorizationError).code).toBe("UNAUTHENTICATED");
+    }
+
+    const finalCount = await prisma.securityAuditEvent.count();
+    expect(finalCount).toBe(initialCount);
+  });
+
+  it("proves audit log strips embedded PII, credentials, URLs, and malformed targets in persisted PostgreSQL rows", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+
+    const prisma = getPrisma();
+    const { headers, provisionResult } = await provisionAndActivateStaff({
+      department: "SALES",
+      role: "SALES_AGENT",
+    });
+
+    // 1. Authenticated denial via DAL
+    try {
+      await assertStaffPermission(headers, "offer_draft:approve");
+    } catch {}
+
+    const denialEvent = await prisma.securityAuditEvent.findFirst({
+      where: {
+        actorUserId: provisionResult.userId,
+        eventType: "STAFF_ACCESS_DENIED",
+      },
+      orderBy: { timestamp: "desc" },
+    });
+
+    expect(denialEvent).toBeDefined();
+    expect(denialEvent?.ipFingerprint).toHaveLength(64);
+    expect(denialEvent?.targetEntity).toBe("permission:offer_draft:approve");
+    const denialMeta = denialEvent?.metadata as Record<string, unknown>;
+    expect(denialMeta.action).toBe("offer_draft:approve");
+    expect(denialMeta.role).toBe("SALES_AGENT");
+    expect(denialMeta.reason).toBe("INSUFFICIENT_PERMISSIONS");
+
+    // 2. Direct logAuditEvent with malicious/untrusted payload containing PII, raw passwords, bearer tokens, URLs, unexpected fields, and malformed target
+    const eventId = await logAuditEvent({
+      actorUserId: provisionResult.userId,
+      eventType: "STAFF_LOGIN_FAILED",
+      targetEntity: "https://evil.attacker.com/malicious/path?token=secret123", // Malformed target
+      ipFingerprint: createAuditFingerprint("203.0.113.195"),
+      metadata: {
+        reason: "INVALID_CREDENTIALS",
+        failureCount: 3,
+        // The following are unexpected / sensitive fields that must be dropped by schema:
+        password: "SuperSecretPassword123!",
+        token: "bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+        email: "victim@example.com",
+        secret: "sensitive-api-key",
+        exception: "Error: connect ECONNREFUSED 10.0.0.1 to http://internal-db:5432",
+        url: "https://evil.attacker.com",
+      },
+    });
+
+    expect(eventId).toBeDefined();
+
+    const persistedRow = await prisma.securityAuditEvent.findUnique({
+      where: { id: eventId! },
+    });
+
+    expect(persistedRow).toBeDefined();
+    // Malformed target must be sanitized to null
+    expect(persistedRow?.targetEntity).toBeNull();
+    // IP must be hashed domain fingerprint, not raw IP
+    expect(persistedRow?.ipFingerprint).toHaveLength(64);
+    expect(persistedRow?.ipFingerprint).not.toContain("203.0.113.195");
+
+    // Metadata must contain ONLY allowlisted fields
+    const persistedMeta = persistedRow?.metadata as Record<string, unknown>;
+    expect(persistedMeta.reason).toBe("INVALID_CREDENTIALS");
+    expect(persistedMeta.failureCount).toBe(3);
+    expect(persistedMeta).not.toHaveProperty("password");
+    expect(persistedMeta).not.toHaveProperty("token");
+    expect(persistedMeta).not.toHaveProperty("email");
+    expect(persistedMeta).not.toHaveProperty("secret");
+    expect(persistedMeta).not.toHaveProperty("exception");
+    expect(persistedMeta).not.toHaveProperty("url");
+
+    const fullSerialized = JSON.stringify(persistedRow);
+    expect(fullSerialized).not.toContain("SuperSecretPassword123!");
+    expect(fullSerialized).not.toContain("bearer");
+    expect(fullSerialized).not.toContain("victim@example.com");
+    expect(fullSerialized).not.toContain("sensitive-api-key");
+    expect(fullSerialized).not.toContain("ECONNREFUSED");
+    expect(fullSerialized).not.toContain("evil.attacker.com");
+  });
+
+  it("proves provisioning replay with exactly one matching active role is idempotent", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+
+    await ensureBootstrapped();
+    const staff = generateStaffData("replay_match");
+
+    const res1 = await provisionStaffMember({
+      email: staff.email,
+      fullName: staff.fullName,
+      employeeNumber: staff.employeeNumber,
+      department: "SALES",
+      role: "SALES_AGENT",
+      password: staff.temporaryPassword,
+    });
+    expect(res1.idempotent).toBe(false);
+
+    const res2 = await provisionStaffMember({
+      email: staff.email,
+      fullName: staff.fullName,
+      employeeNumber: staff.employeeNumber,
+      department: "SALES",
+      role: "SALES_AGENT",
+      password: staff.temporaryPassword,
+    });
+    expect(res2.idempotent).toBe(true);
+    expect(res2.userId).toBe(res1.userId);
+  });
+
+  it("proves provisioning replay rejects with STAFF_ROLE_RECONCILIATION_REQUIRED when zero active roles exist", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+
+    await ensureBootstrapped();
+    const staff = generateStaffData("replay_zero_roles");
+
+    const res = await provisionStaffMember({
+      email: staff.email,
+      fullName: staff.fullName,
+      employeeNumber: staff.employeeNumber,
+      department: "OPERATIONS",
+      role: "OPS_SUPERVISOR",
+      password: staff.temporaryPassword,
+    });
+
+    const prisma = getPrisma();
+    // Deactivate all roles for this membership
+    await prisma.internalRoleAssignment.updateMany({
+      where: { staffMembership: { userId: res.userId } },
+      data: { isActive: false },
+    });
+
+    try {
+      await provisionStaffMember({
+        email: staff.email,
+        fullName: staff.fullName,
+        employeeNumber: staff.employeeNumber,
+        department: "OPERATIONS",
+        role: "OPS_SUPERVISOR",
+        password: staff.temporaryPassword,
+      });
+      expect.unreachable("Should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ProvisioningError);
+      expect((err as ProvisioningError).code).toBe("STAFF_ROLE_RECONCILIATION_REQUIRED");
+    }
+  });
+
+  it("proves provisioning replay rejects with STAFF_MULTIPLE_ACTIVE_ROLES when multiple active roles exist", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+
+    await ensureBootstrapped();
+    const staff = generateStaffData("replay_multi_roles");
+
+    const res = await provisionStaffMember({
+      email: staff.email,
+      fullName: staff.fullName,
+      employeeNumber: staff.employeeNumber,
+      department: "OPERATIONS",
+      role: "OPS_SUPERVISOR",
+      password: staff.temporaryPassword,
+    });
+
+    const prisma = getPrisma();
+    const membership = await prisma.internalStaffMembership.findUnique({
+      where: { userId: res.userId },
+    });
+    // Insert an extra active role assignment
+    await prisma.internalRoleAssignment.create({
+      data: {
+        staffMembershipId: membership!.id,
+        role: "FINANCE_OFFICER",
+        isActive: true,
+        assignedBy: "TEST_INJECTION",
+      },
+    });
+
+    try {
+      await provisionStaffMember({
+        email: staff.email,
+        fullName: staff.fullName,
+        employeeNumber: staff.employeeNumber,
+        department: "OPERATIONS",
+        role: "OPS_SUPERVISOR",
+        password: staff.temporaryPassword,
+      });
+      expect.unreachable("Should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ProvisioningError);
+      expect((err as ProvisioningError).code).toBe("STAFF_MULTIPLE_ACTIVE_ROLES");
+    }
+  });
+
+  it("proves provisioning replay rejects with IDENTITY_CONFLICT when single active role differs from requested", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+
+    await ensureBootstrapped();
+    const staff = generateStaffData("replay_role_conflict");
+
+    await provisionStaffMember({
+      email: staff.email,
+      fullName: staff.fullName,
+      employeeNumber: staff.employeeNumber,
+      department: "OPERATIONS",
+      role: "OPS_SUPERVISOR",
+      password: staff.temporaryPassword,
+    });
+
+    // Attempt replay with a different role
+    try {
+      await provisionStaffMember({
+        email: staff.email,
+        fullName: staff.fullName,
+        employeeNumber: staff.employeeNumber,
+        department: "OPERATIONS",
+        role: "SALES_AGENT",
+        password: staff.temporaryPassword,
+      });
+      expect.unreachable("Should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ProvisioningError);
+      expect((err as ProvisioningError).code).toBe("IDENTITY_CONFLICT");
+    }
+  });
+
+  it("proves post-commit response loss reconciles successfully without destroying committed state", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+
+    await ensureBootstrapped();
+    const staff = generateStaffData("post_commit_reconcile");
+
+    // Call with _testPostCommitError to simulate network disconnect immediately following transaction commit
+    const res = await provisionStaffMember(
+      {
+        email: staff.email,
+        fullName: staff.fullName,
+        employeeNumber: staff.employeeNumber,
+        department: "SALES",
+        role: "SALES_AGENT",
+        password: staff.temporaryPassword,
+      },
+      { _testPostCommitError: true }
+    );
+
+    // Must return reconciled success
+    expect(res.success).toBe(true);
+    expect(res.employeeNumber).toBe(staff.employeeNumber);
+    expect(res.role).toBe("SALES_AGENT");
+
+    // Directly assert in PostgreSQL that user, membership, role assignment, and audit records were NOT cascade deleted
+    const prisma = getPrisma();
+    const user = await prisma.user.findUnique({
+      where: { id: res.userId },
+    });
+    expect(user).toBeDefined();
+    expect(user?.email).toBe(staff.email.toLowerCase());
+
+    const membership = await prisma.internalStaffMembership.findUnique({
+      where: { userId: res.userId },
+    });
+    expect(membership).toBeDefined();
+    expect(membership?.employeeNumber).toBe(staff.employeeNumber);
+
+    const roles = await prisma.internalRoleAssignment.findMany({
+      where: { staffMembershipId: membership!.id, isActive: true },
+    });
+    expect(roles).toHaveLength(1);
+    expect(roles[0].role).toBe("SALES_AGENT");
+
+    const audit = await prisma.securityAuditEvent.findFirst({
+      where: { actorUserId: res.userId, eventType: "STAFF_PROVISIONED" },
+    });
+    expect(audit).toBeDefined();
+    expect(audit?.targetEntity).toBe(`staff_membership:${membership!.id}`);
   });
 });

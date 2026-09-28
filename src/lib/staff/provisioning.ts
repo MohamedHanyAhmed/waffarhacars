@@ -76,6 +76,11 @@ export interface ProvisionStaffOptions {
    * lock acquisition and assert serialization on the database server.
    */
   _testBarrier?: () => Promise<void>;
+  /**
+   * Deterministic test hook executed immediately after the Prisma transaction commits,
+   * simulating network partition or response acknowledgment loss.
+   */
+  _testPostCommitError?: boolean;
 }
 
 export async function provisionStaffMember(
@@ -177,21 +182,42 @@ export async function provisionStaffMember(
         existingByEmp.employeeNumber === normalizedEmployeeNumber &&
         existingByEmp.department === department
       ) {
-        const existingRole = await prisma.internalRoleAssignment.findFirst({
+        const activeRoles = await prisma.internalRoleAssignment.findMany({
           where: { staffMembershipId: existingByEmp.id, isActive: true },
         });
 
-        if (!existingRole || existingRole.role === targetRole) {
+        // Corrupted / roleless state: exactly one active role is required
+        if (activeRoles.length === 0) {
+          throw new ProvisioningError(
+            "STAFF_ROLE_RECONCILIATION_REQUIRED",
+            "Staff record has no active role assignment. Manual audit and reconciliation required before re-provisioning."
+          );
+        }
+
+        if (activeRoles.length > 1) {
+          throw new ProvisioningError(
+            "STAFF_MULTIPLE_ACTIVE_ROLES",
+            "Inconsistent staff state: multiple active role assignments detected. Manual reconciliation required."
+          );
+        }
+
+        const currentActiveRole = activeRoles[0];
+        if (currentActiveRole.role === targetRole) {
           return {
             success: true,
             userId: existingByUser.id,
             employeeNumber: existingByEmp.employeeNumber,
             department: existingByEmp.department,
-            role: existingRole?.role || targetRole,
+            role: currentActiveRole.role,
             mustChangePassword: existingByEmp.mustChangePassword,
             idempotent: true,
           };
         }
+
+        throw new ProvisioningError(
+          "IDENTITY_CONFLICT",
+          `Conflicting active role assignment: staff member currently holds ${currentActiveRole.role}, requested ${targetRole}.`
+        );
       }
       throw new ProvisioningError(
         "IDENTITY_CONFLICT",
@@ -294,6 +320,10 @@ export async function provisionStaffMember(
         return { membership: m, roleAssignment: ra };
       });
 
+      if (options?._testPostCommitError) {
+        throw new Error("Simulated connection drop / response loss after transaction commit");
+      }
+
       return {
         success: true,
         userId: createdUserId!,
@@ -303,8 +333,76 @@ export async function provisionStaffMember(
         mustChangePassword: membership.mustChangePassword,
         idempotent: false,
       };
-    } catch {
-      // Step C: Compensating transaction - delete only the createdUserId proven to have been created by this invocation
+    } catch (txError) {
+      // Step C: Reconcile unknown transaction outcomes before compensation.
+      // A commit can succeed while its acknowledgment is lost.
+      // Query by the created user ID: return success only for a complete committed state;
+      // compensate only when absence of the transaction’s records is established;
+      // otherwise preserve state and raise an operational reconciliation error.
+      // Never delete a committed membership through user cascade.
+
+      let reconciledMembership: Awaited<
+        ReturnType<typeof prisma.internalStaffMembership.findUnique>
+      > = null;
+      let reconciledRoles: Awaited<ReturnType<typeof prisma.internalRoleAssignment.findMany>> = [];
+      let reconciledAudit: Awaited<ReturnType<typeof prisma.securityAuditEvent.findFirst>> = null;
+
+      try {
+        reconciledMembership = await prisma.internalStaffMembership.findUnique({
+          where: { userId: createdUserId! },
+        });
+
+        if (reconciledMembership) {
+          reconciledRoles = await prisma.internalRoleAssignment.findMany({
+            where: { staffMembershipId: reconciledMembership.id, isActive: true },
+          });
+        }
+
+        reconciledAudit = await prisma.securityAuditEvent.findFirst({
+          where: {
+            actorUserId: createdUserId!,
+            eventType: "STAFF_PROVISIONED",
+          },
+        });
+      } catch {
+        throw new ProvisioningOperationalError(
+          "PROVISIONING_AMBIGUOUS_STATE",
+          createdUserId!,
+          `Transaction error occurred and state reconciliation failed. Preserving state for manual reconciliation. Original error: ${txError instanceof Error ? txError.message : String(txError)}`
+        );
+      }
+
+      // Outcome 1: Complete committed state established -> return success
+      if (
+        reconciledMembership &&
+        reconciledRoles.length === 1 &&
+        reconciledRoles[0].role === targetRole &&
+        reconciledAudit
+      ) {
+        return {
+          success: true,
+          userId: createdUserId!,
+          employeeNumber: reconciledMembership.employeeNumber,
+          department: reconciledMembership.department,
+          role: reconciledRoles[0].role,
+          mustChangePassword: reconciledMembership.mustChangePassword,
+          idempotent: false,
+        };
+      }
+
+      // Outcome 2: Clean absence established -> execute compensating cleanup
+      const isCompletelyAbsent =
+        !reconciledMembership && reconciledRoles.length === 0 && !reconciledAudit;
+
+      if (!isCompletelyAbsent) {
+        // Partial or ambiguous state: PRESERVE STATE! Never delete user.
+        throw new ProvisioningOperationalError(
+          "PROVISIONING_AMBIGUOUS_STATE",
+          createdUserId!,
+          "Transaction outcome is ambiguous: partial staff records exist in database. Preserving records for manual reconciliation."
+        );
+      }
+
       let compensationSucceeded = false;
       try {
         await prisma.session.deleteMany({ where: { userId: createdUserId! } });

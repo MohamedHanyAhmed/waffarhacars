@@ -153,8 +153,8 @@ Capabilities are strictly enumerated with **zero wildcard `*` permissions**:
 Security audit events are written to `security_audit_events`:
 
 - **Allowlisted Event Types:** `STAFF_PROVISIONED`, `STAFF_ROLE_ASSIGNED`, `STAFF_LOGIN_SUCCEEDED`, `STAFF_LOGIN_FAILED`, `STAFF_ACCESS_DENIED`, `STAFF_PASSWORD_ROTATED`, `STAFF_MFA_ENROLLED`, `STAFF_SESSION_REVOKED`.
-- **Privacy & Sanitization:** Metadata is strictly sanitized with zero PII, passwords, OTPs, raw cookies, tokens, or raw IP addresses. Client IPs are stored only as domain-separated HMAC-SHA256 digests (`audit-fingerprint:v1\0<ip>`).
-- **Storage Protection:** Anonymous denial events are bounded and deduplicated via an in-memory sliding window and 60-second database lookups to prevent storage exhaustion from unauthenticated network probes.
+- **Privacy & Sanitization:** Metadata is strictly validated against event-specific Zod allowlists, rejecting unexpected keys, free-form text, passwords, OTPs, raw cookies, tokens, and raw IP addresses. Target identifiers are strictly validated against authorized schemas (`staff_membership:<uuid>`, `user:<uuid>`, `role_assignment:<uuid>`, `permission:<domain>:<action>`); arbitrary URLs, scripts, and malformed strings are discarded as `null`. Client IPs are stored only as domain-separated HMAC-SHA256 digests (`audit-fingerprint:v1\0<ip>`) keyed by validated server configuration (`STAFF_LOGIN_HMAC_KEY` or `BETTER_AUTH_SECRET`).
+- **Storage Protection:** For this MVP, unauthenticated (anonymous) requests do not persist database audit rows, completely eliminating database storage exhaustion risks from unauthenticated network probes or spoofed caller headers (such as `x-forwarded-for`). Authenticated staff denials remain fully audited.
 - **Fail-Closed Semantics:** Denial audit persistence failures do not crash the caller and still deny access; role-assignment audit failures inside transactions roll back the role assignment.
 - **Security Notice:** The audit ledger is append-oriented in PostgreSQL, not cryptographically tamper-evident. Tamper-evident hash chaining is planned post-pilot.
 
@@ -215,7 +215,57 @@ DELETE FROM "user" WHERE "id" = '<uuid>';
 
 ---
 
-## 7. MFA Reset (Two-Person Admin Reset)
+## 9. Controlled, Audited Recovery Procedures for Inconsistent Role States
+
+When provisioning encounters an existing membership with abnormal or corrupted role assignments, it fails closed to prevent silent privilege escalation or broken invariants:
+
+### A. Zero Active Roles (`STAFF_ROLE_RECONCILIATION_REQUIRED`)
+
+- **Condition:** An `InternalStaffMembership` exists for the user and employee number, but `internal_role_assignments` contains 0 active roles (`isActive: true`).
+- **Cause:** Manual role deactivation, incomplete administrative change, or legacy migration gap.
+- **Recovery Procedure:**
+  1. A platform administrator investigates the staff member's approved employment authorization and department.
+  2. The administrator inserts or reactivates exactly one valid role assignment with `assignedBy = 'ADMIN_RECONCILIATION'`:
+     ```sql
+     INSERT INTO "internal_role_assignments" ("id", "staffMembershipId", "role", "isActive", "assignedBy", "assignedAt", "createdAt", "updatedAt")
+     VALUES (gen_random_uuid(), '<membership-id>', 'OPS_SUPERVISOR', true, 'ADMIN_RECONCILIATION', NOW(), NOW(), NOW());
+     ```
+  3. Re-running `npm run staff:provision` with matching identity and role attributes will then complete idempotently.
+
+### B. Multiple Active Roles (`STAFF_MULTIPLE_ACTIVE_ROLES`)
+
+- **Condition:** An `InternalStaffMembership` has more than 1 active role (`isActive: true`).
+- **Cause:** Direct database manipulation or concurrency anomaly violating the single-role invariant.
+- **Recovery Procedure:**
+  1. Review active roles:
+     ```sql
+     SELECT id, role, "assignedAt", "assignedBy" FROM "internal_role_assignments" WHERE "staffMembershipId" = '<membership-id>' AND "isActive" = true;
+     ```
+  2. Mark outdated or extraneous roles inactive so only the approved single role remains active:
+     ```sql
+     UPDATE "internal_role_assignments" SET "isActive" = false, "updatedAt" = NOW() WHERE "id" = '<obsolete-role-assignment-id>';
+     ```
+  3. Re-run provisioning to verify idempotent resolution.
+
+### C. Ambiguous Transaction State (`PROVISIONING_AMBIGUOUS_STATE`)
+
+- **Condition:** A network timeout, database disconnect, or runtime error occurred during provisioning where the interactive transaction committed or left indeterminate state.
+- **State Preservation Invariant:** The provisioning engine strictly **preserves** all database rows and never issues automated cascade deletions on ambiguous state.
+- **Recovery Procedure:**
+  1. Inspect the state using the reported `createdUserId`:
+     ```sql
+     SELECT u.id, m.id as membership_id, m."employeeNumber", r.role, r."isActive"
+     FROM "user" u
+     LEFT JOIN "internal_staff_membership" m ON m."userId" = u.id
+     LEFT JOIN "internal_role_assignments" r ON r."staffMembershipId" = m.id
+     WHERE u.id = '<createdUserId>';
+     ```
+  2. If the records are complete and valid, re-running provisioning with identical attributes will succeed idempotently.
+  3. If partial records exist (e.g. membership exists but role assignment failed), complete the missing record under an audited change ticket before retrying.
+
+---
+
+## 10. MFA Reset (Two-Person Admin Reset)
 
 If a staff member loses their TOTP device and all backup codes:
 
@@ -230,7 +280,7 @@ If a staff member loses their TOTP device and all backup codes:
 
 ---
 
-## 8. Rate Limiting
+## 11. Rate Limiting
 
 **IP-based:** 20 login attempts per 15 minutes per IP address.
 **Account-based:** 5 login attempts per 15 minutes per email (HMAC-hashed with `STAFF_LOGIN_HMAC_KEY`).
@@ -241,7 +291,7 @@ Rate limit buckets are stored in the `rate_limit_bucket` PostgreSQL table using 
 
 ---
 
-## 9. Required Environment Variables for Staff Auth
+## 12. Required Environment Variables for Staff Auth
 
 | Variable                | Description                           | Required When      |
 | ----------------------- | ------------------------------------- | ------------------ |

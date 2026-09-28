@@ -1,6 +1,8 @@
 import "server-only";
 import crypto from "node:crypto";
+import { z } from "zod";
 import { getPrisma } from "@/lib/db";
+import { getServerEnv } from "@/lib/env";
 import type { Prisma } from "@/generated/prisma/client";
 
 /**
@@ -27,13 +29,16 @@ export function isSecurityAuditEventType(type: unknown): type is SecurityAuditEv
 
 /**
  * Domain-separated HMAC-SHA256 fingerprint for client identifiers (e.g. IP addresses).
- * Raw IP addresses and PII are NEVER stored in the database.
+ * Uses validated server configuration. Raw IP addresses and PII are NEVER stored in the database.
  */
 export function createAuditFingerprint(rawIdentifier: string): string {
-  const hmacKey =
-    process.env.STAFF_LOGIN_HMAC_KEY ||
-    process.env.BETTER_AUTH_SECRET ||
-    "default-audit-fingerprint-key-at-least-32-chars-long";
+  const env = getServerEnv();
+  const hmacKey = env.STAFF_LOGIN_HMAC_KEY || env.BETTER_AUTH_SECRET;
+  if (!hmacKey) {
+    throw new Error(
+      "Configuration error: Validated server key (STAFF_LOGIN_HMAC_KEY or BETTER_AUTH_SECRET) is required for audit fingerprinting."
+    );
+  }
 
   return crypto
     .createHmac("sha256", hmacKey)
@@ -41,93 +46,165 @@ export function createAuditFingerprint(rawIdentifier: string): string {
     .digest("hex");
 }
 
-const SENSITIVE_KEY_PATTERN =
-  /(password|secret|token|cookie|otp|code|auth|bearer|key|credential|authorization|session)/i;
-const EMAIL_PATTERN = /[^\s@]+@[^\s@]+\.[^\s@]+/;
-const IPV4_PATTERN = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/;
-const HOST_OR_URL_PATTERN = /(https?:\/\/|\.localhost|\.invalid|\.com|\.org|\.net)/i;
-const SQL_PATTERN = /\b(SELECT|INSERT|UPDATE|DELETE|DROP|UNION|ALTER|EXEC|FROM|WHERE)\b/i;
-const LONG_TOKEN_PATTERN = /^[A-Za-z0-9_-]{32,}$/;
-const STACK_TRACE_PATTERN = /\bat\s+.*\(\S+:\d+:\d+\)/;
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const PERMISSION_REGEX = /^[a-z_]{2,32}:[a-z_]{2,32}$/;
 
 /**
- * Sanitizes audit metadata strictly removing:
- * - Passwords, OTPs, backup codes, raw tokens, cookies, auth headers
- * - Raw IP addresses, emails, hostnames, SQL statements, and exception text/stack traces.
+ * Validates target identifiers to ensure only strongly typed, expected domain formats are recorded.
+ * Supported target schemas:
+ * - staff_membership:<uuid>
+ * - user:<uuid>
+ * - role_assignment:<uuid>
+ * - permission:<domain>:<action>
+ *
+ * Any malformed, arbitrary, or unexpected string resolves to null.
+ */
+export function validateTargetIdentifier(target: unknown): string | null {
+  if (typeof target !== "string" || !target.trim()) {
+    return null;
+  }
+  const trimmed = target.trim();
+  const firstColon = trimmed.indexOf(":");
+  if (firstColon <= 0) {
+    return null;
+  }
+  const prefix = trimmed.slice(0, firstColon);
+  const identifier = trimmed.slice(firstColon + 1);
+
+  if (prefix === "permission") {
+    if (PERMISSION_REGEX.test(identifier)) {
+      return `permission:${identifier}`;
+    }
+    return null;
+  }
+
+  if (prefix === "staff_membership" || prefix === "user" || prefix === "role_assignment") {
+    if (UUID_REGEX.test(identifier)) {
+      return `${prefix}:${identifier.toLowerCase()}`;
+    }
+    return null;
+  }
+
+  return null;
+}
+
+// Event-Specific Allowlisted Metadata Schemas
+const StaffProvisionedMetadataSchema = z.object({
+  action: z.literal("PROVISION_STAFF"),
+  department: z.enum(["SALES", "OPERATIONS", "FINANCE", "ADMIN"]),
+  role: z.enum(["SALES_AGENT", "OPS_SUPERVISOR", "FINANCE_OFFICER", "PLATFORM_ADMIN"]),
+  isBootstrap: z.boolean(),
+});
+
+const StaffRoleAssignedMetadataSchema = z.object({
+  action: z.literal("ASSIGN_ROLE"),
+  role: z.enum(["SALES_AGENT", "OPS_SUPERVISOR", "FINANCE_OFFICER", "PLATFORM_ADMIN"]),
+  previousRole: z
+    .enum(["SALES_AGENT", "OPS_SUPERVISOR", "FINANCE_OFFICER", "PLATFORM_ADMIN"])
+    .optional(),
+  assignedBy: z
+    .string()
+    .max(64)
+    .regex(/^[A-Za-z0-9_-]+$/)
+    .optional(),
+});
+
+const StaffAccessDeniedMetadataSchema = z.object({
+  reason: z.enum([
+    "NOT_STAFF",
+    "SUSPENDED",
+    "PASSWORD_CHANGE_REQUIRED",
+    "MFA_REQUIRED",
+    "NO_ACTIVE_ROLE",
+    "INCONSISTENT_ROLES",
+    "UNKNOWN_PERMISSION",
+    "PERMISSION_DENIED",
+  ]),
+  role: z.enum(["SALES_AGENT", "OPS_SUPERVISOR", "FINANCE_OFFICER", "PLATFORM_ADMIN"]).optional(),
+  requiredPermission: z
+    .string()
+    .regex(/^[a-z_]{2,32}:[a-z_]{2,32}$/)
+    .max(64)
+    .optional(),
+  roleCount: z.number().int().min(0).max(10).optional(),
+});
+
+const StaffPasswordRotatedMetadataSchema = z.object({
+  action: z.literal("PASSWORD_ROTATED"),
+});
+
+const StaffMfaEnrolledMetadataSchema = z.object({
+  action: z.literal("MFA_ENROLLED"),
+  method: z.literal("totp"),
+});
+
+const StaffLoginSucceededMetadataSchema = z.object({
+  authMethod: z.enum(["email_password", "totp"]),
+});
+
+const StaffLoginFailedMetadataSchema = z.object({
+  reason: z.enum(["INVALID_CREDENTIALS", "RATE_LIMITED", "MFA_FAILED"]),
+});
+
+const StaffSessionRevokedMetadataSchema = z.object({
+  action: z.literal("REVOKE_SESSION"),
+  reason: z.enum(["USER_SIGNOUT", "PASSWORD_CHANGED", "ADMIN_ACTION"]),
+});
+
+export const AUDIT_METADATA_SCHEMAS: Record<SecurityAuditEventType, z.ZodTypeAny> = {
+  STAFF_PROVISIONED: StaffProvisionedMetadataSchema,
+  STAFF_ROLE_ASSIGNED: StaffRoleAssignedMetadataSchema,
+  STAFF_ACCESS_DENIED: StaffAccessDeniedMetadataSchema,
+  STAFF_PASSWORD_ROTATED: StaffPasswordRotatedMetadataSchema,
+  STAFF_MFA_ENROLLED: StaffMfaEnrolledMetadataSchema,
+  STAFF_LOGIN_SUCCEEDED: StaffLoginSucceededMetadataSchema,
+  STAFF_LOGIN_FAILED: StaffLoginFailedMetadataSchema,
+  STAFF_SESSION_REVOKED: StaffSessionRevokedMetadataSchema,
+};
+
+/**
+ * Sanitizes audit metadata using event-specific allowlists:
+ * - Only recognized scalar/enum fields defined for that event type are retained.
+ * - Unexpected keys, free-form sentences, credentials, and URLs are stripped.
+ * - String values are checked against embedded PII/URL patterns and truncated to 128 chars.
  */
 export function sanitizeAuditMetadata(
+  eventType: SecurityAuditEventType,
   rawMetadata?: Record<string, unknown> | null
 ): Prisma.InputJsonObject {
   if (!rawMetadata || typeof rawMetadata !== "object") {
     return {};
   }
 
-  const sanitized: Record<string, string | number | boolean | null> = {};
+  const schema = AUDIT_METADATA_SCHEMAS[eventType];
+  if (!schema) {
+    return {};
+  }
 
-  for (const [key, value] of Object.entries(rawMetadata)) {
-    // 1. Strip sensitive keys
-    if (SENSITIVE_KEY_PATTERN.test(key)) {
-      continue;
-    }
+  const parsed = schema.safeParse(rawMetadata);
+  if (!parsed.success) {
+    return {};
+  }
 
-    // 2. Only allow primitive values
+  // Defensive value scrubbing on allowlisted fields
+  const result: Record<string, string | number | boolean | null> = {};
+  for (const [key, value] of Object.entries(parsed.data as Record<string, unknown>)) {
     if (value === null || typeof value === "boolean" || typeof value === "number") {
-      sanitized[key] = value;
-      continue;
-    }
-
-    if (typeof value === "string") {
+      result[key] = value;
+    } else if (typeof value === "string") {
       const trimmed = value.trim();
-
-      // Check against forbidden value types
       if (
-        EMAIL_PATTERN.test(trimmed) ||
-        IPV4_PATTERN.test(trimmed) ||
-        HOST_OR_URL_PATTERN.test(trimmed) ||
-        SQL_PATTERN.test(trimmed) ||
-        LONG_TOKEN_PATTERN.test(trimmed) ||
-        STACK_TRACE_PATTERN.test(trimmed)
+        trimmed.includes("@") ||
+        trimmed.includes("://") ||
+        /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(trimmed)
       ) {
-        // Redact or drop
         continue;
       }
-
-      // Truncate to maximum 128 characters
-      sanitized[key] = trimmed.slice(0, 128);
+      result[key] = trimmed.slice(0, 128);
     }
   }
 
-  return sanitized as Prisma.InputJsonObject;
-}
-
-/**
- * In-memory sliding window cache for anonymous event deduplication.
- * Prevents denial-of-service storage exhaustion from rapid probes.
- */
-const anonymousEventCache = new Map<string, number>();
-const DEDUPLICATION_WINDOW_MS = 60_000; // 60 seconds
-const MAX_CACHE_ENTRIES = 5_000;
-
-function isAnonymousEventDeduplicated(fingerprint: string, eventType: string): boolean {
-  const cacheKey = `${fingerprint}:${eventType}`;
-  const now = Date.now();
-  const lastSeen = anonymousEventCache.get(cacheKey);
-
-  if (lastSeen && now - lastSeen < DEDUPLICATION_WINDOW_MS) {
-    return true;
-  }
-
-  // Evict stale entries if cache gets too large
-  if (anonymousEventCache.size >= MAX_CACHE_ENTRIES) {
-    for (const [k, ts] of anonymousEventCache.entries()) {
-      if (now - ts >= DEDUPLICATION_WINDOW_MS) {
-        anonymousEventCache.delete(k);
-      }
-    }
-  }
-
-  anonymousEventCache.set(cacheKey, now);
-  return false;
+  return result as Prisma.InputJsonObject;
 }
 
 export interface LogAuditEventParams {
@@ -141,12 +218,14 @@ export interface LogAuditEventParams {
 /**
  * Persists an allowlisted security audit event to the append-oriented audit ledger.
  *
- * Requirements:
+ * Requirements & Invariants:
  * 1. Strictly allowlisted event types.
- * 2. Minimal, sanitized metadata with zero PII/secrets.
- * 3. Bounded deduplication for anonymous events to protect database storage.
- * 4. When tx is provided, failure throws (rolling back outer transaction, e.g. provisioning).
- * 5. When tx is omitted (standalone denial logging), failure does NOT throw to ensure fail-closed denial.
+ * 2. Event-specific allowlisted metadata schemas; free-form fields, PII, and credentials are eliminated.
+ * 3. Validated target entity identifiers only.
+ * 4. MVP Invariant: Unauthenticated requests do NOT persist database audit events, completely
+ *    eliminating storage exhaustion vulnerabilities from unauthenticated callers.
+ * 5. When tx is provided, persistence failure throws (rolling back outer transaction, e.g. provisioning).
+ * 6. When tx is omitted (standalone denial logging), failure does NOT throw to ensure fail-closed denial.
  */
 export async function logAuditEvent(
   params: LogAuditEventParams,
@@ -158,38 +237,22 @@ export async function logAuditEvent(
     throw new Error(`INVALID_AUDIT_EVENT_TYPE: ${eventType}`);
   }
 
-  // Deduplicate anonymous events (actorUserId is null or absent)
-  if (!actorUserId && ipFingerprint) {
-    if (isAnonymousEventDeduplicated(ipFingerprint, eventType)) {
-      return null;
-    }
+  // MVP Invariant: Do not persist database audit events for unauthenticated/anonymous requests.
+  if (!actorUserId) {
+    return null;
   }
 
-  const sanitizedMeta = sanitizeAuditMetadata(metadata);
+  const validatedTarget = targetEntity ? validateTargetIdentifier(targetEntity) : null;
+  const sanitizedMeta = sanitizeAuditMetadata(eventType, metadata);
 
   try {
     const client = tx || getPrisma();
 
-    // Secondary database check for anonymous deduplication if not in a transaction
-    if (!tx && !actorUserId && ipFingerprint) {
-      const recent = await client.securityAuditEvent.findFirst({
-        where: {
-          ipFingerprint,
-          eventType,
-          timestamp: { gte: new Date(Date.now() - DEDUPLICATION_WINDOW_MS) },
-        },
-        select: { id: true },
-      });
-      if (recent) {
-        return null;
-      }
-    }
-
     const record = await client.securityAuditEvent.create({
       data: {
-        actorUserId: actorUserId || null,
+        actorUserId,
         eventType,
-        targetEntity: targetEntity ? targetEntity.slice(0, 128) : null,
+        targetEntity: validatedTarget,
         ipFingerprint: ipFingerprint || null,
         metadata: sanitizedMeta,
       },

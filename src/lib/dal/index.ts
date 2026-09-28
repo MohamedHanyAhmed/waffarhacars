@@ -194,13 +194,6 @@ export async function assertStaffPermission(
 
   // Absent or invalid session
   if (!sessionData || !sessionData.user) {
-    await logAuditEvent({
-      actorUserId: null,
-      eventType: "STAFF_ACCESS_DENIED",
-      targetEntity: null,
-      ipFingerprint: clientFingerprint,
-      metadata: { reason: "UNAUTHENTICATED" },
-    });
     throw new AuthorizationError(401, "UNAUTHENTICATED", "Authentication required");
   }
 

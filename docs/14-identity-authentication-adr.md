@@ -557,13 +557,16 @@ graph LR
   - Department is descriptive only, never authorization. Permissions resolved strictly from verified database session and active role.
   - Pilot staff hold exactly one active internal role. Inconsistent state (> 1 active roles) or roleless staff fail closed with HTTP 403.
   - PLATFORM_ADMIN possesses platform governance capabilities but is strictly prohibited from approving offers or exporting payouts (Maker-Checker separation of duties). Zero wildcard `*` permissions exist.
-  - Audit logging records allowlisted events with zero passwords, OTPs, raw tokens, cookies, or raw IP addresses. Client IPs are hashed with domain-separated HMAC-SHA256 (`audit-fingerprint:v1\0<ip>`).
-  - Storage exhaustion defense: Anonymous denial events are deduplicated via in-memory sliding window and 60-second database lookups.
+  - Audit logging records allowlisted events with event-specific Zod schema validation and target entity schema validation. Zero passwords, OTPs, raw tokens, cookies, or raw IP addresses are persisted. Client IPs are stored only as domain-separated HMAC-SHA256 digests (`audit-fingerprint:v1\0<ip>`) keyed by validated server configuration.
+  - Storage exhaustion defense: For this MVP, unauthenticated (anonymous) requests do not persist database audit rows, completely eliminating database exhaustion from network probes or spoofed caller headers (such as `x-forwarded-for`). Authenticated staff denials remain fully audited.
+  - Provisioning reconciliation: Transaction outcomes inspect database state before compensation. Clean absence permits rollback; complete committed state returns success; partial or ambiguous state preserves database records without destructive user cascade deletion and requires manual administrative reconciliation.
   - Fail-closed audit semantics: Denial audit persistence failure does not bypass access denial; role-assignment audit failure inside transactions rolls back the role assignment.
 - **Integration Tests:**
   - Role-based capability assertions for each staff role (maker, checker, finance, admin).
   - Roleless and suspended staff failure verification (HTTP 403).
-  - Bounded anonymous denial audit persistence.
+  - Anonymous request verification asserting zero database audit writes under repeated and concurrent probes.
+  - Audit privacy verification asserting stripping of PII, credentials, URLs, and malformed targets on persisted rows.
+  - Provisioning replay and post-commit state reconciliation verification.
 - **Strict Scope Exclusions:**
   - Dynamic session timeouts (idle limits, absolute ceilings) and step-up reauthentication (`lastReauthenticatedAt`) are **strictly deferred to PR 2D-B**.
   - Provider organizations, branches, offers, reservations, role-management UI, and public role-assignment endpoints are **strictly deferred to PR 3 and downstream domain slices**.
