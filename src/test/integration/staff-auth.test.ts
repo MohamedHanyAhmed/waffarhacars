@@ -1919,7 +1919,7 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
       password: temporaryPassword,
       fullName,
       employeeNumber,
-      department: "OPERATIONS",
+      department: "ADMIN",
       isBootstrap: true,
     });
 
