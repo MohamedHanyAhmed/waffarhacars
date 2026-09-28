@@ -658,13 +658,16 @@ describe("Central Authorization DAL & Security Audit PostgreSQL Integration Suit
       orderBy: { timestamp: "desc" },
     });
 
+    const membership = await prisma.internalStaffMembership.findUnique({
+      where: { userId: provisionResult.userId },
+    });
     expect(denialEvent).toBeDefined();
     expect(denialEvent?.ipFingerprint).toHaveLength(64);
-    expect(denialEvent?.targetEntity).toBe("permission:offer_draft:approve");
+    expect(denialEvent?.targetEntity).toBe(`staff_membership:${membership!.id}`);
     const denialMeta = denialEvent?.metadata as Record<string, unknown>;
-    expect(denialMeta.action).toBe("offer_draft:approve");
     expect(denialMeta.role).toBe("SALES_AGENT");
-    expect(denialMeta.reason).toBe("INSUFFICIENT_PERMISSIONS");
+    expect(denialMeta.reason).toBe("PERMISSION_DENIED");
+    expect(denialMeta.requiredPermission).toBe("offer_draft:approve");
 
     // 2. Direct logAuditEvent with malicious/untrusted payload containing PII, raw passwords, bearer tokens, URLs, unexpected fields, and malformed target
     const eventId = await logAuditEvent({
@@ -843,7 +846,7 @@ describe("Central Authorization DAL & Security Audit PostgreSQL Integration Suit
     await ensureBootstrapped();
     const staff = generateStaffData("replay_role_conflict");
 
-    await provisionStaffMember({
+    const res = await provisionStaffMember({
       email: staff.email,
       fullName: staff.fullName,
       employeeNumber: staff.employeeNumber,
@@ -852,14 +855,21 @@ describe("Central Authorization DAL & Security Audit PostgreSQL Integration Suit
       password: staff.temporaryPassword,
     });
 
-    // Attempt replay with a different role
+    // Directly alter the active role in database to a different role
+    const prisma = getPrisma();
+    await prisma.internalRoleAssignment.updateMany({
+      where: { staffMembership: { userId: res.userId } },
+      data: { role: "SALES_AGENT" },
+    });
+
+    // Attempt replay with original operational attributes
     try {
       await provisionStaffMember({
         email: staff.email,
         fullName: staff.fullName,
         employeeNumber: staff.employeeNumber,
         department: "OPERATIONS",
-        role: "SALES_AGENT",
+        role: "OPS_SUPERVISOR",
         password: staff.temporaryPassword,
       });
       expect.unreachable("Should have thrown");
