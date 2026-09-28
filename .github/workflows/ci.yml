@@ -108,6 +108,7 @@ jobs:
           PHONE_ALIAS_HMAC_KEY: ci-phone-alias-test-secret-at-least-32-chars-long
           PHONE_LOOKUP_HMAC_KEY: ci-phone-lookup-test-secret-at-least-32-chars-long
           OTP_SMS_PROVIDER: test
+          STAFF_LOGIN_HMAC_KEY: ci-staff-login-test-secret-at-least-32-chars-long
 
       - name: Production Build
         run: npm run build

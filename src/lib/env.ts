@@ -25,6 +25,7 @@ const RawServerEnvSchema = z.object({
   OTP_PEPPER_SECRET: z.string().optional(),
   PHONE_ALIAS_HMAC_KEY: z.string().optional(),
   PHONE_LOOKUP_HMAC_KEY: z.string().optional(),
+  STAFF_LOGIN_HMAC_KEY: z.string().optional(),
   OTP_SMS_PROVIDER: z.enum(["test", "dev_capture", "egyptian_gateway"]).optional(),
   OTP_DISPATCH_TIMEOUT_MS: z.coerce.number().int().min(100).max(30000).default(8000),
   TRUSTED_PROXY_HOPS: z.coerce.number().int().min(0).max(10).default(0),
@@ -45,6 +46,7 @@ export interface ServerEnv {
   OTP_PEPPER_SECRET: string | undefined;
   PHONE_ALIAS_HMAC_KEY: string | undefined;
   PHONE_LOOKUP_HMAC_KEY: string | undefined;
+  STAFF_LOGIN_HMAC_KEY: string | undefined;
   OTP_SMS_PROVIDER: "test" | "dev_capture" | "egyptian_gateway";
   OTP_DISPATCH_TIMEOUT_MS: number;
   TRUSTED_PROXY_HOPS: number;
@@ -236,6 +238,7 @@ export function validateServerEnv(
   const otpPepper = data.OTP_PEPPER_SECRET?.trim();
   const phoneAliasKey = data.PHONE_ALIAS_HMAC_KEY?.trim();
   const phoneLookupKey = data.PHONE_LOOKUP_HMAC_KEY?.trim();
+  const staffLoginKey = data.STAFF_LOGIN_HMAC_KEY?.trim();
 
   if (data.APP_DATA_BACKEND === "postgres") {
     if (!otpPepper) {
@@ -253,14 +256,23 @@ export function validateServerEnv(
         "Configuration error: PHONE_LOOKUP_HMAC_KEY is required when using postgres backend."
       );
     }
+    if (!staffLoginKey) {
+      throw new Error(
+        "Configuration error: STAFF_LOGIN_HMAC_KEY is required when using postgres backend."
+      );
+    }
 
     validateAuthSecret(otpPepper, data.APP_RUNTIME_PROFILE, "OTP_PEPPER_SECRET");
     validateAuthSecret(phoneAliasKey, data.APP_RUNTIME_PROFILE, "PHONE_ALIAS_HMAC_KEY");
     validateAuthSecret(phoneLookupKey, data.APP_RUNTIME_PROFILE, "PHONE_LOOKUP_HMAC_KEY");
+    validateAuthSecret(staffLoginKey, data.APP_RUNTIME_PROFILE, "STAFF_LOGIN_HMAC_KEY");
 
-    if (new Set([data.BETTER_AUTH_SECRET, otpPepper, phoneAliasKey, phoneLookupKey]).size < 4) {
+    if (
+      new Set([data.BETTER_AUTH_SECRET, otpPepper, phoneAliasKey, phoneLookupKey, staffLoginKey])
+        .size < 5
+    ) {
       throw new Error(
-        "Configuration error: BETTER_AUTH_SECRET, OTP_PEPPER_SECRET, PHONE_ALIAS_HMAC_KEY, and PHONE_LOOKUP_HMAC_KEY must all be mutually distinct."
+        "Configuration error: BETTER_AUTH_SECRET, OTP_PEPPER_SECRET, PHONE_ALIAS_HMAC_KEY, PHONE_LOOKUP_HMAC_KEY, and STAFF_LOGIN_HMAC_KEY must all be mutually distinct."
       );
     }
   }
@@ -280,6 +292,7 @@ export function validateServerEnv(
     OTP_PEPPER_SECRET: otpPepper,
     PHONE_ALIAS_HMAC_KEY: phoneAliasKey,
     PHONE_LOOKUP_HMAC_KEY: phoneLookupKey,
+    STAFF_LOGIN_HMAC_KEY: staffLoginKey,
     OTP_SMS_PROVIDER: smsProvider,
     OTP_DISPATCH_TIMEOUT_MS: data.OTP_DISPATCH_TIMEOUT_MS,
     TRUSTED_PROXY_HOPS: data.TRUSTED_PROXY_HOPS,

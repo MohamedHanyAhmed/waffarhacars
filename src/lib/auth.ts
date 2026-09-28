@@ -1,12 +1,13 @@
 import "server-only";
 import { betterAuth, type BetterAuthOptions } from "better-auth";
-import { phoneNumber } from "better-auth/plugins";
+import { phoneNumber, twoFactor } from "better-auth/plugins";
 import { prismaAdapter } from "@better-auth/prisma-adapter";
 import { getPrisma } from "./db";
 import { getServerEnv } from "./env";
 import { authCoreOptions } from "./auth-core-options";
 import { normalizeEgyptianPhone, formatMaskedPhone } from "./phone";
 import { verifyAndConsumeOtpChallenge, generatePlaceholderEmail } from "./otp/challenge-service";
+import { trustedDeviceGuardPlugin } from "./auth/trusted-device-guard";
 
 let cachedAuth: ReturnType<typeof betterAuth> | null = null;
 
@@ -38,6 +39,8 @@ export function getAuthOptions(overrides: Partial<BetterAuthOptions> = {}): Bett
     emailAndPassword: {
       enabled: true,
       disableSignUp: true, // Public email/password signup strictly disabled in production
+      minPasswordLength: 12,
+      maxPasswordLength: 128,
     },
     plugins: [
       phoneNumber({
@@ -66,6 +69,20 @@ export function getAuthOptions(overrides: Partial<BetterAuthOptions> = {}): Bett
           });
         },
       }),
+      twoFactor({
+        issuer: "WaffarhaCars",
+        skipVerificationOnEnable: false,
+        accountLockout: {
+          enabled: true,
+          maxFailedAttempts: 5,
+          durationSeconds: 900,
+        },
+        totpOptions: {
+          period: 30,
+          digits: 6,
+        },
+      }),
+      trustedDeviceGuardPlugin(),
     ],
     databaseHooks: {
       session: {

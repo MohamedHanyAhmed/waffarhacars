@@ -55,4 +55,11 @@ declare module "lucide-react" {
   export const Filter: Icon;
   export const SlidersHorizontal: Icon;
   export const Globe: Icon;
+  export const Loader2: Icon;
+  export const Building2: Icon;
+  export const BadgeCheck: Icon;
+  export const LogOut: Icon;
+  export const Mail: Icon;
+  export const Key: Icon;
+  export const LifeBuoy: Icon;
 }

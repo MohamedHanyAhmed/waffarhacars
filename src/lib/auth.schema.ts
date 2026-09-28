@@ -1,5 +1,5 @@
 import { betterAuth, type BetterAuthOptions } from "better-auth";
-import { phoneNumber } from "better-auth/plugins";
+import { phoneNumber, twoFactor } from "better-auth/plugins";
 import { authCoreOptions } from "./auth-core-options";
 
 /**
@@ -20,7 +20,12 @@ export const schemaOptions: BetterAuthOptions = {
   advanced: {
     ...authCoreOptions.advanced,
   },
-  plugins: [phoneNumber()],
+  plugins: [
+    phoneNumber(),
+    twoFactor({
+      issuer: "WaffarhaCars",
+    }),
+  ],
 };
 
 export const auth = betterAuth(schemaOptions);

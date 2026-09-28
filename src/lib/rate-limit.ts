@@ -80,6 +80,20 @@ export function hashIpAddress(ip: string): string {
 }
 
 /**
+ * Hashes a normalized email address using HMAC-SHA256 to produce a non-reversible,
+ * domain-separated lookup token for account-level rate limiting without logging or
+ * persisting plaintext email addresses.
+ */
+export function hashEmailIdentifier(email: string, secretKey: string): string {
+  const normalized = email.trim().toLowerCase();
+  return crypto
+    .createHmac("sha256", secretKey)
+    .update(`staff-email-rate-limit:v1\0${normalized}`)
+    .digest("hex")
+    .slice(0, 32);
+}
+
+/**
  * PostgreSQL atomic fixed-window rate limiter.
  *
  * Utilizes atomic INSERT ... ON CONFLICT ("key") DO UPDATE RETURNING points, expireAt.
