@@ -104,12 +104,6 @@ export async function provisionStaffMember(
     }
     targetRole = "PLATFORM_ADMIN";
   } else {
-    if (department === "ADMIN") {
-      throw new ProvisioningError(
-        "ORDINARY_ADMIN_DEPARTMENT_FORBIDDEN",
-        "Ordinary staff accounts cannot be assigned the ADMIN department."
-      );
-    }
     if (validated.role === "PLATFORM_ADMIN") {
       throw new ProvisioningError(
         "PLATFORM_ADMIN_BOOTSTRAP_ONLY",
@@ -202,6 +196,13 @@ export async function provisionStaffMember(
       throw new ProvisioningError(
         "IDENTITY_CONFLICT",
         "Conflicting staff membership attributes found."
+      );
+    }
+
+    if (!isBootstrap && department === "ADMIN") {
+      throw new ProvisioningError(
+        "ORDINARY_ADMIN_DEPARTMENT_FORBIDDEN",
+        "Ordinary staff accounts cannot be assigned the ADMIN department."
       );
     }
 

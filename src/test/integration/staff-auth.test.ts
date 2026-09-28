@@ -1123,9 +1123,9 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
     const { email, temporaryPassword, employeeNumber, fullName } = generateTestStaff();
     const prisma = getPrisma();
 
-    // Spy on membership.create to fail deterministically
-    const membershipSpy = vi
-      .spyOn(prisma.internalStaffMembership, "create")
+    // Spy on $transaction to fail deterministically
+    const txSpy = vi
+      .spyOn(prisma, "$transaction")
       .mockRejectedValueOnce(
         new Error("Simulated database constraint violation on membership table")
       );
@@ -1144,7 +1144,7 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
       expect(err).toBeInstanceOf(ProvisioningError);
       expect((err as ProvisioningError).code).toBe("MEMBERSHIP_CREATION_FAILED");
     } finally {
-      membershipSpy.mockRestore();
+      txSpy.mockRestore();
     }
 
     // Assert final database state: User, Account, and Membership rows must all be 0
@@ -1164,9 +1164,9 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
     const { email, temporaryPassword, employeeNumber, fullName } = generateTestStaff();
     const prisma = getPrisma();
 
-    // Injects both membership create failure AND compensating user delete failure
-    const membershipSpy = vi
-      .spyOn(prisma.internalStaffMembership, "create")
+    // Injects both transaction create failure AND compensating user delete failure
+    const txSpy = vi
+      .spyOn(prisma, "$transaction")
       .mockRejectedValueOnce(new Error("Simulated membership creation failure"));
     const deleteSpy = vi
       .spyOn(prisma.user, "delete")
@@ -1194,7 +1194,7 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
       });
       expect(orphanUser).not.toBeNull();
     } finally {
-      membershipSpy.mockRestore();
+      txSpy.mockRestore();
       deleteSpy.mockRestore();
     }
   });
