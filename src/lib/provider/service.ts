@@ -698,7 +698,6 @@ export async function activateBranch(
           branchId: updated.id,
           providerId,
           cluster: updated.cluster,
-          evidenceDocumentRef: input.evidenceDocumentRef,
         },
       },
       tx
@@ -795,28 +794,101 @@ export async function rejectBranch(
       where: { id: branchId },
       data: {
         status: nextStatus,
+        legalIdentityChecked: false,
+        physicalLocationChecked: false,
+        contactAndHoursChecked: false,
+        evidenceDocumentRef: null,
+        vettedByUserId: null,
+        vettedAt: null,
         rejectionReason: input.rejectionReason,
         version: { increment: 1 },
       },
     });
 
     const ipFingerprint = clientIp ? createAuditFingerprint(clientIp) : null;
-    await logAuditEvent(
-      {
-        actorUserId: actor.userId,
-        eventType: "BRANCH_REJECTED",
-        targetEntity: `provider_branch:${updated.id}`,
-        ipFingerprint,
-        metadata: {
-          action: "REJECT_BRANCH",
-          branchId: updated.id,
-          providerId,
-          returnToDraft: input.remediable,
-          reasonCode: input.reasonCode,
+
+    if (input.remediable) {
+      // Return parent provider to DRAFT so Sales can edit and remediate
+      await tx.providerOrganization.update({
+        where: { id: providerId },
+        data: {
+          status: "DRAFT",
+          rejectionReason: input.rejectionReason,
+          version: { increment: 1 },
         },
-      },
-      tx
-    );
+      });
+
+      // Invalidate any other active branch approvals and clear vetting fields
+      await tx.providerBranch.updateMany({
+        where: {
+          providerOrganizationId: providerId,
+          id: { not: branchId },
+          status: { not: "DECOMMISSIONED" },
+        },
+        data: {
+          status: "DRAFT",
+          legalIdentityChecked: false,
+          physicalLocationChecked: false,
+          contactAndHoursChecked: false,
+          evidenceDocumentRef: null,
+          vettedByUserId: null,
+          vettedAt: null,
+          version: { increment: 1 },
+        },
+      });
+
+      // Log both branch and provider rejection events
+      await logAuditEvent(
+        {
+          actorUserId: actor.userId,
+          eventType: "BRANCH_REJECTED",
+          targetEntity: `provider_branch:${updated.id}`,
+          ipFingerprint,
+          metadata: {
+            action: "REJECT_BRANCH",
+            branchId: updated.id,
+            providerId,
+            returnToDraft: true,
+            reasonCode: input.reasonCode,
+          },
+        },
+        tx
+      );
+
+      await logAuditEvent(
+        {
+          actorUserId: actor.userId,
+          eventType: "PROVIDER_REJECTED",
+          targetEntity: `provider:${providerId}`,
+          ipFingerprint,
+          metadata: {
+            action: "REJECT_PROVIDER",
+            providerId,
+            returnToDraft: true,
+            reasonCode: input.reasonCode,
+          },
+        },
+        tx
+      );
+    } else {
+      // Terminal rejection: branch permanently decommissioned
+      await logAuditEvent(
+        {
+          actorUserId: actor.userId,
+          eventType: "BRANCH_REJECTED",
+          targetEntity: `provider_branch:${updated.id}`,
+          ipFingerprint,
+          metadata: {
+            action: "REJECT_BRANCH",
+            branchId: updated.id,
+            providerId,
+            returnToDraft: false,
+            reasonCode: input.reasonCode,
+          },
+        },
+        tx
+      );
+    }
 
     return updated;
   });
@@ -994,6 +1066,39 @@ export async function rejectProvider(
         version: { increment: 1 },
       },
     });
+
+    if (input.remediable) {
+      // Invalidate any prior active branch approvals, clear their vetting fields,
+      // and return affected branches to editable DRAFT status
+      await tx.providerBranch.updateMany({
+        where: {
+          providerOrganizationId: providerId,
+          status: { not: "DECOMMISSIONED" },
+        },
+        data: {
+          status: "DRAFT",
+          legalIdentityChecked: false,
+          physicalLocationChecked: false,
+          contactAndHoursChecked: false,
+          evidenceDocumentRef: null,
+          vettedByUserId: null,
+          vettedAt: null,
+          version: { increment: 1 },
+        },
+      });
+    } else {
+      // Terminal provider rejection: permanently decommission all non-decommissioned branches
+      await tx.providerBranch.updateMany({
+        where: {
+          providerOrganizationId: providerId,
+          status: { not: "DECOMMISSIONED" },
+        },
+        data: {
+          status: "DECOMMISSIONED",
+          version: { increment: 1 },
+        },
+      });
+    }
 
     const ipFingerprint = clientIp ? createAuditFingerprint(clientIp) : null;
     await logAuditEvent(

@@ -388,36 +388,107 @@ All five HMAC/secret keys must be **mutually distinct**. Validation fails closed
 - **Operations Supervisors (`OPS_SUPERVISOR`)**: Responsible for due diligence, physical verification, and compliance approval.
   - Reviews pending submissions in the review queue (`/api/v1/staff/ops/providers/pending`).
   - Vets and activates or rejects each physical workshop branch **individually**.
-  - Activates or rejects provider organizations.
+  - Activates, pauses, resumes, or rejects provider organizations and branches.
   - **Cannot** submit provider drafts.
 - **Maker-Checker Segregation Invariant**: An Operations supervisor cannot vet/activate a branch or activate a provider if they submitted the record (`submittedByUserId`). Self-activation is blocked with HTTP 403 `MAKER_CHECKER_VIOLATION`.
 
-### 13.3 Per-Branch Vetting Checklist Prior to Activation
+### 13.3 Per-Branch Vetting Checklist & Opaque Evidence Document Reference
 
 Operations must vet each workshop location individually before the parent organization can be activated. The following checks are verified and immutably recorded in the database:
 
 1. **Legal Identity Verification (`legalIdentityChecked: true`)**: Confirm workshop commercial documentation, Tax ID (9 digits), and Commercial Registry (CR) match government records.
 2. **Physical Location Inspection (`physicalLocationChecked: true`)**: Verify workshop existence, street address, and geographic coordinates within Greater Cairo (Latitude: `29.75` to `30.35`, Longitude: `31.05` to `31.75`).
 3. **Contact & Operating Hours (`contactAndHoursChecked: true`)**: Verify direct reachable phone number (`+20...`) and weekly operating hours schedule.
-4. **Opaque Evidence Reference (`evidenceDocumentRef`)**: An opaque document or ticket storage identifier (e.g. `DOC-EGY-2026-0914-01`) is recorded with the reviewer's staff ID and timestamp.
+4. **Opaque Evidence Reference (`evidenceDocumentRef`)**:
+   - Recorded with the reviewer's staff user ID (`vettedByUserId`) and timestamp (`vettedAt`).
+   - **Strict Formatting Invariant**: Must be an opaque alphanumeric identifier matching `/^[A-Za-z0-9_-]{3,64}$/` (e.g. `DOC-EGY-2026-0914-01`, `TICKET_98765`, `EVID-001`). URLs (`https://...`), filesystem paths (`/var/...`, `C:\...`), contact info (`email@...`), and free-text notes with whitespace are strictly rejected by input validation.
+   - **Storage Privacy**: Kept **strictly** inside the access-controlled `provider_branches` database table. It is **omitted from `security_audit_events.metadata`** to maintain audit privacy boundaries.
 
 Endpoint: `POST /api/v1/staff/ops/providers/:id/branches/:branchId/activate`
 
-### 13.4 Operational Availability & Status Transitions
+### 13.4 State Machine Transitions & Invariant Matrix
 
-- **Operational Availability**: A branch is operationally available for appointments only when **both** the branch and its parent organization are in `ACTIVE` status (`isBranchOperationallyAvailable = branch.status === 'ACTIVE' && parent.status === 'ACTIVE'`).
-- **Remediable vs. Permanent Rejection**:
-  - Rejection with `remediable: true` returns the provider or branch status to `DRAFT`, allowing Sales to edit and re-submit.
-  - Rejection with `remediable: false` transitions provider to `REJECTED` or branch to `DECOMMISSIONED` (terminal states; no further transitions allowed).
-- **Post-Activation Changes Limitation**: Sales agents may **never** directly edit an active or pending record. Any operational correction to an active merchant or branch requires placing the entity on hold (`PAUSED`) and proceeding through an explicit reviewed amendment cycle. Active modifications without re-review are strictly blocked.
+#### Provider Organization Lifecycle
 
-### 13.5 Parent–Branch Ownership Guard
+| From Status      | To Status        | Allowed Actor    | Trigger Action                                         | Invariants & Requirements                                                                                  |
+| :--------------- | :--------------- | :--------------- | :----------------------------------------------------- | :--------------------------------------------------------------------------------------------------------- |
+| `[None]`         | `DRAFT`          | `SALES_AGENT`    | `POST /providers`                                      | Valid Cairo cluster, tax ID, CR, contact info. Version = 1.                                                |
+| `DRAFT`          | `DRAFT`          | `SALES_AGENT`    | `PATCH /providers/:id`                                 | Valid CAS version match (`expectedVersion`). Fields updated.                                               |
+| `DRAFT`          | `PENDING_REVIEW` | `SALES_AGENT`    | `POST /providers/:id/submit`                           | Requires at least 1 branch in `DRAFT`. Sets `submittedByUserId`.                                           |
+| `PENDING_REVIEW` | `DRAFT`          | `OPS_SUPERVISOR` | `POST /ops/providers/:id/reject` (`remediable: true`)  | Maker-checker checked. Atomically resets all active branch approvals to `DRAFT` and clears vetting fields. |
+| `PENDING_REVIEW` | `REJECTED`       | `OPS_SUPERVISOR` | `POST /ops/providers/:id/reject` (`remediable: false`) | **Terminal**. Maker-checker checked. Atomically decommissions all branches. Permanent; no edits allowed.   |
+| `PENDING_REVIEW` | `ACTIVE`         | `OPS_SUPERVISOR` | `POST /ops/providers/:id/activate`                     | Maker-checker checked. **Requires at least 1 branch individually vetted and `ACTIVE`**.                    |
+| `ACTIVE`         | `PAUSED`         | `OPS_SUPERVISOR` | `POST /ops/providers/:id/pause`                        | Allowlisted reason code required. Branches remain as is, but operational availability becomes false.       |
+| `PAUSED`         | `ACTIVE`         | `OPS_SUPERVISOR` | `POST /ops/providers/:id/resume`                       | CAS version match. Restores parent availability.                                                           |
 
-Every branch request referencing a provider ID validates that the branch belongs to the parent organization (`branch.providerOrganizationId === providerId`). Any mismatch returns HTTP 404 `BRANCH_NOT_FOUND`, preventing cross-tenant access and confused deputy vulnerabilities across all view, edit, activate, reject, pause, and resume endpoints.
+#### Provider Branch Lifecycle
 
-### 13.6 Audit Privacy & Allowlisted Reason Codes
+| From Status        | To Status        | Allowed Actor    | Trigger Action                                                       | Invariants & Requirements                                                                                                                |
+| :----------------- | :--------------- | :--------------- | :------------------------------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------- |
+| `[None]`           | `DRAFT`          | `SALES_AGENT`    | `POST /providers/:id/branches`                                       | Parent must be `DRAFT`. Unique `branchCode` per provider. Greater Cairo bounding box.                                                    |
+| `DRAFT`            | `DRAFT`          | `SALES_AGENT`    | `PATCH /providers/:id/branches/:bid`                                 | Parent must be `DRAFT`. Branch must be `DRAFT`. CAS version check.                                                                       |
+| `DRAFT`            | `ACTIVE`         | `OPS_SUPERVISOR` | `POST /ops/providers/:id/branches/:bid/activate`                     | Parent must be `PENDING_REVIEW` or `ACTIVE`. Maker-checker checked. Full vetting checklist confirmed + opaque evidence ref.              |
+| `DRAFT` / `ACTIVE` | `DRAFT`          | `OPS_SUPERVISOR` | `POST /ops/providers/:id/branches/:bid/reject` (`remediable: true`)  | Maker-checker checked. Vetting fields cleared. **Atomically returns parent provider to `DRAFT`** and invalidates other branch approvals. |
+| `DRAFT` / `ACTIVE` | `DECOMMISSIONED` | `OPS_SUPERVISOR` | `POST /ops/providers/:id/branches/:bid/reject` (`remediable: false`) | **Terminal**. Maker-checker checked. Physical location permanently decommissioned; cannot be edited or activated.                        |
+| `ACTIVE`           | `PAUSED`         | `OPS_SUPERVISOR` | `POST /ops/providers/:id/branches/:bid/pause`                        | Allowlisted reason code required. Suspends branch operational availability.                                                              |
+| `PAUSED`           | `ACTIVE`         | `OPS_SUPERVISOR` | `POST /ops/providers/:id/branches/:bid/resume`                       | Restores branch operational availability (if parent is `ACTIVE`).                                                                        |
 
-To protect merchant privacy and system security:
+### 13.5 Atomic Invalidation on Return-to-Draft & Stale Approval Protection
 
-- **Zero PII**: Contact names, emails, and phone numbers are never written to `security_audit_events.metadata`.
-- **Zero Free-Text in Audit Metadata**: Rejection and pause reasons entered as free text are stored strictly in the database table (`rejectionReason`, `pauseReason`) for staff workflow notes. Security audit metadata accepts only allowlisted reason codes (`INCOMPLETE_DOCUMENTATION`, `INVALID_TAX_OR_CR`, `UNVERIFIED_LOCATION`, `CONTACT_UNREACHABLE`, `COMPLIANCE_HOLD`, `OPERATIONAL_HOLD`, `OTHER`).
+- **No Stale Vetting Invariant**: A workshop branch approval must **never** survive a provider return-to-draft and be reused after Sales modifies records.
+- **Atomic Invalidation**: Whenever Operations returns a provider to `DRAFT`—either by rejecting the provider with `remediable: true` or by rejecting an individual branch with `remediable: true`:
+  1. The parent provider returns to `DRAFT`.
+  2. All prior active branch approvals are atomically invalidated (`status: 'DRAFT'`).
+  3. All vetting fields on affected branches are cleared: `legalIdentityChecked = false`, `physicalLocationChecked = false`, `contactAndHoursChecked = false`, `evidenceDocumentRef = null`, `vettedByUserId = null`, `vettedAt = null`.
+  4. Branches become editable drafts.
+- **Provider Activation Guard**: Provider activation strictly checks `status === 'ACTIVE'` on at least one branch. Because approvals are wiped upon return-to-draft, Operations **cannot activate the organization using stale branch vetting** (`ACTIVE_BRANCH_REQUIRED` -> HTTP 422). Every branch must be vetted afresh after resubmission.
+
+### 13.6 Actionable Sales Correction Path & Terminal Semantics
+
+- **Remediable Branch Rejection**: When Operations rejects a branch with `remediable: true`, both the branch and its parent provider move to `DRAFT`. The rejection reason is recorded in the branch record. Because the provider is now in `DRAFT`, Sales can invoke `PATCH /api/v1/staff/providers/:id/branches/:branchId` to correct location, contact, or schedule data, and then call `POST /api/v1/staff/providers/:id/submit` to resubmit.
+- **Terminal Branch Rejection**: When a branch is rejected with `remediable: false`, its status moves to `DECOMMISSIONED`. It is a permanent operational failure for that specific address. It cannot be edited, activated, or submitted. The parent provider remains under review, but cannot be activated unless at least one valid branch is vetted and active.
+- **Draft-Only Sales Protection**: Sales agents may edit records strictly when `status === 'DRAFT'`. Editing active or pending records returns HTTP 422 `INVALID_STATE_TRANSITION`. Post-activation operational changes require pausing the entity and processing through an audited amendment workflow.
+
+### 13.7 Operational Availability Contract
+
+A workshop branch is operationally available to accept customer bookings if and only if **both** the branch and its parent organization are in `ACTIVE` status:
+
+$$\text{isBranchOperationallyAvailable} = (\text{branch.status} = \text{'ACTIVE'}) \land (\text{parent.status} = \text{'ACTIVE'})$$
+
+If either entity is paused, in review, draft, or decommissioned, the branch is unavailable.
+
+### 13.8 Concurrency, Row Locks & Parent-Before-Branch Hierarchy
+
+- **Canonical Lock Ordering**: To eliminate database deadlocks under `Read Committed` transaction isolation, all mutations enforce a strict hierarchy:
+  1. Parent provider row is locked first (`SELECT id, status, version, "submittedByUserId" FROM provider_organizations WHERE id = ... FOR UPDATE`).
+  2. Child branch row is locked second (`SELECT id, status, version, "providerOrganizationId" FROM provider_branches WHERE id = ... FOR UPDATE`).
+- **Atomic Serialization**: Competing requests on the same provider or branches serialize on the parent row lock.
+- **Optimistic Concurrency Control (CAS)**: Every mutation verifies `expectedVersion === currentVersion`. Competing or replayed requests reading a stale version roll back and return HTTP 409 `CONCURRENT_MODIFICATION`.
+
+### 13.9 Parent–Branch Ownership Guard
+
+Every endpoint operating on a branch verifies `branch.providerOrganizationId === providerId`. If the branch does not exist or belongs to a different provider organization, the route returns HTTP 404 `BRANCH_NOT_FOUND` before assessing state transitions or maker-checker rules, eliminating cross-tenant confused deputy vectors.
+
+### 13.10 Security Audit Privacy & Allowlisted Metadata
+
+- **Atomic All-or-Nothing Commit**: All database mutations and audit logging (`logAuditEvent`) execute inside the exact same interactive PostgreSQL transaction (`prisma.$transaction`). If audit writing fails, the entire transaction rolls back, guaranteeing zero partial writes or orphaned records.
+- **Privacy Protections**:
+  - Contact person names, phone numbers, and email addresses are never written to audit metadata.
+  - Raw URLs, file paths, and free-text notes are never written to audit metadata.
+  - `evidenceDocumentRef` is strictly omitted from audit metadata; it lives exclusively in the access-controlled `provider_branches` table.
+  - Rejection and pause reasons in audit metadata are restricted to allowlisted reason codes (`INCOMPLETE_DOCUMENTATION`, `INVALID_TAX_OR_CR`, `UNVERIFIED_LOCATION`, `CONTACT_UNREACHABLE`, `COMPLIANCE_HOLD`, `OPERATIONAL_HOLD`, `OTHER`).
+
+### 13.11 Failure Analysis & Operational Edge Cases
+
+1. **Input Validation Failures**:
+   - Preflight Zod schemas reject invalid coordinates, malformed tax IDs, illegal characters in evidence refs, or non-Egyptian phone numbers synchronously before database connection or lock acquisition (HTTP 400 `VALIDATION_ERROR`).
+2. **Timeout / Indeterminate Outcomes & Safe Retries**:
+   - If a client connection times out or drops while an interactive transaction is in flight, PostgreSQL terminates the backend session and automatically rolls back uncommitted changes.
+   - If the transaction successfully committed just prior to network drop, the client's retry with the same `expectedVersion` safely fails with HTTP 409 `CONCURRENT_MODIFICATION`, preventing duplicate mutations.
+3. **Process Interruption & Late Response**:
+   - If the application server process crashes mid-transaction, PostgreSQL immediately rolls back in-flight transactions upon socket closure.
+   - Late responses from stalled queries cannot result in partial database state because Prisma interactive transactions commit atomically.
+4. **Audit Write Failure**:
+   - When audit logging inside a transaction throws (e.g. disk quota exhaustion or constraint violation), the outer transaction is rolled back completely. Final persistent storage retains zero partial mutations.
+5. **No External-Provider Side Effects in PR 3A**:
+   - PR 3A operates strictly within internal PostgreSQL data boundaries. No external third-party side-effects (such as SMS dispatch, external payment capture, or webhook delivery) exist in this PR. All operational and security guarantees are database-transactional.

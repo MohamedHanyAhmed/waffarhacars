@@ -222,6 +222,39 @@ describe("Provider & Branch Validation Unit Test Suite", () => {
         evidenceDocumentRef: "",
       };
       expect(ActivateBranchSchema.safeParse(missingRef).success).toBe(false);
+
+      const baseValid = {
+        expectedVersion: 1,
+        legalIdentityChecked: true,
+        physicalLocationChecked: true,
+        contactAndHoursChecked: true,
+        evidenceDocumentRef: "DOC-EGY-2026-0914-01",
+      };
+
+      // Must reject URLs, file paths, contact info, and free-text notes
+      const urlRef = { ...baseValid, evidenceDocumentRef: "https://storage.eg/docs/cert.pdf" };
+      expect(ActivateBranchSchema.safeParse(urlRef).success).toBe(false);
+
+      const pathRef = { ...baseValid, evidenceDocumentRef: "/var/uploads/evidence/inspection.pdf" };
+      expect(ActivateBranchSchema.safeParse(pathRef).success).toBe(false);
+
+      const winPathRef = { ...baseValid, evidenceDocumentRef: "C:\\docs\\evidence\\ref.pdf" };
+      expect(ActivateBranchSchema.safeParse(winPathRef).success).toBe(false);
+
+      const emailRef = { ...baseValid, evidenceDocumentRef: "ops-inspector@autofix.eg" };
+      expect(ActivateBranchSchema.safeParse(emailRef).success).toBe(false);
+
+      const freeTextRef = {
+        ...baseValid,
+        evidenceDocumentRef: "Workshop inspected by Ahmed and verified",
+      };
+      expect(ActivateBranchSchema.safeParse(freeTextRef).success).toBe(false);
+
+      const tooShortRef = { ...baseValid, evidenceDocumentRef: "AB" };
+      expect(ActivateBranchSchema.safeParse(tooShortRef).success).toBe(false);
+
+      const tooLongRef = { ...baseValid, evidenceDocumentRef: "A".repeat(65) };
+      expect(ActivateBranchSchema.safeParse(tooLongRef).success).toBe(false);
     });
 
     it("accepts valid branch rejection with allowlisted reason code", async () => {

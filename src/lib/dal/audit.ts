@@ -263,7 +263,6 @@ const BranchActivatedMetadataSchema = z.object({
   branchId: z.string().uuid(),
   providerId: z.string().uuid(),
   cluster: CairoClusterEnum,
-  evidenceDocumentRef: z.string().max(128),
 });
 
 const BranchRejectedMetadataSchema = z.object({
@@ -378,11 +377,24 @@ export interface LogAuditEventParams {
  * 5. When tx is provided, persistence failure throws (rolling back outer transaction, e.g. provisioning).
  * 6. When tx is omitted (standalone denial logging), failure does NOT throw to ensure fail-closed denial.
  */
+export let _testAuditFailureSimulation: { shouldFail: boolean; error?: Error } | null = null;
+export function setTestAuditFailureSimulation(
+  config: { shouldFail: boolean; error?: Error } | null
+) {
+  _testAuditFailureSimulation = config;
+}
+
 export async function logAuditEvent(
   params: LogAuditEventParams,
   tx?: Prisma.TransactionClient
 ): Promise<string | null> {
   const { actorUserId, eventType, targetEntity, ipFingerprint, metadata } = params;
+
+  if (_testAuditFailureSimulation?.shouldFail) {
+    if (tx) {
+      throw _testAuditFailureSimulation.error || new Error("Simulated audit storage failure");
+    }
+  }
 
   if (!isSecurityAuditEventType(eventType)) {
     throw new Error(`INVALID_AUDIT_EVENT_TYPE: ${eventType}`);

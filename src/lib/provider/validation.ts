@@ -199,9 +199,10 @@ export const ActivateBranchSchema = z.object({
     .string()
     .trim()
     .min(3)
-    .max(128)
-    .regex(/^[A-Za-z0-9_./:-]+$/, {
-      message: "Evidence reference must be an opaque alphanumeric document or ticket identifier",
+    .max(64)
+    .regex(/^[A-Za-z0-9_-]{3,64}$/, {
+      message:
+        "Evidence reference must be an opaque alphanumeric identifier (3-64 characters, dashes and underscores allowed). URLs, file paths, contact details, and free text are prohibited.",
     }),
 });
 

@@ -34,6 +34,8 @@ import { POST as pauseProviderBranchHandler } from "@/app/api/v1/staff/ops/provi
 import { POST as resumeProviderBranchHandler } from "@/app/api/v1/staff/ops/providers/[id]/branches/[branchId]/resume/route";
 import { POST as pauseBranchHandler } from "@/app/api/v1/staff/ops/branches/[branchId]/pause/route";
 import { POST as resumeBranchHandler } from "@/app/api/v1/staff/ops/branches/[branchId]/resume/route";
+import { setTestAuditFailureSimulation } from "@/lib/dal/audit";
+import { isBranchOperationallyAvailable } from "@/lib/provider/service";
 
 const DEFAULT_TEST_DB_URL =
   process.env.DATABASE_URL ||
@@ -71,6 +73,7 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
   });
 
   beforeEach(() => {
+    setTestAuditFailureSimulation(null);
     resetServerEnvCache();
     resetAuth();
     process.env = { ...originalEnv };
@@ -87,6 +90,7 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
   });
 
   afterEach(async () => {
+    setTestAuditFailureSimulation(null);
     if (isDbReachable) {
       const prisma = getPrisma();
       try {
@@ -1345,5 +1349,667 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
       params: Promise.resolve({ branchId: branch.id }),
     });
     expect(legacyResumeRes.status).toBe(200);
+  });
+
+  it("proves stale branch approvals are invalidated when provider returns to DRAFT and cannot be reused for activation until re-vetted", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+
+    const sales = await createAuthenticatedStaffUser("SALES_AGENT", "SALES");
+    const ops = await createAuthenticatedStaffUser("OPS_SUPERVISOR", "OPERATIONS");
+    const uid = crypto.randomUUID().slice(0, 6);
+    const taxId = `${Math.floor(100000000 + Math.random() * 900000000)}`;
+
+    const prisma = getPrisma();
+    const provider = await prisma.providerOrganization.create({
+      data: {
+        nameEn: "Stale Invalidation Test",
+        nameAr: "اختبار إبطال الموافقة القديمة",
+        legalName: "Stale Invalidation SAE",
+        taxRegistrationNumber: taxId,
+        commercialRegistrationNumber: `CR-${uid}`,
+        primaryCluster: "NASR_CITY_HELIOPOLIS",
+        contactPersonName: "Hany Nabil",
+        contactEmail: "hany@stale.eg",
+        contactPhone: "+201012345678",
+        createdByUserId: sales.user.id,
+        submittedByUserId: sales.user.id,
+        status: "PENDING_REVIEW",
+        version: 2,
+        branches: {
+          create: [
+            {
+              branchCode: `BR-A-${uid}`,
+              nameEn: "Branch Alpha",
+              nameAr: "فرع ألفا",
+              cluster: "NASR_CITY_HELIOPOLIS",
+              streetAddressEn: "Address Alpha",
+              streetAddressAr: "عنوان ألفا",
+              latitude: 30.05,
+              longitude: 31.33,
+              contactPhone: "+201123456781",
+              operatingHours: [
+                { dayOfWeek: 0, openTime: "09:00", closeTime: "18:00", isClosed: false },
+              ],
+              status: "DRAFT",
+              version: 1,
+            },
+            {
+              branchCode: `BR-B-${uid}`,
+              nameEn: "Branch Beta",
+              nameAr: "فرع بيتا",
+              cluster: "NASR_CITY_HELIOPOLIS",
+              streetAddressEn: "Address Beta",
+              streetAddressAr: "عنوان بيتا",
+              latitude: 30.06,
+              longitude: 31.34,
+              contactPhone: "+201123456782",
+              operatingHours: [
+                { dayOfWeek: 0, openTime: "09:00", closeTime: "18:00", isClosed: false },
+              ],
+              status: "DRAFT",
+              version: 1,
+            },
+          ],
+        },
+      },
+      include: { branches: true },
+    });
+    createdProviderIds.push(provider.id);
+
+    const [branchA, branchB] = provider.branches;
+
+    // 1. Operations approves Branch A
+    const activateBranchAReq = new NextRequest(
+      `http://localhost:3000/api/v1/staff/ops/providers/${provider.id}/branches/${branchA.id}/activate`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: ops.cookie },
+        body: JSON.stringify({
+          expectedVersion: 1,
+          legalIdentityChecked: true,
+          physicalLocationChecked: true,
+          contactAndHoursChecked: true,
+          evidenceDocumentRef: "DOC-ALPHA-01",
+        }),
+      }
+    );
+    const activateBranchARes = await activateBranchHandler(activateBranchAReq, {
+      params: Promise.resolve({ id: provider.id, branchId: branchA.id }),
+    });
+    expect(activateBranchARes.status).toBe(200);
+
+    const dbBranchAActive = await prisma.providerBranch.findUniqueOrThrow({
+      where: { id: branchA.id },
+    });
+    expect(dbBranchAActive.status).toBe("ACTIVE");
+    expect(dbBranchAActive.legalIdentityChecked).toBe(true);
+    expect(dbBranchAActive.evidenceDocumentRef).toBe("DOC-ALPHA-01");
+    expect(dbBranchAActive.vettedByUserId).toBe(ops.user.id);
+
+    // 2. Operations rejects Branch B with remediable: true
+    const rejectBranchBReq = new NextRequest(
+      `http://localhost:3000/api/v1/staff/ops/providers/${provider.id}/branches/${branchB.id}/reject`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: ops.cookie },
+        body: JSON.stringify({
+          expectedVersion: 1,
+          remediable: true,
+          reasonCode: "UNVERIFIED_LOCATION",
+          rejectionReason: "Beta branch coordinates do not match street address.",
+        }),
+      }
+    );
+    const rejectBranchBRes = await rejectBranchHandler(rejectBranchBReq, {
+      params: Promise.resolve({ id: provider.id, branchId: branchB.id }),
+    });
+    expect(rejectBranchBRes.status).toBe(200);
+
+    // 3. Assert immediate database state: provider returns to DRAFT, Branch A approval is invalidated and vetting cleared
+    const dbProviderAfterReject = await prisma.providerOrganization.findUniqueOrThrow({
+      where: { id: provider.id },
+    });
+    expect(dbProviderAfterReject.status).toBe("DRAFT");
+    expect(dbProviderAfterReject.version).toBe(3);
+
+    const dbBranchAAfterReject = await prisma.providerBranch.findUniqueOrThrow({
+      where: { id: branchA.id },
+    });
+    expect(dbBranchAAfterReject.status).toBe("DRAFT");
+    expect(dbBranchAAfterReject.legalIdentityChecked).toBe(false);
+    expect(dbBranchAAfterReject.physicalLocationChecked).toBe(false);
+    expect(dbBranchAAfterReject.contactAndHoursChecked).toBe(false);
+    expect(dbBranchAAfterReject.evidenceDocumentRef).toBeNull();
+    expect(dbBranchAAfterReject.vettedByUserId).toBeNull();
+    expect(dbBranchAAfterReject.vettedAt).toBeNull();
+
+    const dbBranchBAfterReject = await prisma.providerBranch.findUniqueOrThrow({
+      where: { id: branchB.id },
+    });
+    expect(dbBranchBAfterReject.status).toBe("DRAFT");
+    expect(dbBranchBAfterReject.rejectionReason).toBe(
+      "Beta branch coordinates do not match street address."
+    );
+
+    // 4. Sales updates Branch B with corrected data
+    const updateBranchBReq = new NextRequest(
+      `http://localhost:3000/api/v1/staff/providers/${provider.id}/branches/${branchB.id}`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json", cookie: sales.cookie },
+        body: JSON.stringify({
+          expectedVersion: dbBranchBAfterReject.version,
+          streetAddressEn: "Corrected Address Beta 456",
+        }),
+      }
+    );
+    const updateBranchBRes = await updateBranchHandler(updateBranchBReq, {
+      params: Promise.resolve({ id: provider.id, branchId: branchB.id }),
+    });
+    expect(updateBranchBRes.status).toBe(200);
+
+    // 5. Sales resubmits provider for review
+    const resubmitReq = new NextRequest(
+      `http://localhost:3000/api/v1/staff/providers/${provider.id}/submit`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: sales.cookie },
+        body: JSON.stringify({ expectedVersion: dbProviderAfterReject.version }),
+      }
+    );
+    const resubmitRes = await submitProviderHandler(resubmitReq, {
+      params: Promise.resolve({ id: provider.id }),
+    });
+    expect(resubmitRes.status).toBe(200);
+
+    // 6. Operations attempts to activate provider directly without re-vetting Branch A
+    // Must fail with HTTP 422 ACTIVE_BRANCH_REQUIRED because prior approval was invalidated
+    const staleActivateProviderReq = new NextRequest(
+      `http://localhost:3000/api/v1/staff/ops/providers/${provider.id}/activate`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: ops.cookie },
+        body: JSON.stringify({ expectedVersion: 4 }),
+      }
+    );
+    const staleActivateProviderRes = await activateProviderHandler(staleActivateProviderReq, {
+      params: Promise.resolve({ id: provider.id }),
+    });
+    expect(staleActivateProviderRes.status).toBe(422);
+    const staleBody = await staleActivateProviderRes.json();
+    expect(staleBody.error).toBe("ACTIVE_BRANCH_REQUIRED");
+
+    // 7. Operations re-vets Branch A afresh
+    const revetBranchAReq = new NextRequest(
+      `http://localhost:3000/api/v1/staff/ops/providers/${provider.id}/branches/${branchA.id}/activate`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: ops.cookie },
+        body: JSON.stringify({
+          expectedVersion: dbBranchAAfterReject.version,
+          legalIdentityChecked: true,
+          physicalLocationChecked: true,
+          contactAndHoursChecked: true,
+          evidenceDocumentRef: "DOC-ALPHA-02",
+        }),
+      }
+    );
+    const revetBranchARes = await activateBranchHandler(revetBranchAReq, {
+      params: Promise.resolve({ id: provider.id, branchId: branchA.id }),
+    });
+    expect(revetBranchARes.status).toBe(200);
+
+    // 8. Now Operations activates the provider successfully
+    const finalActivateProviderReq = new NextRequest(
+      `http://localhost:3000/api/v1/staff/ops/providers/${provider.id}/activate`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: ops.cookie },
+        body: JSON.stringify({ expectedVersion: 4 }),
+      }
+    );
+    const finalActivateProviderRes = await activateProviderHandler(finalActivateProviderReq, {
+      params: Promise.resolve({ id: provider.id }),
+    });
+    expect(finalActivateProviderRes.status).toBe(200);
+
+    // 9. Final persistent database assertions
+    const finalProvider = await prisma.providerOrganization.findUniqueOrThrow({
+      where: { id: provider.id },
+    });
+    expect(finalProvider.status).toBe("ACTIVE");
+
+    const finalBranchA = await prisma.providerBranch.findUniqueOrThrow({
+      where: { id: branchA.id },
+    });
+    expect(finalBranchA.status).toBe("ACTIVE");
+    expect(finalBranchA.evidenceDocumentRef).toBe("DOC-ALPHA-02");
+    expect(isBranchOperationallyAvailable(finalBranchA.status, finalProvider.status)).toBe(true);
+
+    const finalBranchB = await prisma.providerBranch.findUniqueOrThrow({
+      where: { id: branchB.id },
+    });
+    expect(finalBranchB.status).toBe("DRAFT");
+    expect(isBranchOperationallyAvailable(finalBranchB.status, finalProvider.status)).toBe(false);
+  });
+
+  it("proves remediable branch rejection returns provider to DRAFT and enables successful Sales correction and resubmission", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+
+    const sales = await createAuthenticatedStaffUser("SALES_AGENT", "SALES");
+    const ops = await createAuthenticatedStaffUser("OPS_SUPERVISOR", "OPERATIONS");
+    const uid = crypto.randomUUID().slice(0, 6);
+    const taxId = `${Math.floor(100000000 + Math.random() * 900000000)}`;
+
+    const prisma = getPrisma();
+    const provider = await prisma.providerOrganization.create({
+      data: {
+        nameEn: "Remediable Correction Test",
+        nameAr: "اختبار تصحيح الفرع المرفوض",
+        legalName: "Remediable Correction SAE",
+        taxRegistrationNumber: taxId,
+        commercialRegistrationNumber: `CR-${uid}`,
+        primaryCluster: "NASR_CITY_HELIOPOLIS",
+        contactPersonName: "Kareem Tarek",
+        contactEmail: "kareem@correct.eg",
+        contactPhone: "+201012345678",
+        createdByUserId: sales.user.id,
+        submittedByUserId: sales.user.id,
+        status: "PENDING_REVIEW",
+        version: 2,
+        branches: {
+          create: {
+            branchCode: `BR-${uid}`,
+            nameEn: "Correction Branch",
+            nameAr: "فرع التصحيح",
+            cluster: "NASR_CITY_HELIOPOLIS",
+            streetAddressEn: "Unclear Street Address",
+            streetAddressAr: "عنوان غير واضح",
+            latitude: 30.05,
+            longitude: 31.33,
+            contactPhone: "+201123456789",
+            operatingHours: [
+              { dayOfWeek: 0, openTime: "09:00", closeTime: "18:00", isClosed: false },
+            ],
+            status: "DRAFT",
+            version: 1,
+          },
+        },
+      },
+      include: { branches: true },
+    });
+    createdProviderIds.push(provider.id);
+    const branch = provider.branches[0];
+
+    // 1. Operations rejects branch remediably
+    const rejectReq = new NextRequest(
+      `http://localhost:3000/api/v1/staff/ops/providers/${provider.id}/branches/${branch.id}/reject`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: ops.cookie },
+        body: JSON.stringify({
+          expectedVersion: 1,
+          remediable: true,
+          reasonCode: "UNVERIFIED_LOCATION",
+          rejectionReason: "Street address is missing building number and landmark.",
+        }),
+      }
+    );
+    const rejectRes = await rejectBranchHandler(rejectReq, {
+      params: Promise.resolve({ id: provider.id, branchId: branch.id }),
+    });
+    expect(rejectRes.status).toBe(200);
+
+    // Assert both provider and branch are in DRAFT
+    const dbProviderDraft = await prisma.providerOrganization.findUniqueOrThrow({
+      where: { id: provider.id },
+    });
+    expect(dbProviderDraft.status).toBe("DRAFT");
+    expect(dbProviderDraft.version).toBe(3);
+
+    const dbBranchDraft = await prisma.providerBranch.findUniqueOrThrow({
+      where: { id: branch.id },
+    });
+    expect(dbBranchDraft.status).toBe("DRAFT");
+    expect(dbBranchDraft.version).toBe(2);
+    expect(dbBranchDraft.rejectionReason).toBe(
+      "Street address is missing building number and landmark."
+    );
+
+    // 2. Sales corrects the branch address
+    const salesEditReq = new NextRequest(
+      `http://localhost:3000/api/v1/staff/providers/${provider.id}/branches/${branch.id}`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json", cookie: sales.cookie },
+        body: JSON.stringify({
+          expectedVersion: 2,
+          streetAddressEn: "25 Abbas El Akkad St, Building 4",
+          landmarkEn: "Opposite Gas Station",
+        }),
+      }
+    );
+    const salesEditRes = await updateBranchHandler(salesEditReq, {
+      params: Promise.resolve({ id: provider.id, branchId: branch.id }),
+    });
+    expect(salesEditRes.status).toBe(200);
+
+    // 3. Sales resubmits provider
+    const resubmitReq = new NextRequest(
+      `http://localhost:3000/api/v1/staff/providers/${provider.id}/submit`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: sales.cookie },
+        body: JSON.stringify({ expectedVersion: 3 }),
+      }
+    );
+    const resubmitRes = await submitProviderHandler(resubmitReq, {
+      params: Promise.resolve({ id: provider.id }),
+    });
+    expect(resubmitRes.status).toBe(200);
+
+    // 4. Operations approves branch with opaque evidence doc ref
+    const activateBranchReq = new NextRequest(
+      `http://localhost:3000/api/v1/staff/ops/providers/${provider.id}/branches/${branch.id}/activate`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: ops.cookie },
+        body: JSON.stringify({
+          expectedVersion: 3,
+          legalIdentityChecked: true,
+          physicalLocationChecked: true,
+          contactAndHoursChecked: true,
+          evidenceDocumentRef: "DOC-CORRECTED-99",
+        }),
+      }
+    );
+    const activateBranchRes = await activateBranchHandler(activateBranchReq, {
+      params: Promise.resolve({ id: provider.id, branchId: branch.id }),
+    });
+    expect(activateBranchRes.status).toBe(200);
+
+    // 5. Operations activates provider
+    const activateProviderReq = new NextRequest(
+      `http://localhost:3000/api/v1/staff/ops/providers/${provider.id}/activate`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: ops.cookie },
+        body: JSON.stringify({ expectedVersion: 4 }),
+      }
+    );
+    const activateProviderRes = await activateProviderHandler(activateProviderReq, {
+      params: Promise.resolve({ id: provider.id }),
+    });
+    expect(activateProviderRes.status).toBe(200);
+
+    // 6. Direct database state assertions
+    const finalProvider = await prisma.providerOrganization.findUniqueOrThrow({
+      where: { id: provider.id },
+    });
+    expect(finalProvider.status).toBe("ACTIVE");
+
+    const finalBranch = await prisma.providerBranch.findUniqueOrThrow({
+      where: { id: branch.id },
+    });
+    expect(finalBranch.status).toBe("ACTIVE");
+    expect(finalBranch.streetAddressEn).toBe("25 Abbas El Akkad St, Building 4");
+    expect(finalBranch.evidenceDocumentRef).toBe("DOC-CORRECTED-99");
+    expect(isBranchOperationallyAvailable(finalBranch.status, finalProvider.status)).toBe(true);
+  });
+
+  it("proves competing state changes serialize safely on parent row lock using deterministic database barrier", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+
+    const sales = await createAuthenticatedStaffUser("SALES_AGENT", "SALES");
+    const uid = crypto.randomUUID().slice(0, 6);
+    const taxId = `${Math.floor(100000000 + Math.random() * 900000000)}`;
+
+    const prisma = getPrisma();
+    const provider = await prisma.providerOrganization.create({
+      data: {
+        nameEn: "Barrier Test Provider",
+        nameAr: "مزود حاجز التزامن",
+        legalName: "Barrier Test SAE",
+        taxRegistrationNumber: taxId,
+        commercialRegistrationNumber: `CR-${uid}`,
+        primaryCluster: "NASR_CITY_HELIOPOLIS",
+        contactPersonName: "Barrier Contact",
+        contactEmail: "barrier@test.eg",
+        contactPhone: "+201012345678",
+        createdByUserId: sales.user.id,
+        status: "DRAFT",
+        version: 1,
+      },
+    });
+    createdProviderIds.push(provider.id);
+
+    // Dedicated database client to hold an exclusive row lock as a deterministic barrier
+    const barrierClient = new pg.Client({ connectionString: DEFAULT_TEST_DB_URL });
+    await barrierClient.connect();
+    await barrierClient.query("BEGIN");
+    await barrierClient.query("SELECT id FROM provider_organizations WHERE id = $1 FOR UPDATE", [
+      provider.id,
+    ]);
+
+    // Dispatch competing request expecting version 1
+    // The route handler enters Prisma interactive transaction and attempts to acquire SELECT ... FOR UPDATE
+    // PostgreSQL blocks the route handler's transaction until barrierClient commits
+    const competingReq = new NextRequest(
+      `http://localhost:3000/api/v1/staff/providers/${provider.id}`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json", cookie: sales.cookie },
+        body: JSON.stringify({ expectedVersion: 1, nameEn: "Blocked Competing Name" }),
+      }
+    );
+    const competingPromise = updateProviderHandler(competingReq, {
+      params: Promise.resolve({ id: provider.id }),
+    });
+
+    // While route handler is blocked on row lock, advance version to 2 on the barrier connection and commit
+    await barrierClient.query("UPDATE provider_organizations SET version = 2 WHERE id = $1", [
+      provider.id,
+    ]);
+    await barrierClient.query("COMMIT");
+    await barrierClient.end();
+
+    // The route handler unblocks, reads the newly committed version 2, detects CAS conflict (1 !== 2)
+    const competingRes = await competingPromise;
+    expect(competingRes.status).toBe(409);
+    const competingBody = await competingRes.json();
+    expect(competingBody.error).toBe("CONCURRENT_MODIFICATION");
+
+    // Final database assertion: version is 2, name was not overwritten
+    const finalProvider = await prisma.providerOrganization.findUniqueOrThrow({
+      where: { id: provider.id },
+    });
+    expect(finalProvider.version).toBe(2);
+    expect(finalProvider.nameEn).toBe("Barrier Test Provider");
+  });
+
+  it("proves duplicate or stale requests with outdated expectedVersion are rejected with HTTP 409", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+
+    const sales = await createAuthenticatedStaffUser("SALES_AGENT", "SALES");
+    const uid = crypto.randomUUID().slice(0, 6);
+    const taxId = `${Math.floor(100000000 + Math.random() * 900000000)}`;
+
+    const prisma = getPrisma();
+    const provider = await prisma.providerOrganization.create({
+      data: {
+        nameEn: "Original Stale Test Name",
+        nameAr: "الاسم الأصلي",
+        legalName: "Stale Test SAE",
+        taxRegistrationNumber: taxId,
+        commercialRegistrationNumber: `CR-${uid}`,
+        primaryCluster: "NASR_CITY_HELIOPOLIS",
+        contactPersonName: "Stale Contact",
+        contactEmail: "stale@test.eg",
+        contactPhone: "+201012345678",
+        createdByUserId: sales.user.id,
+        status: "DRAFT",
+        version: 1,
+      },
+    });
+    createdProviderIds.push(provider.id);
+
+    // 1. Initial valid update with expectedVersion: 1 -> succeeds, version becomes 2
+    const firstReq = new NextRequest(
+      `http://localhost:3000/api/v1/staff/providers/${provider.id}`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json", cookie: sales.cookie },
+        body: JSON.stringify({ expectedVersion: 1, nameEn: "First Legitimate Update" }),
+      }
+    );
+    const firstRes = await updateProviderHandler(firstReq, {
+      params: Promise.resolve({ id: provider.id }),
+    });
+    expect(firstRes.status).toBe(200);
+
+    const dbAfterFirst = await prisma.providerOrganization.findUniqueOrThrow({
+      where: { id: provider.id },
+    });
+    expect(dbAfterFirst.version).toBe(2);
+    expect(dbAfterFirst.nameEn).toBe("First Legitimate Update");
+
+    // 2. Duplicate / replayed request with outdated expectedVersion: 1 -> rejected with HTTP 409
+    const duplicateReq = new NextRequest(
+      `http://localhost:3000/api/v1/staff/providers/${provider.id}`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json", cookie: sales.cookie },
+        body: JSON.stringify({ expectedVersion: 1, nameEn: "Replayed Stale Update" }),
+      }
+    );
+    const duplicateRes = await updateProviderHandler(duplicateReq, {
+      params: Promise.resolve({ id: provider.id }),
+    });
+    expect(duplicateRes.status).toBe(409);
+    const duplicateBody = await duplicateRes.json();
+    expect(duplicateBody.error).toBe("CONCURRENT_MODIFICATION");
+
+    // Final database assertion: version remains 2, name is unchanged from first update
+    const finalProvider = await prisma.providerOrganization.findUniqueOrThrow({
+      where: { id: provider.id },
+    });
+    expect(finalProvider.version).toBe(2);
+    expect(finalProvider.nameEn).toBe("First Legitimate Update");
+  });
+
+  it("proves audit write failure rolls back entire interactive transaction leaving zero partial mutation in database", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+
+    const sales = await createAuthenticatedStaffUser("SALES_AGENT", "SALES");
+    const ops = await createAuthenticatedStaffUser("OPS_SUPERVISOR", "OPERATIONS");
+    const uid = crypto.randomUUID().slice(0, 6);
+    const taxId = `${Math.floor(100000000 + Math.random() * 900000000)}`;
+
+    const prisma = getPrisma();
+    const provider = await prisma.providerOrganization.create({
+      data: {
+        nameEn: "Audit Failure Rollback Provider",
+        nameAr: "مزود فشل التدقيق",
+        legalName: "Audit Failure SAE",
+        taxRegistrationNumber: taxId,
+        commercialRegistrationNumber: `CR-${uid}`,
+        primaryCluster: "NASR_CITY_HELIOPOLIS",
+        contactPersonName: "Audit Tester",
+        contactEmail: "audit@test.eg",
+        contactPhone: "+201012345678",
+        createdByUserId: sales.user.id,
+        submittedByUserId: sales.user.id,
+        status: "PENDING_REVIEW",
+        version: 2,
+        branches: {
+          create: {
+            branchCode: `BR-${uid}`,
+            nameEn: "Audit Branch",
+            nameAr: "فرع التدقيق",
+            cluster: "NASR_CITY_HELIOPOLIS",
+            streetAddressEn: "Audit Address 123",
+            streetAddressAr: "عنوان التدقيق",
+            latitude: 30.05,
+            longitude: 31.33,
+            contactPhone: "+201123456789",
+            operatingHours: [
+              { dayOfWeek: 0, openTime: "09:00", closeTime: "18:00", isClosed: false },
+            ],
+            status: "DRAFT",
+            version: 1,
+          },
+        },
+      },
+      include: { branches: true },
+    });
+    createdProviderIds.push(provider.id);
+    const branch = provider.branches[0];
+
+    // Inject simulated audit write failure
+    setTestAuditFailureSimulation({
+      shouldFail: true,
+      error: new Error("Simulated audit write failure: PostgreSQL disk quota exceeded"),
+    });
+
+    try {
+      const activateReq = new NextRequest(
+        `http://localhost:3000/api/v1/staff/ops/providers/${provider.id}/branches/${branch.id}/activate`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json", cookie: ops.cookie },
+          body: JSON.stringify({
+            expectedVersion: 1,
+            legalIdentityChecked: true,
+            physicalLocationChecked: true,
+            contactAndHoursChecked: true,
+            evidenceDocumentRef: "DOC-ROLLBACK-01",
+          }),
+        }
+      );
+      const activateRes = await activateBranchHandler(activateReq, {
+        params: Promise.resolve({ id: provider.id, branchId: branch.id }),
+      });
+
+      // Route handler catches error and returns HTTP 500 INTERNAL_ERROR
+      expect(activateRes.status).toBe(500);
+      const resBody = await activateRes.json();
+      expect(resBody.error).toBe("INTERNAL_ERROR");
+    } finally {
+      setTestAuditFailureSimulation(null);
+    }
+
+    // Inspect database directly: assert zero partial mutations were persisted
+    const dbBranch = await prisma.providerBranch.findUniqueOrThrow({
+      where: { id: branch.id },
+    });
+    expect(dbBranch.status).toBe("DRAFT");
+    expect(dbBranch.version).toBe(1);
+    expect(dbBranch.legalIdentityChecked).toBe(false);
+    expect(dbBranch.physicalLocationChecked).toBe(false);
+    expect(dbBranch.contactAndHoursChecked).toBe(false);
+    expect(dbBranch.evidenceDocumentRef).toBeNull();
+    expect(dbBranch.vettedByUserId).toBeNull();
+    expect(dbBranch.vettedAt).toBeNull();
+
+    const dbProvider = await prisma.providerOrganization.findUniqueOrThrow({
+      where: { id: provider.id },
+    });
+    expect(dbProvider.status).toBe("PENDING_REVIEW");
+    expect(dbProvider.version).toBe(2);
+
+    const auditCount = await prisma.securityAuditEvent.count({
+      where: { targetEntity: `provider_branch:${branch.id}` },
+    });
+    expect(auditCount).toBe(0);
   });
 });
