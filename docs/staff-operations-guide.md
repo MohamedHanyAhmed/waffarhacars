@@ -217,18 +217,53 @@ DELETE FROM "user" WHERE "id" = '<uuid>';
 
 ## 9. Controlled, Audited Recovery Procedures for Inconsistent Role States
 
-When provisioning encounters an existing membership with abnormal or corrupted role assignments, it fails closed to prevent silent privilege escalation or broken invariants:
+When provisioning encounters an existing membership with abnormal or corrupted role assignments, it fails closed to prevent silent privilege escalation or broken invariants.
+
+> [!CAUTION]
+> **Zero Unaudited Privilege Grants:** Direct, manual modification of database tables without auditing is strictly prohibited. Any emergency administrative reconciliation must be executed within a **single atomic transaction** that records the authorized administrator actor ID, the role change, and the corresponding allowlisted `STAFF_ROLE_ASSIGNED` security audit event. Dedicated, audited administrative tooling will be introduced in subsequent milestones (deferred to PR 3).
 
 ### A. Zero Active Roles (`STAFF_ROLE_RECONCILIATION_REQUIRED`)
 
 - **Condition:** An `InternalStaffMembership` exists for the user and employee number, but `internal_role_assignments` contains 0 active roles (`isActive: true`).
 - **Cause:** Manual role deactivation, incomplete administrative change, or legacy migration gap.
-- **Recovery Procedure:**
+- **Audited Recovery Procedure:**
   1. A platform administrator investigates the staff member's approved employment authorization and department.
-  2. The administrator inserts or reactivates exactly one valid role assignment with `assignedBy = 'ADMIN_RECONCILIATION'`:
+  2. The administrator executes a single controlled transaction inserting the single approved role and the mandatory audit event:
      ```sql
-     INSERT INTO "internal_role_assignments" ("id", "staffMembershipId", "role", "isActive", "assignedBy", "assignedAt", "createdAt", "updatedAt")
-     VALUES (gen_random_uuid(), '<membership-id>', 'OPS_SUPERVISOR', true, 'ADMIN_RECONCILIATION', NOW(), NOW(), NOW());
+     BEGIN;
+
+     -- 1. Insert exactly one active role assignment
+     INSERT INTO "internal_role_assignments" (
+       "id", "staffMembershipId", "role", "isActive", "assignedBy", "assignedAt", "createdAt", "updatedAt"
+     ) VALUES (
+       gen_random_uuid(),
+       '<membership-id>',
+       'OPS_SUPERVISOR',
+       true,
+       '<admin-employee-number>',
+       NOW(),
+       NOW(),
+       NOW()
+     );
+
+     -- 2. Concurrently record the mandatory audit event within the same transaction
+     INSERT INTO "security_audit_events" (
+       "id", "actorUserId", "eventType", "targetEntity", "ipFingerprint", "metadata", "timestamp"
+     ) VALUES (
+       gen_random_uuid(),
+       '<admin-user-id>',
+       'STAFF_ROLE_ASSIGNED',
+       'staff_membership:<membership-id>',
+       NULL,
+       jsonb_build_object(
+         'action', 'ASSIGN_ROLE',
+         'role', 'OPS_SUPERVISOR',
+         'assignedBy', '<admin-employee-number>'
+       ),
+       NOW()
+     );
+
+     COMMIT;
      ```
   3. Re-running `npm run staff:provision` with matching identity and role attributes will then complete idempotently.
 
@@ -236,22 +271,51 @@ When provisioning encounters an existing membership with abnormal or corrupted r
 
 - **Condition:** An `InternalStaffMembership` has more than 1 active role (`isActive: true`).
 - **Cause:** Direct database manipulation or concurrency anomaly violating the single-role invariant.
-- **Recovery Procedure:**
-  1. Review active roles:
+- **Audited Recovery Procedure:**
+  1. Read-only review of currently active roles:
      ```sql
-     SELECT id, role, "assignedAt", "assignedBy" FROM "internal_role_assignments" WHERE "staffMembershipId" = '<membership-id>' AND "isActive" = true;
+     SELECT id, role, "assignedAt", "assignedBy"
+     FROM "internal_role_assignments"
+     WHERE "staffMembershipId" = '<membership-id>' AND "isActive" = true;
      ```
-  2. Mark outdated or extraneous roles inactive so only the approved single role remains active:
+  2. Execute a single controlled transaction deactivating superseded roles and recording the audit event:
      ```sql
-     UPDATE "internal_role_assignments" SET "isActive" = false, "updatedAt" = NOW() WHERE "id" = '<obsolete-role-assignment-id>';
+     BEGIN;
+
+     -- 1. Mark superseded / outdated roles inactive
+     UPDATE "internal_role_assignments"
+     SET "isActive" = false, "updatedAt" = NOW()
+     WHERE "staffMembershipId" = '<membership-id>'
+       AND "id" != '<approved-single-role-assignment-id>'
+       AND "isActive" = true;
+
+     -- 2. Concurrently record the mandatory audit event within the same transaction
+     INSERT INTO "security_audit_events" (
+       "id", "actorUserId", "eventType", "targetEntity", "ipFingerprint", "metadata", "timestamp"
+     ) VALUES (
+       gen_random_uuid(),
+       '<admin-user-id>',
+       'STAFF_ROLE_ASSIGNED',
+       'staff_membership:<membership-id>',
+       NULL,
+       jsonb_build_object(
+         'action', 'ASSIGN_ROLE',
+         'role', '<approved-role>',
+         'previousRole', '<revoked-role>',
+         'assignedBy', '<admin-employee-number>'
+       ),
+       NOW()
+     );
+
+     COMMIT;
      ```
   3. Re-run provisioning to verify idempotent resolution.
 
 ### C. Ambiguous Transaction State (`PROVISIONING_AMBIGUOUS_STATE`)
 
-- **Condition:** A network timeout, database disconnect, or runtime error occurred during provisioning where the interactive transaction committed or left indeterminate state.
-- **State Preservation Invariant:** The provisioning engine strictly **preserves** all database rows and never issues automated cascade deletions on ambiguous state.
-- **Recovery Procedure:**
+- **Condition:** A network timeout, database disconnect, or indeterminate error occurred during provisioning where transaction outcome is unconfirmed or was in flight.
+- **State Preservation Invariant:** The provisioning engine strictly **preserves** all database rows and never issues automated cascade deletions on indeterminate state. An immediate "no rows found" query is never treated as proof of rollback.
+- **Read-Only Inspection & Resolution:**
   1. Inspect the state using the reported `createdUserId`:
      ```sql
      SELECT u.id, m.id as membership_id, m."employeeNumber", r.role, r."isActive"
@@ -260,8 +324,8 @@ When provisioning encounters an existing membership with abnormal or corrupted r
      LEFT JOIN "internal_role_assignments" r ON r."staffMembershipId" = m.id
      WHERE u.id = '<createdUserId>';
      ```
-  2. If the records are complete and valid, re-running provisioning with identical attributes will succeed idempotently.
-  3. If partial records exist (e.g. membership exists but role assignment failed), complete the missing record under an audited change ticket before retrying.
+  2. If the records are complete and valid, re-running provisioning with identical attributes will succeed idempotently without modifying state.
+  3. If partial records exist (e.g. membership exists but role assignment is missing), complete the missing record within an audited transaction under an authorized change ticket before retrying.
 
 ---
 

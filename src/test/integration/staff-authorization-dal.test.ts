@@ -4,7 +4,11 @@ import crypto from "node:crypto";
 import { getPrisma, disconnectDb } from "@/lib/db";
 import { resetAuth } from "@/lib/auth";
 import { resetServerEnvCache } from "@/lib/env";
-import { provisionStaffMember, ProvisioningError } from "@/lib/staff/provisioning";
+import {
+  provisionStaffMember,
+  ProvisioningError,
+  ProvisioningOperationalError,
+} from "@/lib/staff/provisioning";
 import { assertStaffPermission, assertAuthenticated, AuthorizationError } from "@/lib/dal";
 import { logAuditEvent, createAuditFingerprint } from "@/lib/dal/audit";
 import { handleAuth } from "@/app/api/auth/[...all]/route";
@@ -31,6 +35,11 @@ function extractCookieHeader(response: Response): string {
     .map((sc) => sc.split(";")[0].trim())
     .filter((c) => c && !c.endsWith("="))
     .join("; ");
+}
+
+function createSignedSessionCookie(token: string, secret: string = TEST_SECRET): string {
+  const signature = crypto.createHmac("sha256", secret).update(token).digest("base64");
+  return `better-auth.session_token=${encodeURIComponent(`${token}.${signature}`)}`;
 }
 
 const DEFAULT_TEST_DB_URL =
@@ -634,6 +643,63 @@ describe("Central Authorization DAL & Security Audit PostgreSQL Integration Suit
     expect(finalCount).toBe(initialCount);
   });
 
+  it("proves repeated and concurrent requests with a real authenticated customer session produce zero database audit rows", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+
+    await ensureBootstrapped();
+    const prisma = getPrisma();
+
+    // 1. Create a real authenticated customer user (no staff membership)
+    const customerId = crypto.randomUUID().slice(0, 8);
+    const customerEmail = `customer_${customerId}@example.com`.toLowerCase();
+    createdUserEmails.push(customerEmail);
+
+    const customerUser = await prisma.user.create({
+      data: {
+        email: customerEmail,
+        name: `Customer ${customerId}`,
+        emailVerified: true,
+      },
+    });
+
+    const sessionToken = crypto.randomUUID();
+    await prisma.session.create({
+      data: {
+        userId: customerUser.id,
+        token: sessionToken,
+        expiresAt: new Date(Date.now() + 86400000),
+        lastActivityAt: new Date(),
+      },
+    });
+
+    const customerCookie = createSignedSessionCookie(sessionToken);
+    const initialCount = await prisma.securityAuditEvent.count();
+
+    // 2. Fire repeated and concurrent requests with this real customer session
+    const customerRequests = Array.from({ length: 20 }, (_, idx) => {
+      const headers = new Headers({
+        cookie: customerCookie,
+        "x-forwarded-for": `198.51.100.${idx}`,
+        "user-agent": `CustomerFloodTest/${idx}`,
+      });
+      return assertStaffPermission(headers, "staff:read").catch((err) => err);
+    });
+
+    const results = await Promise.all(customerRequests);
+    for (const res of results) {
+      expect(res).toBeInstanceOf(AuthorizationError);
+      expect((res as AuthorizationError).status).toBe(403);
+      expect((res as AuthorizationError).code).toBe("FORBIDDEN");
+      expect((res as AuthorizationError).message).toBe("Not authorized for staff operations");
+    }
+
+    // 3. Assert zero new audit rows persisted for non-staff user
+    const finalCount = await prisma.securityAuditEvent.count();
+    expect(finalCount).toBe(initialCount);
+  });
+
   it("proves audit log strips embedded PII, credentials, URLs, and malformed targets in persisted PostgreSQL rows", async () => {
     if (!isDbReachable) {
       throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
@@ -927,6 +993,97 @@ describe("Central Authorization DAL & Security Audit PostgreSQL Integration Suit
 
     const audit = await prisma.securityAuditEvent.findFirst({
       where: { actorUserId: res.userId, eventType: "STAFF_PROVISIONED" },
+    });
+    expect(audit).toBeDefined();
+    expect(audit?.targetEntity).toBe(`staff_membership:${membership!.id}`);
+  });
+
+  it("proves in-flight transaction with indeterminate error preserves user without deletion even when initial query finds zero rows", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+
+    await ensureBootstrapped();
+    const staff = generateStaffData("inflight_preserve");
+
+    let resolvePause: () => void;
+    const pausePromise = new Promise<void>((r) => {
+      resolvePause = r;
+    });
+
+    let resolveReachedPause: () => void;
+    const reachedPausePromise = new Promise<void>((r) => {
+      resolveReachedPause = r;
+    });
+
+    // 1. Launch provisioning with controlled in-flight commit hook
+    const provisioningPromise = provisionStaffMember(
+      {
+        email: staff.email,
+        fullName: staff.fullName,
+        employeeNumber: staff.employeeNumber,
+        department: "OPERATIONS",
+        role: "OPS_SUPERVISOR",
+        password: staff.temporaryPassword,
+      },
+      {
+        _testInFlightCommit: {
+          pauseBeforeCommit: async () => {
+            resolveReachedPause();
+            await pausePromise;
+          },
+          waitForPause: async () => {
+            await reachedPausePromise;
+          },
+        },
+      }
+    );
+
+    // 2. Assert provisionStaffMember throws PROVISIONING_AMBIGUOUS_STATE
+    // While transaction was paused uncommitted, reconciliation query saw 0 rows.
+    // Because rollback was NOT positively known, automated cleanup did NOT delete the user.
+    try {
+      await provisioningPromise;
+      expect.unreachable("Should have thrown ProvisioningOperationalError");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ProvisioningOperationalError);
+      const opErr = err as ProvisioningOperationalError;
+      expect(opErr.code).toBe("PROVISIONING_AMBIGUOUS_STATE");
+      // Assert error message is sanitized and opaque with zero database exception details
+      expect(opErr.message).not.toContain("Error:");
+      expect(opErr.message).not.toContain("Prisma");
+      expect(opErr.message).not.toContain("SELECT");
+      expect(opErr.message).not.toContain("INDETERMINATE_IN_FLIGHT_TRANSACTION_ERROR");
+    }
+
+    // 3. Resume the in-flight transaction to allow it to commit to PostgreSQL
+    resolvePause!();
+
+    // Small delay to allow the background transaction commit to complete
+    await new Promise((r) => setTimeout(r, 200));
+
+    // 4. Directly inspect final PostgreSQL state:
+    // Assert user, membership, role assignment, and audit records exist and were NOT cascade-deleted
+    const prisma = getPrisma();
+    const user = await prisma.user.findUnique({
+      where: { email: staff.email.toLowerCase() },
+    });
+    expect(user).toBeDefined();
+
+    const membership = await prisma.internalStaffMembership.findUnique({
+      where: { userId: user!.id },
+    });
+    expect(membership).toBeDefined();
+    expect(membership?.employeeNumber).toBe(staff.employeeNumber);
+
+    const roles = await prisma.internalRoleAssignment.findMany({
+      where: { staffMembershipId: membership!.id, isActive: true },
+    });
+    expect(roles).toHaveLength(1);
+    expect(roles[0].role).toBe("OPS_SUPERVISOR");
+
+    const audit = await prisma.securityAuditEvent.findFirst({
+      where: { actorUserId: user!.id, eventType: "STAFF_PROVISIONED" },
     });
     expect(audit).toBeDefined();
     expect(audit?.targetEntity).toBe(`staff_membership:${membership!.id}`);

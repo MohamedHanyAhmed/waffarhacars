@@ -3,7 +3,7 @@ import { z } from "zod";
 import { betterAuth } from "better-auth";
 import { getAuthOptions } from "@/lib/auth";
 import { getPrisma, getPool } from "@/lib/db";
-import type { StaffDepartment, StaffRole } from "@/generated/prisma/client";
+import { Prisma, type StaffDepartment, type StaffRole } from "@/generated/prisma/client";
 import { DEPARTMENT_ROLE_MAP, isRoleCompatibleWithDepartment } from "@/lib/dal/permissions";
 
 export class ProvisioningError extends Error {
@@ -81,6 +81,27 @@ export interface ProvisionStaffOptions {
    * simulating network partition or response acknowledgment loss.
    */
   _testPostCommitError?: boolean;
+  /**
+   * Deterministic test hook to control commit/reconciliation query ordering.
+   * Simulates an in-flight transaction where reconciliation queries execute before
+   * the in-flight transaction completes commit on the server.
+   */
+  _testInFlightCommit?: {
+    pauseBeforeCommit: () => Promise<void>;
+    waitForPause: () => Promise<void>;
+  };
+}
+
+function isPositivelyKnownRollback(error: unknown, txCallbackCompleted: boolean): boolean {
+  if (txCallbackCompleted) {
+    // Callback completed; commit was attempted. Outcome is unknown if an error occurred.
+    return false;
+  }
+  if (error instanceof Prisma.PrismaClientKnownRequestError) {
+    const knownRollbackCodes = ["P2002", "P2003", "P2004", "P2034"];
+    return knownRollbackCodes.includes(error.code);
+  }
+  return false;
 }
 
 export async function provisionStaffMember(
@@ -279,9 +300,11 @@ export async function provisionStaffMember(
       );
     }
 
+    let txCallbackCompleted = false;
+
     // Step B: Interactive transaction creating InternalStaffMembership, InternalRoleAssignment, and SecurityAuditEvent
     try {
-      const { membership, roleAssignment } = await prisma.$transaction(async (tx) => {
+      const txPromise = prisma.$transaction(async (tx) => {
         const m = await tx.internalStaffMembership.create({
           data: {
             userId: createdUserId!,
@@ -317,8 +340,21 @@ export async function provisionStaffMember(
           },
         });
 
+        if (options?._testInFlightCommit) {
+          await options._testInFlightCommit.pauseBeforeCommit();
+        }
+
+        txCallbackCompleted = true;
         return { membership: m, roleAssignment: ra };
       });
+
+      const { membership, roleAssignment } = await (async () => {
+        if (options?._testInFlightCommit) {
+          await options._testInFlightCommit.waitForPause();
+          throw new Error("INDETERMINATE_IN_FLIGHT_TRANSACTION_ERROR");
+        }
+        return await txPromise;
+      })();
 
       if (options?._testPostCommitError) {
         throw new Error("Simulated connection drop / response loss after transaction commit");
@@ -335,11 +371,11 @@ export async function provisionStaffMember(
       };
     } catch (txError) {
       // Step C: Reconcile unknown transaction outcomes before compensation.
-      // A commit can succeed while its acknowledgment is lost.
+      // A commit can succeed while its acknowledgment is lost, or remain in flight.
       // Query by the created user ID: return success only for a complete committed state;
-      // compensate only when absence of the transaction’s records is established;
-      // otherwise preserve state and raise an operational reconciliation error.
-      // Never delete a committed membership through user cascade.
+      // compensate only when clean absence AND positively known rollback are established;
+      // otherwise preserve state and raise an opaque operational reconciliation error.
+      // Never delete a committed or in-flight membership through user cascade.
 
       let reconciledMembership: Awaited<
         ReturnType<typeof prisma.internalStaffMembership.findUnique>
@@ -368,7 +404,7 @@ export async function provisionStaffMember(
         throw new ProvisioningOperationalError(
           "PROVISIONING_AMBIGUOUS_STATE",
           createdUserId!,
-          `Transaction error occurred and state reconciliation failed. Preserving state for manual reconciliation. Original error: ${txError instanceof Error ? txError.message : String(txError)}`
+          "Transaction outcome is indeterminate. Staff and user records are preserved for administrative reconciliation."
         );
       }
 
@@ -390,40 +426,43 @@ export async function provisionStaffMember(
         };
       }
 
-      // Outcome 2: Clean absence established -> execute compensating cleanup
+      // Outcome 2: Clean absence established AND rollback is positively known -> execute compensating cleanup
       const isCompletelyAbsent =
         !reconciledMembership && reconciledRoles.length === 0 && !reconciledAudit;
 
-      if (!isCompletelyAbsent) {
-        // Partial or ambiguous state: PRESERVE STATE! Never delete user.
-        throw new ProvisioningOperationalError(
-          "PROVISIONING_AMBIGUOUS_STATE",
-          createdUserId!,
-          "Transaction outcome is ambiguous: partial staff records exist in database. Preserving records for manual reconciliation."
+      const rollbackPositivelyKnown = isPositivelyKnownRollback(txError, txCallbackCompleted);
+
+      if (isCompletelyAbsent && rollbackPositivelyKnown) {
+        let compensationSucceeded = false;
+        try {
+          await prisma.session.deleteMany({ where: { userId: createdUserId! } });
+          await prisma.account.deleteMany({ where: { userId: createdUserId! } });
+          await prisma.user.delete({ where: { id: createdUserId! } });
+          compensationSucceeded = true;
+        } catch {
+          compensationSucceeded = false;
+        }
+
+        if (!compensationSucceeded) {
+          throw new ProvisioningOperationalError(
+            "PROVISIONING_COMPENSATION_FAILED",
+            createdUserId!,
+            `Membership creation failed and automated cleanup could not delete created user. Manual remediation required for userId: ${createdUserId}`
+          );
+        }
+
+        throw new ProvisioningError(
+          "MEMBERSHIP_CREATION_FAILED",
+          "Membership and role creation failed. Compensating rollback deleted the created auth account."
         );
       }
 
-      let compensationSucceeded = false;
-      try {
-        await prisma.session.deleteMany({ where: { userId: createdUserId! } });
-        await prisma.account.deleteMany({ where: { userId: createdUserId! } });
-        await prisma.user.delete({ where: { id: createdUserId! } });
-        compensationSucceeded = true;
-      } catch {
-        compensationSucceeded = false;
-      }
-
-      if (!compensationSucceeded) {
-        throw new ProvisioningOperationalError(
-          "PROVISIONING_COMPENSATION_FAILED",
-          createdUserId!,
-          `Membership creation failed and automated cleanup could not delete created user. Manual remediation required for userId: ${createdUserId}`
-        );
-      }
-
-      throw new ProvisioningError(
-        "MEMBERSHIP_CREATION_FAILED",
-        "Membership and role creation failed. Compensating rollback deleted the created auth account."
+      // Outcome 3: Indeterminate transaction error or partial state:
+      // PRESERVE STATE! Never delete user on indeterminate error or in-flight query.
+      throw new ProvisioningOperationalError(
+        "PROVISIONING_AMBIGUOUS_STATE",
+        createdUserId!,
+        "Transaction outcome is indeterminate. Staff and user records are preserved for administrative reconciliation."
       );
     }
   } finally {

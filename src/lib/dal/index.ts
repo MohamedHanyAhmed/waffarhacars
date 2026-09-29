@@ -267,14 +267,9 @@ export async function assertStaffPermission(
   }
 
   // Identity / Staff Membership check
+  // MVP Invariant: Do not persist per-request staff-denial rows for users without a staff membership
+  // (e.g. self-service customer accounts). Denials by actual staff members remain fully auditable.
   if (!user || !user.internalStaffMembership) {
-    await logAuditEvent({
-      actorUserId: sessionData.user.id,
-      eventType: "STAFF_ACCESS_DENIED",
-      targetEntity: null,
-      ipFingerprint: clientFingerprint,
-      metadata: { reason: "NOT_STAFF" },
-    });
     throw new AuthorizationError(403, "FORBIDDEN", "Not authorized for staff operations");
   }
 
