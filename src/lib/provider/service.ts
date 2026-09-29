@@ -30,24 +30,62 @@ export class ProviderError extends Error {
   }
 }
 
-function handlePrismaUniqueConstraint(err: unknown, _entity: "provider" | "branch"): never {
+function handlePrismaUniqueConstraint(err: unknown, entity: "provider" | "branch"): never {
   if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
-    const target = Array.isArray(err.meta?.target) ? err.meta.target.join(",") : "";
-    if (target.includes("taxRegistrationNumber")) {
+    const rawTarget = err.meta?.target;
+    const targetParts: string[] = [];
+    if (Array.isArray(rawTarget)) {
+      targetParts.push(...rawTarget.map((t) => String(t)));
+    } else if (typeof rawTarget === "string") {
+      targetParts.push(rawTarget);
+    } else if (rawTarget) {
+      targetParts.push(JSON.stringify(rawTarget));
+    }
+    if (err.message) {
+      targetParts.push(err.message);
+    }
+    const combined = targetParts.join(" ").toLowerCase();
+
+    if (
+      combined.includes("taxregistrationnumber") ||
+      combined.includes("tax_registration_number") ||
+      combined.includes("tax")
+    ) {
       throw new ProviderError(
         409,
         "TAX_ID_ALREADY_EXISTS",
         "A provider organization with this Tax Registration Number already exists."
       );
     }
-    if (target.includes("commercialRegistrationNumber")) {
+    if (
+      combined.includes("commercialregistrationnumber") ||
+      combined.includes("commercial_registration_number") ||
+      combined.includes("commercial")
+    ) {
       throw new ProviderError(
         409,
         "CR_NUMBER_ALREADY_EXISTS",
         "A provider organization with this Commercial Registration Number already exists."
       );
     }
-    if (target.includes("branchCode")) {
+    if (
+      combined.includes("branchcode") ||
+      combined.includes("branch_code")
+    ) {
+      throw new ProviderError(
+        409,
+        "BRANCH_CODE_ALREADY_EXISTS",
+        "A branch with this code already exists for this provider organization."
+      );
+    }
+
+    if (entity === "provider") {
+      throw new ProviderError(
+        409,
+        "PROVIDER_ALREADY_EXISTS",
+        "A provider organization with this unique attribute already exists."
+      );
+    } else {
       throw new ProviderError(
         409,
         "BRANCH_CODE_ALREADY_EXISTS",
@@ -57,6 +95,7 @@ function handlePrismaUniqueConstraint(err: unknown, _entity: "provider" | "branc
   }
   throw err;
 }
+
 
 export async function createProviderDraft(
   actor: AuthorizedStaffContext,
@@ -98,6 +137,7 @@ export async function createProviderDraft(
 
     return provider;
   } catch (err) {
+    if (err instanceof ProviderError) throw err;
     handlePrismaUniqueConstraint(err, "provider");
   }
 }
