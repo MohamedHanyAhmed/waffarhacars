@@ -164,11 +164,11 @@ erDiagram
 
 2. **WaffarhaCars Domain-Owned Models (PR 2B / 2C / 2D):**
    - `CustomerProfile` (`customer_profiles`, PR 2B): `id`, `userId` (`UNIQUE`), `preferredLanguage` (`ar` | `en`), `notificationPreferences` (JSONB), `createdAt`, `updatedAt`.
-   - `InternalStaffMembership` (`internal_staff_memberships`, PR 2C): `id`, `userId` (`UNIQUE`), `department` (`SALES` | `OPERATIONS` | `FINANCE` | `ADMIN`), `employeeNumber` (`UNIQUE`), `isActive`, `hiredAt`.
-   - `InternalRoleAssignment` (`internal_role_assignments`, PR 2D): `id`, `staffMembershipId`, `role` (`SALES_AGENT` | `OPS_SUPERVISOR` | `FINANCE_OFFICER` | `PLATFORM_ADMIN`), `assignedAt`, `assignedBy`.
-   - `SecurityAuditEvent` (`security_audit_events`, PR 2D): `id`, `actorUserId` (Nullable), `eventType`, `targetEntity`, `ipAddress`, `metadata` (JSONB), `timestamp`.
+   - `InternalStaffMembership` (`internal_staff_memberships`, PR 2C): `id`, `userId` (`UNIQUE`), `department` (`SALES` | `OPERATIONS` | `FINANCE` | `ADMIN`), `employeeNumber` (`UNIQUE`), `isActive`, `mustChangePassword`, `hiredAt`, `createdAt`, `updatedAt`.
+   - `InternalRoleAssignment` (`internal_role_assignments`, PR 2D-A): `id`, `staffMembershipId` (FK to `InternalStaffMembership.id`, CASCADE), `role` (`SALES_AGENT` | `OPS_SUPERVISOR` | `FINANCE_OFFICER` | `PLATFORM_ADMIN`), `isActive` (default true), `assignedAt`, `assignedBy`, `createdAt`, `updatedAt`.
+   - `SecurityAuditEvent` (`security_audit_events`, PR 2D-A): `id`, `actorUserId` (Nullable, FK to `User.id`, SET NULL), `eventType` (allowlisted), `targetEntity` (Nullable), `ipFingerprint` (Nullable, domain-separated HMAC-SHA256 digest), `metadata` (JSONB, sanitized with zero secrets/PII), `timestamp`. Added in migration `20260928120000_staff_roles_audit`.
 
-3. **Explicit Scope Exclusion:** Provider merchant organizations (`provider_organizations`), workshop locations (`provider_branches`), and staff branch assignments (`branch_assignments`) are **strictly deferred to PR 3**.
+3. **Explicit Scope Exclusion:** Provider merchant organizations (`provider_organizations`), workshop locations (`provider_branches`), and staff branch assignments (`branch_assignments`) are **strictly deferred to PR 3**. Dynamic session timeout enforcement and step-up reauthentication are **strictly deferred to PR 2D-B**.
 
 ---
 
@@ -540,33 +540,36 @@ graph LR
 
 ---
 
-### PR 2D: Central Authorization DAL Primitives, Internal Roles & Security Audit Log
+### PR 2D-A: Internal Staff Roles, Central Authorization DAL & Security Audit Foundation
 
-- **Business Outcome:** Central server-side Data Access Layer enforcing deny-by-default primitives, internal staff role resolution, actor-specific session timeouts, and security audit logging.
+- **Business Outcome:** Central server-side Data Access Layer enforcing deny-by-default authorization, internal staff role resolution, explicit role-to-permission mapping, and bounded security audit logging.
 - **Exact Schema Ownership:**
-  - `internal_role_assignments`: Role bindings for internal staff.
-  - `security_audit_events`: Append-oriented security audit ledger.
+  - `internal_role_assignments`: Role bindings for internal staff (`SALES_AGENT`, `OPS_SUPERVISOR`, `FINANCE_OFFICER`, `PLATFORM_ADMIN`). Added via migration `20260928120000_staff_roles_audit`.
+  - `security_audit_events`: Append-oriented security audit ledger with domain-separated fingerprinting. Added via migration `20260928120000_staff_roles_audit`.
 - **File-Level Scope:**
-  - `src/lib/dal/index.ts`: Central DAL session assertions (`assertAuthenticated`).
-  - `src/lib/dal/permissions.ts`: Static permission catalog and role-to-permission mapping.
-  - `src/lib/dal/audit.ts`: Bounded/deduplicated security audit logging helper.
+  - `src/lib/dal/index.ts`: Central DAL session assertions (`assertStaffPermission`, `assertAuthenticated`).
+  - `src/lib/dal/permissions.ts`: Static permission catalog, separation of duties, and role-to-permission mapping.
+  - `src/lib/dal/audit.ts`: Bounded, deduplicated security audit logger with metadata sanitizer and domain fingerprinting.
+  - `src/lib/staff/provisioning.ts`: Interactive transactional provisioning of membership, initial role assignment, and audit event.
+  - `scripts/provision-staff.ts`: CLI provisioning with `--role` support, zero-PII outputs, and literal argument preservation.
 - **Security Invariants:**
-  - Structured HTTP semantics: unauthenticated calls throw HTTP 401; unauthorized calls or unverified MFA throw HTTP 403.
-  - Object-ownership checks follow documented 403 vs. 404 policy to prevent entity enumeration.
-  - User suspension (`isSuspended: true`) enforced in DAL, returning HTTP 403.
-  - Enforces actor-specific absolute session caps (using `session.createdAt`) and true idle limits (using server-owned `lastActivityAt`).
-  - Enforces sensitive step-up reauthentication (using server-owned `lastReauthenticatedAt`).
-  - Client-submitted role or branch claims ignored; identity resolved strictly from session.
-  - Audit log recording rate-limited against unauthenticated probes to prevent storage exhaustion.
-  - Zero raw tokens or passwords in audit metadata.
+  - Structured HTTP semantics: unauthenticated calls throw HTTP 401 `UNAUTHENTICATED`; unauthorized calls or unverified MFA throw HTTP 403 `FORBIDDEN`; storage or session resolution failures return HTTP 503 `SERVICE_UNAVAILABLE`.
+  - Department is descriptive only, never authorization. Permissions resolved strictly from verified database session and active role.
+  - Pilot staff hold exactly one active internal role. Inconsistent state (> 1 active roles) or roleless staff fail closed with HTTP 403.
+  - PLATFORM_ADMIN possesses platform governance capabilities but is strictly prohibited from approving offers or exporting payouts (Maker-Checker separation of duties). Zero wildcard `*` permissions exist.
+  - Audit logging records allowlisted events with event-specific Zod schema validation and target entity schema validation. Zero passwords, OTPs, raw tokens, cookies, or raw IP addresses are persisted. Client IPs are stored only as domain-separated HMAC-SHA256 digests (`audit-fingerprint:v1\0<ip>`) keyed by validated server configuration.
+  - Storage exhaustion defense: For this MVP, unauthenticated (anonymous) requests do not persist database audit rows, completely eliminating database exhaustion from network probes or spoofed caller headers (such as `x-forwarded-for`). Authenticated staff denials remain fully audited.
+  - Provisioning reconciliation: Transaction outcomes inspect database state before compensation. Clean absence permits rollback; complete committed state returns success; partial or ambiguous state preserves database records without destructive user cascade deletion and requires manual administrative reconciliation.
+  - Fail-closed audit semantics: Denial audit persistence failure does not bypass access denial; role-assignment audit failure inside transactions rolls back the role assignment.
 - **Integration Tests:**
-  - Role-based permission checks for internal departments.
-  - Session timeout tests: continuous activity extending session within idle limits; inactivity exceeding idle limit triggering rejection; absolute expiry terminating session; step-up authentication verification.
-  - Security audit event persistence on access denial with rate-limiting.
-  - Generic protected fixture assertions.
-- **E2E Tests:**
-  - Unauthorized navigation attempts to staff portal views blocked.
-- **Exclusions:** No offer approval logic (PR 3); no reservation ownership checks (Reservation slice); no workshop branch checks (Provider slice).
+  - Role-based capability assertions for each staff role (maker, checker, finance, admin).
+  - Roleless and suspended staff failure verification (HTTP 403).
+  - Anonymous request verification asserting zero database audit writes under repeated and concurrent probes.
+  - Audit privacy verification asserting stripping of PII, credentials, URLs, and malformed targets on persisted rows.
+  - Provisioning replay and post-commit state reconciliation verification.
+- **Strict Scope Exclusions:**
+  - Dynamic session timeouts (idle limits, absolute ceilings) and step-up reauthentication (`lastReauthenticatedAt`) are **strictly deferred to PR 2D-B**.
+  - Provider organizations, branches, offers, reservations, role-management UI, and public role-assignment endpoints are **strictly deferred to PR 3 and downstream domain slices**.
 
 ---
 

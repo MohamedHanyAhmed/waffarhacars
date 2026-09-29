@@ -3,7 +3,8 @@ import { z } from "zod";
 import { betterAuth } from "better-auth";
 import { getAuthOptions } from "@/lib/auth";
 import { getPrisma, getPool } from "@/lib/db";
-import type { StaffDepartment } from "@/generated/prisma/client";
+import { Prisma, type StaffDepartment, type StaffRole } from "@/generated/prisma/client";
+import { DEPARTMENT_ROLE_MAP, isRoleCompatibleWithDepartment } from "@/lib/dal/permissions";
 
 export class ProvisioningError extends Error {
   readonly code: string;
@@ -37,6 +38,7 @@ export const ProvisionStaffSchema = z.object({
       message: "Employee number must be alphanumeric with optional dashes or underscores",
     }),
   department: z.enum(["SALES", "OPERATIONS", "FINANCE", "ADMIN"]),
+  role: z.enum(["SALES_AGENT", "OPS_SUPERVISOR", "FINANCE_OFFICER", "PLATFORM_ADMIN"]).optional(),
   isBootstrap: z.boolean().optional(),
 });
 
@@ -47,6 +49,7 @@ export interface ProvisionStaffResult {
   userId: string;
   employeeNumber: string;
   department: StaffDepartment;
+  role: StaffRole;
   mustChangePassword: boolean;
   idempotent: boolean;
 }
@@ -73,6 +76,40 @@ export interface ProvisionStaffOptions {
    * lock acquisition and assert serialization on the database server.
    */
   _testBarrier?: () => Promise<void>;
+  /**
+   * Deterministic test hook executed immediately after the Prisma transaction commits,
+   * simulating network partition or response acknowledgment loss.
+   */
+  _testPostCommitError?: boolean;
+  /**
+   * Deterministic test hook to control commit/reconciliation query ordering.
+   * Simulates an in-flight transaction where reconciliation queries execute before
+   * the in-flight transaction completes commit on the server.
+   */
+  _testInFlightCommit?: {
+    pauseBeforeCommit: () => Promise<void>;
+    waitForPause: () => Promise<void>;
+  };
+}
+
+function isPositivelyKnownRollback(error: unknown, txCallbackCompleted: boolean): boolean {
+  if (txCallbackCompleted) {
+    // Callback completed; commit was attempted. Outcome is unknown if an error occurred.
+    return false;
+  }
+  const knownRollbackCodes = ["P2002", "P2003", "P2004", "P2034"];
+  if (error instanceof Prisma.PrismaClientKnownRequestError) {
+    return knownRollbackCodes.includes(error.code);
+  }
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof (error as { code: unknown }).code === "string"
+  ) {
+    return knownRollbackCodes.includes((error as { code: string }).code);
+  }
+  return false;
 }
 
 export async function provisionStaffMember(
@@ -85,11 +122,35 @@ export async function provisionStaffMember(
   const department = validated.department as StaffDepartment;
   const isBootstrap = !!validated.isBootstrap;
 
-  if (isBootstrap && department !== "ADMIN") {
-    throw new ProvisioningError(
-      "BOOTSTRAP_REQUIRES_ADMIN",
-      "Bootstrap mode requires the ADMIN department."
-    );
+  let targetRole: StaffRole;
+  if (isBootstrap) {
+    if (department !== "ADMIN") {
+      throw new ProvisioningError(
+        "BOOTSTRAP_REQUIRES_ADMIN",
+        "Bootstrap mode requires the ADMIN department."
+      );
+    }
+    if (validated.role && validated.role !== "PLATFORM_ADMIN") {
+      throw new ProvisioningError(
+        "BOOTSTRAP_REQUIRES_ADMIN",
+        "Bootstrap mode requires the PLATFORM_ADMIN role."
+      );
+    }
+    targetRole = "PLATFORM_ADMIN";
+  } else {
+    if (validated.role === "PLATFORM_ADMIN") {
+      throw new ProvisioningError(
+        "PLATFORM_ADMIN_BOOTSTRAP_ONLY",
+        "The PLATFORM_ADMIN role can only be assigned during initial bootstrap."
+      );
+    }
+    targetRole = validated.role || DEPARTMENT_ROLE_MAP[department];
+    if (validated.role && !isRoleCompatibleWithDepartment(validated.role, department, false)) {
+      throw new ProvisioningError(
+        "INCOMPATIBLE_ROLE_DEPARTMENT",
+        `Role ${validated.role} is incompatible with department ${department}.`
+      );
+    }
   }
 
   const pool = getPool();
@@ -150,18 +211,53 @@ export async function provisionStaffMember(
         existingByEmp.employeeNumber === normalizedEmployeeNumber &&
         existingByEmp.department === department
       ) {
-        return {
-          success: true,
-          userId: existingByUser.id,
-          employeeNumber: existingByEmp.employeeNumber,
-          department: existingByEmp.department,
-          mustChangePassword: existingByEmp.mustChangePassword,
-          idempotent: true,
-        };
+        const activeRoles = await prisma.internalRoleAssignment.findMany({
+          where: { staffMembershipId: existingByEmp.id, isActive: true },
+        });
+
+        // Corrupted / roleless state: exactly one active role is required
+        if (activeRoles.length === 0) {
+          throw new ProvisioningError(
+            "STAFF_ROLE_RECONCILIATION_REQUIRED",
+            "Staff record has no active role assignment. Manual audit and reconciliation required before re-provisioning."
+          );
+        }
+
+        if (activeRoles.length > 1) {
+          throw new ProvisioningError(
+            "STAFF_MULTIPLE_ACTIVE_ROLES",
+            "Inconsistent staff state: multiple active role assignments detected. Manual reconciliation required."
+          );
+        }
+
+        const currentActiveRole = activeRoles[0];
+        if (currentActiveRole.role === targetRole) {
+          return {
+            success: true,
+            userId: existingByUser.id,
+            employeeNumber: existingByEmp.employeeNumber,
+            department: existingByEmp.department,
+            role: currentActiveRole.role,
+            mustChangePassword: existingByEmp.mustChangePassword,
+            idempotent: true,
+          };
+        }
+
+        throw new ProvisioningError(
+          "IDENTITY_CONFLICT",
+          `Conflicting active role assignment: staff member currently holds ${currentActiveRole.role}, requested ${targetRole}.`
+        );
       }
       throw new ProvisioningError(
         "IDENTITY_CONFLICT",
         "Conflicting staff membership attributes found."
+      );
+    }
+
+    if (!isBootstrap && department === "ADMIN") {
+      throw new ProvisioningError(
+        "ORDINARY_ADMIN_DEPARTMENT_FORBIDDEN",
+        "Ordinary staff accounts cannot be assigned the ADMIN department."
       );
     }
 
@@ -212,50 +308,169 @@ export async function provisionStaffMember(
       );
     }
 
-    // Step B: Create domain-owned InternalStaffMembership
+    let txCallbackCompleted = false;
+
+    // Step B: Interactive transaction creating InternalStaffMembership, InternalRoleAssignment, and SecurityAuditEvent
     try {
-      const membership = await prisma.internalStaffMembership.create({
-        data: {
-          userId: createdUserId,
-          employeeNumber: normalizedEmployeeNumber,
-          department,
-          isActive: true,
-          mustChangePassword: true,
-          hiredAt: new Date(),
-        },
+      const txPromise = prisma.$transaction(async (tx) => {
+        const m = await tx.internalStaffMembership.create({
+          data: {
+            userId: createdUserId!,
+            employeeNumber: normalizedEmployeeNumber,
+            department,
+            isActive: true,
+            mustChangePassword: true,
+            hiredAt: new Date(),
+          },
+        });
+
+        const ra = await tx.internalRoleAssignment.create({
+          data: {
+            staffMembershipId: m.id,
+            role: targetRole,
+            isActive: true,
+            assignedBy: isBootstrap ? "SYSTEM_BOOTSTRAP" : "SYSTEM_PROVISIONING",
+          },
+        });
+
+        await tx.securityAuditEvent.create({
+          data: {
+            actorUserId: createdUserId,
+            eventType: "STAFF_PROVISIONED",
+            targetEntity: `staff_membership:${m.id}`,
+            ipFingerprint: null,
+            metadata: {
+              action: "PROVISION_STAFF",
+              department,
+              role: targetRole,
+              isBootstrap,
+            },
+          },
+        });
+
+        if (options?._testInFlightCommit) {
+          await options._testInFlightCommit.pauseBeforeCommit();
+        }
+
+        txCallbackCompleted = true;
+        return { membership: m, roleAssignment: ra };
       });
+
+      const { membership, roleAssignment } = await (async () => {
+        if (options?._testInFlightCommit) {
+          await options._testInFlightCommit.waitForPause();
+          throw new Error("INDETERMINATE_IN_FLIGHT_TRANSACTION_ERROR");
+        }
+        return await txPromise;
+      })();
+
+      if (options?._testPostCommitError) {
+        throw new Error("Simulated connection drop / response loss after transaction commit");
+      }
 
       return {
         success: true,
-        userId: createdUserId,
+        userId: createdUserId!,
         employeeNumber: membership.employeeNumber,
         department: membership.department,
+        role: roleAssignment.role,
         mustChangePassword: membership.mustChangePassword,
         idempotent: false,
       };
-    } catch {
-      // Step C: Compensating transaction - delete only the createdUserId proven to have been created by this invocation
-      let compensationSucceeded = false;
-      try {
-        await prisma.session.deleteMany({ where: { userId: createdUserId } });
-        await prisma.account.deleteMany({ where: { userId: createdUserId } });
-        await prisma.user.delete({ where: { id: createdUserId } });
-        compensationSucceeded = true;
-      } catch {
-        compensationSucceeded = false;
-      }
+    } catch (txError) {
+      // Step C: Reconcile unknown transaction outcomes before compensation.
+      // A commit can succeed while its acknowledgment is lost, or remain in flight.
+      // Query by the created user ID: return success only for a complete committed state;
+      // compensate only when clean absence AND positively known rollback are established;
+      // otherwise preserve state and raise an opaque operational reconciliation error.
+      // Never delete a committed or in-flight membership through user cascade.
 
-      if (!compensationSucceeded) {
+      let reconciledMembership: Awaited<
+        ReturnType<typeof prisma.internalStaffMembership.findUnique>
+      > = null;
+      let reconciledRoles: Awaited<ReturnType<typeof prisma.internalRoleAssignment.findMany>> = [];
+      let reconciledAudit: Awaited<ReturnType<typeof prisma.securityAuditEvent.findFirst>> = null;
+
+      try {
+        reconciledMembership = await prisma.internalStaffMembership.findUnique({
+          where: { userId: createdUserId! },
+        });
+
+        if (reconciledMembership) {
+          reconciledRoles = await prisma.internalRoleAssignment.findMany({
+            where: { staffMembershipId: reconciledMembership.id, isActive: true },
+          });
+        }
+
+        reconciledAudit = await prisma.securityAuditEvent.findFirst({
+          where: {
+            actorUserId: createdUserId!,
+            eventType: "STAFF_PROVISIONED",
+          },
+        });
+      } catch {
         throw new ProvisioningOperationalError(
-          "PROVISIONING_COMPENSATION_FAILED",
-          createdUserId,
-          `Membership creation failed and automated cleanup could not delete created user. Manual remediation required for userId: ${createdUserId}`
+          "PROVISIONING_AMBIGUOUS_STATE",
+          createdUserId!,
+          "Transaction outcome is indeterminate. Staff and user records are preserved for administrative reconciliation."
         );
       }
 
-      throw new ProvisioningError(
-        "MEMBERSHIP_CREATION_FAILED",
-        "Membership record creation failed. Compensating rollback deleted the created auth account."
+      // Outcome 1: Complete committed state established -> return success
+      if (
+        reconciledMembership &&
+        reconciledRoles.length === 1 &&
+        reconciledRoles[0].role === targetRole &&
+        reconciledAudit
+      ) {
+        return {
+          success: true,
+          userId: createdUserId!,
+          employeeNumber: reconciledMembership.employeeNumber,
+          department: reconciledMembership.department,
+          role: reconciledRoles[0].role,
+          mustChangePassword: reconciledMembership.mustChangePassword,
+          idempotent: false,
+        };
+      }
+
+      // Outcome 2: Clean absence established AND rollback is positively known -> execute compensating cleanup
+      const isCompletelyAbsent =
+        !reconciledMembership && reconciledRoles.length === 0 && !reconciledAudit;
+
+      const rollbackPositivelyKnown = isPositivelyKnownRollback(txError, txCallbackCompleted);
+
+      if (isCompletelyAbsent && rollbackPositivelyKnown) {
+        let compensationSucceeded = false;
+        try {
+          await prisma.session.deleteMany({ where: { userId: createdUserId! } });
+          await prisma.account.deleteMany({ where: { userId: createdUserId! } });
+          await prisma.user.delete({ where: { id: createdUserId! } });
+          compensationSucceeded = true;
+        } catch {
+          compensationSucceeded = false;
+        }
+
+        if (!compensationSucceeded) {
+          throw new ProvisioningOperationalError(
+            "PROVISIONING_COMPENSATION_FAILED",
+            createdUserId!,
+            `Membership creation failed and automated cleanup could not delete created user. Manual remediation required for userId: ${createdUserId}`
+          );
+        }
+
+        throw new ProvisioningError(
+          "MEMBERSHIP_CREATION_FAILED",
+          "Membership and role creation failed. Compensating rollback deleted the created auth account."
+        );
+      }
+
+      // Outcome 3: Indeterminate transaction error or partial state:
+      // PRESERVE STATE! Never delete user on indeterminate error or in-flight query.
+      throw new ProvisioningOperationalError(
+        "PROVISIONING_AMBIGUOUS_STATE",
+        createdUserId!,
+        "Transaction outcome is indeterminate. Staff and user records are preserved for administrative reconciliation."
       );
     }
   } finally {
