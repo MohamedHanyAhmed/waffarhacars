@@ -157,6 +157,30 @@ describe("DAL Security Audit Unit Tests", () => {
       expect(sanitized).not.toHaveProperty("extraToken");
       expect(sanitized).not.toHaveProperty("rawError");
     });
+
+    it("preserves allowlisted fields for BRANCH_ACTIVATED and strictly strips evidenceDocumentRef, PII, and free-text notes", () => {
+      const raw = {
+        action: "ACTIVATE_BRANCH",
+        branchId: "b1b2c3d4-e5f6-4a1b-8c2d-3e4f5a6b7c8d",
+        providerId: "a1b2c3d4-e5f6-4a1b-8c2d-3e4f5a6b7c8d",
+        cluster: "NASR_CITY_HELIOPOLIS",
+        evidenceDocumentRef: "DOC-EGY-2026-0914-01",
+        contactPhone: "+201012345678",
+        notes: "Inspection passed by officer John",
+      };
+
+      const sanitized = sanitizeAuditMetadata("BRANCH_ACTIVATED", raw);
+
+      expect(sanitized).toEqual({
+        action: "ACTIVATE_BRANCH",
+        branchId: "b1b2c3d4-e5f6-4a1b-8c2d-3e4f5a6b7c8d",
+        providerId: "a1b2c3d4-e5f6-4a1b-8c2d-3e4f5a6b7c8d",
+        cluster: "NASR_CITY_HELIOPOLIS",
+      });
+      expect(sanitized).not.toHaveProperty("evidenceDocumentRef");
+      expect(sanitized).not.toHaveProperty("contactPhone");
+      expect(sanitized).not.toHaveProperty("notes");
+    });
   });
 
   describe("Anonymous Storage Exhaustion Prevention", () => {

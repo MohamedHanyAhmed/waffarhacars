@@ -7,6 +7,8 @@ import { createAuditFingerprint, logAuditEvent } from "./audit";
 
 export * from "./permissions";
 export * from "./audit";
+export * from "@/lib/provider/service";
+export * from "@/lib/provider/validation";
 
 /**
  * Structured Authorization Error conforming to ADR 14 HTTP semantics.
