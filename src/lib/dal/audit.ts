@@ -17,6 +17,22 @@ export const SECURITY_AUDIT_EVENT_TYPES = [
   "STAFF_PASSWORD_ROTATED",
   "STAFF_MFA_ENROLLED",
   "STAFF_SESSION_REVOKED",
+
+  // Provider Organization Audit Events
+  "PROVIDER_DRAFT_CREATED",
+  "PROVIDER_DRAFT_UPDATED",
+  "PROVIDER_SUBMITTED_FOR_REVIEW",
+  "PROVIDER_ACTIVATED",
+  "PROVIDER_REJECTED",
+  "PROVIDER_PAUSED",
+  "PROVIDER_RESUMED",
+
+  // Provider Branch Audit Events
+  "BRANCH_DRAFT_CREATED",
+  "BRANCH_DRAFT_UPDATED",
+  "BRANCH_ACTIVATED",
+  "BRANCH_PAUSED",
+  "BRANCH_RESUMED",
 ] as const;
 
 export type SecurityAuditEventType = (typeof SECURITY_AUDIT_EVENT_TYPES)[number];
@@ -78,7 +94,13 @@ export function validateTargetIdentifier(target: unknown): string | null {
     return null;
   }
 
-  if (prefix === "staff_membership" || prefix === "user" || prefix === "role_assignment") {
+  if (
+    prefix === "staff_membership" ||
+    prefix === "user" ||
+    prefix === "role_assignment" ||
+    prefix === "provider" ||
+    prefix === "provider_branch"
+  ) {
     if (UUID_REGEX.test(identifier)) {
       return `${prefix}:${identifier.toLowerCase()}`;
     }
@@ -151,6 +173,87 @@ const StaffSessionRevokedMetadataSchema = z.object({
   reason: z.enum(["USER_SIGNOUT", "PASSWORD_CHANGED", "ADMIN_ACTION"]),
 });
 
+// Provider & Branch Metadata Schemas
+const CairoClusterEnum = z.enum(["NASR_CITY_HELIOPOLIS", "NEW_CAIRO", "MAADI", "OCTOBER_ZAYED"]);
+
+const ProviderDraftCreatedMetadataSchema = z.object({
+  action: z.literal("CREATE_PROVIDER_DRAFT"),
+  providerId: z.string().uuid(),
+  cluster: CairoClusterEnum,
+});
+
+const ProviderDraftUpdatedMetadataSchema = z.object({
+  action: z.literal("UPDATE_PROVIDER_DRAFT"),
+  providerId: z.string().uuid(),
+  version: z.number().int().positive(),
+});
+
+const ProviderSubmittedMetadataSchema = z.object({
+  action: z.literal("SUBMIT_PROVIDER"),
+  providerId: z.string().uuid(),
+  cluster: CairoClusterEnum,
+  branchCount: z.number().int().nonnegative(),
+  version: z.number().int().positive(),
+});
+
+const ProviderActivatedMetadataSchema = z.object({
+  action: z.literal("ACTIVATE_PROVIDER"),
+  providerId: z.string().uuid(),
+  cluster: CairoClusterEnum,
+  branchCount: z.number().int().nonnegative(),
+  submittedByUserId: z.string().uuid().optional(),
+});
+
+const ProviderRejectedMetadataSchema = z.object({
+  action: z.literal("REJECT_PROVIDER"),
+  providerId: z.string().uuid(),
+  returnToDraft: z.boolean(),
+  rejectionReason: z.string().max(256),
+});
+
+const ProviderPausedMetadataSchema = z.object({
+  action: z.literal("PAUSE_PROVIDER"),
+  providerId: z.string().uuid(),
+  pauseReason: z.string().max(256),
+});
+
+const ProviderResumedMetadataSchema = z.object({
+  action: z.literal("RESUME_PROVIDER"),
+  providerId: z.string().uuid(),
+});
+
+const BranchDraftCreatedMetadataSchema = z.object({
+  action: z.literal("CREATE_BRANCH_DRAFT"),
+  branchId: z.string().uuid(),
+  providerId: z.string().uuid(),
+  branchCode: z.string().max(32),
+  cluster: CairoClusterEnum,
+});
+
+const BranchDraftUpdatedMetadataSchema = z.object({
+  action: z.literal("UPDATE_BRANCH_DRAFT"),
+  branchId: z.string().uuid(),
+  version: z.number().int().positive(),
+});
+
+const BranchActivatedMetadataSchema = z.object({
+  action: z.literal("ACTIVATE_BRANCH"),
+  branchId: z.string().uuid(),
+  providerId: z.string().uuid(),
+  cluster: CairoClusterEnum,
+});
+
+const BranchPausedMetadataSchema = z.object({
+  action: z.literal("PAUSE_BRANCH"),
+  branchId: z.string().uuid(),
+  pauseReason: z.string().max(256),
+});
+
+const BranchResumedMetadataSchema = z.object({
+  action: z.literal("RESUME_BRANCH"),
+  branchId: z.string().uuid(),
+});
+
 export const AUDIT_METADATA_SCHEMAS: Record<SecurityAuditEventType, z.ZodTypeAny> = {
   STAFF_PROVISIONED: StaffProvisionedMetadataSchema,
   STAFF_ROLE_ASSIGNED: StaffRoleAssignedMetadataSchema,
@@ -160,6 +263,22 @@ export const AUDIT_METADATA_SCHEMAS: Record<SecurityAuditEventType, z.ZodTypeAny
   STAFF_LOGIN_SUCCEEDED: StaffLoginSucceededMetadataSchema,
   STAFF_LOGIN_FAILED: StaffLoginFailedMetadataSchema,
   STAFF_SESSION_REVOKED: StaffSessionRevokedMetadataSchema,
+
+  // Provider Organization
+  PROVIDER_DRAFT_CREATED: ProviderDraftCreatedMetadataSchema,
+  PROVIDER_DRAFT_UPDATED: ProviderDraftUpdatedMetadataSchema,
+  PROVIDER_SUBMITTED_FOR_REVIEW: ProviderSubmittedMetadataSchema,
+  PROVIDER_ACTIVATED: ProviderActivatedMetadataSchema,
+  PROVIDER_REJECTED: ProviderRejectedMetadataSchema,
+  PROVIDER_PAUSED: ProviderPausedMetadataSchema,
+  PROVIDER_RESUMED: ProviderResumedMetadataSchema,
+
+  // Provider Branch
+  BRANCH_DRAFT_CREATED: BranchDraftCreatedMetadataSchema,
+  BRANCH_DRAFT_UPDATED: BranchDraftUpdatedMetadataSchema,
+  BRANCH_ACTIVATED: BranchActivatedMetadataSchema,
+  BRANCH_PAUSED: BranchPausedMetadataSchema,
+  BRANCH_RESUMED: BranchResumedMetadataSchema,
 };
 
 /**

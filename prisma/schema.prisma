@@ -29,6 +29,9 @@ model User {
 
   internalStaffMembership InternalStaffMembership?
   securityAuditEvents     SecurityAuditEvent[]
+  createdProviders        ProviderOrganization[]   @relation("ProviderCreatedBy")
+  submittedProviders      ProviderOrganization[]   @relation("ProviderSubmittedBy")
+  activatedProviders      ProviderOrganization[]   @relation("ProviderActivatedBy")
 
   @@unique([email])
   @@unique([phoneNumber])
@@ -221,3 +224,101 @@ model SecurityAuditEvent {
   @@index([ipFingerprint, eventType, timestamp])
   @@map("security_audit_events")
 }
+
+enum ProviderStatus {
+  DRAFT
+  PENDING_REVIEW
+  ACTIVE
+  PAUSED
+  REJECTED
+  TERMINATED
+}
+
+enum BranchStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  DECOMMISSIONED
+}
+
+enum CairoCluster {
+  NASR_CITY_HELIOPOLIS
+  NEW_CAIRO
+  MAADI
+  OCTOBER_ZAYED
+}
+
+model ProviderOrganization {
+  id                           String         @id @default(dbgenerated("pg_catalog.gen_random_uuid()")) @db.Uuid
+  nameEn                       String         @db.VarChar(128)
+  nameAr                       String         @db.VarChar(128)
+  legalName                    String         @db.VarChar(255)
+  taxRegistrationNumber        String         @unique @db.VarChar(9)
+  commercialRegistrationNumber String         @unique @db.VarChar(32)
+  primaryCluster               CairoCluster
+  status                       ProviderStatus @default(DRAFT)
+  version                      Int            @default(1)
+
+  // Business Contact (Minimized, workshop business context only)
+  contactPersonName            String         @db.VarChar(128)
+  contactEmail                 String         @db.VarChar(255)
+  contactPhone                 String         @db.VarChar(20)
+
+  // Maker-Checker & Audit Tracking
+  createdByUserId              String         @db.Uuid
+  createdByUser                User           @relation("ProviderCreatedBy", fields: [createdByUserId], references: [id])
+  submittedByUserId            String?        @db.Uuid
+  submittedByUser              User?          @relation("ProviderSubmittedBy", fields: [submittedByUserId], references: [id])
+  activatedByUserId            String?        @db.Uuid
+  activatedByUser              User?          @relation("ProviderActivatedBy", fields: [activatedByUserId], references: [id])
+
+  rejectionReason              String?        @db.Text
+  pauseReason                  String?        @db.Text
+
+  submittedAt                  DateTime?
+  activatedAt                  DateTime?
+  pausedAt                     DateTime?
+  createdAt                    DateTime       @default(now())
+  updatedAt                    DateTime       @updatedAt
+
+  branches                     ProviderBranch[]
+
+  @@index([status, primaryCluster])
+  @@index([createdByUserId])
+  @@map("provider_organizations")
+}
+
+model ProviderBranch {
+  id                     String               @id @default(dbgenerated("pg_catalog.gen_random_uuid()")) @db.Uuid
+  providerOrganizationId String               @db.Uuid
+  providerOrganization   ProviderOrganization @relation(fields: [providerOrganizationId], references: [id], onDelete: Cascade)
+
+  branchCode             String               @db.VarChar(32)
+  nameEn                 String               @db.VarChar(128)
+  nameAr                 String               @db.VarChar(128)
+  cluster                CairoCluster
+
+  // Physical Location & Coordinates
+  streetAddressEn        String               @db.VarChar(255)
+  streetAddressAr        String               @db.VarChar(255)
+  landmarkEn             String?              @db.VarChar(255)
+  landmarkAr             String?              @db.VarChar(255)
+  latitude               Decimal              @db.Decimal(9, 6)
+  longitude              Decimal              @db.Decimal(9, 6)
+
+  // Contact Phone & Operating Hours
+  contactPhone           String               @db.VarChar(20)
+  operatingHours         Json
+
+  status                 BranchStatus         @default(DRAFT)
+  version                Int                  @default(1)
+  pauseReason            String?              @db.Text
+
+  createdAt              DateTime             @default(now())
+  updatedAt              DateTime             @updatedAt
+
+  @@unique([providerOrganizationId, branchCode])
+  @@index([cluster, status])
+  @@map("provider_branches")
+}
+

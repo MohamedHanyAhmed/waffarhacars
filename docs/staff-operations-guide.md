@@ -367,3 +367,44 @@ Rate limit buckets are stored in the `rate_limit_bucket` PostgreSQL table using 
 | `PHONE_LOOKUP_HMAC_KEY` | Phone lookup HMAC (≥32 chars)         | `postgres` backend |
 
 All five HMAC/secret keys must be **mutually distinct**. Validation fails closed at startup if any are missing or duplicated.
+
+---
+
+## 13. Provider & Branch Onboarding & Activation Runbook (PR 3A)
+
+### 13.1 Ownership and Maker-Checker Roles
+
+- **Sales Agents (`SALES_AGENT`)**: Responsible for data capture. Can create drafts, add branches in the active Cairo pilot cluster (`NASR_CITY_HELIOPOLIS`), edit draft attributes, and submit completed providers for Operations review. Sales agents **cannot** activate providers or branches.
+- **Operations Supervisors (`OPS_SUPERVISOR`)**: Responsible for due diligence and compliance verification. Reviews pending provider submissions, validates legal/tax registrations, and activates providers and branches. Operations supervisors **cannot** submit draft providers.
+- **Maker-Checker Segregation Invariant**: An Operations supervisor cannot activate a provider if they were recorded as the submitting user (`submittedByUserId`). Self-activation is blocked with HTTP 403 `MAKER_CHECKER_VIOLATION`.
+
+### 13.2 Cairo Pilot Cluster Restriction
+
+During the initial Cairo pilot phase, onboarding is strictly restricted to the **`NASR_CITY_HELIOPOLIS`** cluster:
+
+- A provider cannot be submitted for review without at least one draft branch located in `NASR_CITY_HELIOPOLIS`.
+- All branch geographic coordinates must fall within the Greater Cairo bounding box (Latitude: `29.75` to `30.35`, Longitude: `31.05` to `31.75`).
+- Contact phone numbers must be valid Egyptian mobile numbers in canonical E.164 format (`+201[0125]XXXXXXXX`).
+
+### 13.3 Operations Verification Checklist Prior to Activation
+
+1. **Tax Registration Number**: Verify exactly 9 digits matching official Egyptian Tax Authority documentation.
+2. **Commercial Registration (CR)**: Verify valid Commercial Registry certificate.
+3. **Physical Branch Inspection**: Confirm physical workshop facility, street address, and active operating hours.
+4. **Primary Business Contact**: Verify reachable workshop owner/manager contact details.
+
+### 13.4 Emergency Pause and Resumption Procedures
+
+In case of serious customer disputes, safety allegations, or merchant default:
+
+1. **Provider-Level Pause**:
+   - Endpoint: `POST /api/v1/staff/ops/providers/:id/pause`
+   - Payload: `{ "expectedVersion": <currentVersion>, "pauseReason": "<reason>" }`
+   - Immediately transitions status to `PAUSED` and logs `PROVIDER_PAUSED` audit event.
+2. **Branch-Level Pause**:
+   - Endpoint: `POST /api/v1/staff/ops/branches/:branchId/pause`
+   - Payload: `{ "expectedVersion": <currentVersion>, "pauseReason": "<reason>" }`
+   - Transitions individual branch to `PAUSED` without affecting other branches.
+3. **Resumption**:
+   - Endpoints: `POST /api/v1/staff/ops/providers/:id/resume` and `POST /api/v1/staff/ops/branches/:branchId/resume`
+   - Restores status to `ACTIVE` and records audit event.

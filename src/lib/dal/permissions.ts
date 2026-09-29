@@ -15,11 +15,28 @@ import type { StaffRole, StaffDepartment } from "@/generated/prisma/client";
 export const STAFF_PERMISSIONS = [
   // Directory & Self
   "staff:read",
+  "provider:read",
 
   // Administration & Governance
   "staff:provision",
   "staff:manage_roles",
   "audit:read",
+
+  // Provider & Branch lifecycle (Maker)
+  "provider:create",
+  "provider:edit",
+  "provider:submit",
+  "branch:create",
+  "branch:edit",
+
+  // Provider & Branch lifecycle (Checker)
+  "provider:review",
+  "provider:activate",
+  "provider:reject",
+  "provider:pause",
+  "provider:resume",
+  "branch:pause",
+  "branch:resume",
 
   // Offer lifecycle (Maker)
   "offer_draft:create",
@@ -46,24 +63,40 @@ export type StaffPermission = (typeof STAFF_PERMISSIONS)[number];
 export const ROLE_PERMISSIONS_CATALOG: Record<StaffRole, ReadonlySet<StaffPermission>> = {
   SALES_AGENT: new Set<StaffPermission>([
     "staff:read",
+    "provider:read",
+    "provider:create",
+    "provider:edit",
+    "provider:submit",
+    "branch:create",
+    "branch:edit",
     "offer_draft:create",
     "offer_draft:edit",
     "offer_draft:submit",
   ]),
   OPS_SUPERVISOR: new Set<StaffPermission>([
     "staff:read",
+    "provider:read",
+    "provider:review",
+    "provider:activate",
+    "provider:reject",
+    "provider:pause",
+    "provider:resume",
+    "branch:pause",
+    "branch:resume",
     "offer_draft:review",
     "offer_draft:approve",
     "offer_draft:reject",
   ]),
   FINANCE_OFFICER: new Set<StaffPermission>([
     "staff:read",
+    "provider:read",
     "payout:view",
     "payout:export",
     "ledger:read",
   ]),
   PLATFORM_ADMIN: new Set<StaffPermission>([
     "staff:read",
+    "provider:read",
     "staff:provision",
     "staff:manage_roles",
     "audit:read",
