@@ -601,23 +601,6 @@ export async function activateBranch(
       throw new ProviderError(404, "PROVIDER_NOT_FOUND", "Provider organization not found.");
     }
 
-    // Maker-Checker Invariant
-    if (parent.submittedByUserId === actor.userId) {
-      throw new ProviderError(
-        403,
-        "MAKER_CHECKER_VIOLATION",
-        "Operations staff cannot vet or activate a branch for a provider they submitted as a sales agent."
-      );
-    }
-
-    if (parent.status !== "PENDING_REVIEW" && parent.status !== "ACTIVE") {
-      throw new ProviderError(
-        422,
-        "INVALID_STATE_TRANSITION",
-        `Branch can only be activated when provider is under review or active. Current provider status: ${parent.status}.`
-      );
-    }
-
     // 2. Lock branch and verify parent ownership
     const [branch] = await tx.$queryRaw<
       Array<{
@@ -639,6 +622,23 @@ export async function activateBranch(
         404,
         "BRANCH_NOT_FOUND",
         "Branch not found for the specified provider organization."
+      );
+    }
+
+    // Maker-Checker Invariant
+    if (parent.submittedByUserId === actor.userId) {
+      throw new ProviderError(
+        403,
+        "MAKER_CHECKER_VIOLATION",
+        "Operations staff cannot vet or activate a branch for a provider they submitted as a sales agent."
+      );
+    }
+
+    if (parent.status !== "PENDING_REVIEW" && parent.status !== "ACTIVE") {
+      throw new ProviderError(
+        422,
+        "INVALID_STATE_TRANSITION",
+        `Branch can only be activated when provider is under review or active. Current provider status: ${parent.status}.`
       );
     }
 
@@ -742,14 +742,6 @@ export async function rejectBranch(
       throw new ProviderError(404, "PROVIDER_NOT_FOUND", "Provider organization not found.");
     }
 
-    if (parent.submittedByUserId === actor.userId) {
-      throw new ProviderError(
-        403,
-        "MAKER_CHECKER_VIOLATION",
-        "Operations staff cannot reject a branch for a provider they submitted as a sales agent."
-      );
-    }
-
     // 2. Lock branch and verify parent ownership
     const [branch] = await tx.$queryRaw<
       Array<{
@@ -769,6 +761,15 @@ export async function rejectBranch(
         404,
         "BRANCH_NOT_FOUND",
         "Branch not found for the specified provider organization."
+      );
+    }
+
+    // Maker-Checker Invariant
+    if (parent.submittedByUserId === actor.userId) {
+      throw new ProviderError(
+        403,
+        "MAKER_CHECKER_VIOLATION",
+        "Operations staff cannot reject a branch for a provider they submitted as a sales agent."
       );
     }
 
