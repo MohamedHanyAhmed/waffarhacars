@@ -2531,6 +2531,7 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
         body: JSON.stringify({
           expectedVersion: 3,
           rejectionReason: "Commercial registration certificate copy unclear",
+          reasonCode: "INCOMPLETE_DOCUMENTATION",
           remediable: true,
         }),
       }),
