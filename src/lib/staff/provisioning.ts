@@ -97,9 +97,17 @@ function isPositivelyKnownRollback(error: unknown, txCallbackCompleted: boolean)
     // Callback completed; commit was attempted. Outcome is unknown if an error occurred.
     return false;
   }
+  const knownRollbackCodes = ["P2002", "P2003", "P2004", "P2034"];
   if (error instanceof Prisma.PrismaClientKnownRequestError) {
-    const knownRollbackCodes = ["P2002", "P2003", "P2004", "P2034"];
     return knownRollbackCodes.includes(error.code);
+  }
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof (error as { code: unknown }).code === "string"
+  ) {
+    return knownRollbackCodes.includes((error as { code: string }).code);
   }
   return false;
 }

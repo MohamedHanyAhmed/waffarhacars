@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } 
 import pg from "pg";
 import crypto from "node:crypto";
 import { getPrisma, getPool, disconnectDb } from "@/lib/db";
+import { Prisma } from "@/generated/prisma/client";
 import { resetAuth } from "@/lib/auth";
 import { resetServerEnvCache } from "@/lib/env";
 import {
@@ -1123,11 +1124,14 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
     const { email, temporaryPassword, employeeNumber, fullName } = generateTestStaff();
     const prisma = getPrisma();
 
-    // Spy on $transaction to fail deterministically
+    // Spy on $transaction to fail deterministically with a known statement constraint violation
     const txSpy = vi
       .spyOn(prisma, "$transaction")
       .mockRejectedValueOnce(
-        new Error("Simulated database constraint violation on membership table")
+        new Prisma.PrismaClientKnownRequestError(
+          "Simulated database constraint violation on membership table",
+          { code: "P2002", clientVersion: "6.0.0" }
+        )
       );
 
     try {
@@ -1165,9 +1169,12 @@ describe("Real PostgreSQL 17 Internal Staff Auth & Mandatory TOTP Integration Su
     const prisma = getPrisma();
 
     // Injects both transaction create failure AND compensating user delete failure
-    const txSpy = vi
-      .spyOn(prisma, "$transaction")
-      .mockRejectedValueOnce(new Error("Simulated membership creation failure"));
+    const txSpy = vi.spyOn(prisma, "$transaction").mockRejectedValueOnce(
+      new Prisma.PrismaClientKnownRequestError("Simulated membership creation failure", {
+        code: "P2002",
+        clientVersion: "6.0.0",
+      })
+    );
     const deleteSpy = vi
       .spyOn(prisma.user, "delete")
       .mockRejectedValueOnce(new Error("Simulated user deletion failure"));
