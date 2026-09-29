@@ -4,6 +4,9 @@ import crypto from "node:crypto";
 import { createOTP } from "@better-auth/utils/otp";
 import { getPrisma, disconnectDb } from "@/lib/db";
 import { provisionStaffMember } from "@/lib/staff/provisioning";
+import { handleAuth } from "@/app/api/auth/[...all]/route";
+import { POST as changePasswordHandler } from "@/app/api/v1/staff/auth/change-password/route";
+import { NextRequest } from "next/server";
 
 const DEFAULT_TEST_DB_URL =
   process.env.DATABASE_URL ||
@@ -158,108 +161,94 @@ test.describe("Real PostgreSQL Staff Provider Onboarding & Operations Vetting E2
       include: { internalStaffMembership: true },
     });
 
-    // --- Complete the staff lifecycle using Better Auth's actual API ---
-    // We use the server's HTTP API (via fetch) but carry cookies properly across steps.
-    // This ensures TOTP secret is stored encrypted by Better Auth and verifiable at login.
-    const baseUrl = process.env.BETTER_AUTH_URL ?? "http://localhost:3000";
+    // --- Complete the staff lifecycle via in-process handler calls ---
+    // This mirrors the proven integration-test pattern: call route handlers directly
+    // in the same Node.js process, avoiding HTTP cookie transport issues entirely.
+    // Better Auth encrypts the TOTP secret with BETTER_AUTH_SECRET — this guarantees
+    // the secret stored in DB is correct and TOTP codes generated at browser login verify.
 
-    // Helper: build a cookie jar string from Set-Cookie headers
-    function mergeCookies(previous: string, newSetCookies: string[]): string {
-      const jar = new Map<string, string>();
-      // Parse existing jar
-      for (const pair of previous.split(";")) {
-        const trimmed = pair.trim();
-        if (trimmed && trimmed.includes("=")) {
-          const eq = trimmed.indexOf("=");
-          jar.set(trimmed.slice(0, eq), trimmed.slice(eq + 1));
-        }
-      }
-      // Overwrite with new Set-Cookie values
-      for (const raw of newSetCookies) {
-        const nameVal = raw.split(";")[0].trim();
-        if (nameVal && nameVal.includes("=")) {
-          const eq = nameVal.indexOf("=");
-          jar.set(nameVal.slice(0, eq), nameVal.slice(eq + 1));
-        }
-      }
-      return Array.from(jar.entries())
-        .map(([k, v]) => `${k}=${v}`)
+    // Helper: extract name=value pairs from a set-cookie header string
+    function extractCookiePairs(setCookieHeader: string | null): string {
+      if (!setCookieHeader) return "";
+      return setCookieHeader
+        .split(",")
+        .map((c) => c.split(";")[0].trim())
+        .filter(Boolean)
         .join("; ");
     }
 
-    // Step 1: Sign in with the temporary password to get a session cookie.
-    const signInRes = await fetch(`${baseUrl}/api/auth/sign-in/email`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ email, password: TEST_PASSWORD }),
-    });
-    let cookieJar = mergeCookies("", signInRes.headers.getSetCookie?.() ?? []);
-    if (!cookieJar) {
-      const raw = signInRes.headers.get("set-cookie");
-      if (raw) cookieJar = raw.split(";")[0].trim();
-    }
-
-    // Step 2: Change password — clears mustChangePassword in Better Auth and rotates session.
+    // Step 1: Sign in with the temporary password.
     const ENROLLED_PASSWORD = `${TEST_PASSWORD}Enrolled!`;
-    const changePwRes = await fetch(`${baseUrl}/api/v1/staff/auth/change-password`, {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie: cookieJar },
-      body: JSON.stringify({ currentPassword: TEST_PASSWORD, newPassword: ENROLLED_PASSWORD }),
-    });
-    if (changePwRes.status !== 200) {
-      const body = await changePwRes.text();
-      throw new Error(`change-password failed (${changePwRes.status}): ${body}`);
+    const signInRes = await handleAuth(
+      new NextRequest("http://localhost:3000/api/auth/sign-in/email", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email, password: TEST_PASSWORD }),
+      })
+    );
+    if (signInRes.status !== 200) {
+      throw new Error(`sign-in failed (${signInRes.status}): ${await signInRes.text()}`);
     }
-    // Merge rotated session cookie into jar
-    const changePwSetCookies = changePwRes.headers.getSetCookie?.() ?? [];
-    if (changePwSetCookies.length > 0) {
-      cookieJar = mergeCookies(cookieJar, changePwSetCookies);
-    } else {
-      const raw = changePwRes.headers.get("set-cookie");
-      if (raw) cookieJar = mergeCookies(cookieJar, [raw]);
-    }
+    const sessionCookie = extractCookiePairs(signInRes.headers.get("set-cookie"));
 
-    // Step 3: Enable TOTP via Better Auth — it encrypts and stores the secret.
-    const enableRes = await fetch(`${baseUrl}/api/auth/two-factor/enable`, {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie: cookieJar },
-      body: JSON.stringify({ password: ENROLLED_PASSWORD }),
-    });
+    // Step 2: Change password — clears mustChangePassword and rotates the session token.
+    const changePwRes = await changePasswordHandler(
+      new NextRequest("http://localhost:3000/api/v1/staff/auth/change-password", {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: sessionCookie },
+        body: JSON.stringify({ currentPassword: TEST_PASSWORD, newPassword: ENROLLED_PASSWORD }),
+      })
+    );
+    if (changePwRes.status !== 200) {
+      throw new Error(
+        `change-password failed (${changePwRes.status}): ${await changePwRes.text()}`
+      );
+    }
+    const updatedCookie =
+      extractCookiePairs(changePwRes.headers.get("set-cookie")) || sessionCookie;
+
+    // Step 3: Enable TOTP — Better Auth encrypts and stores the secret.
+    const enableRes = await handleAuth(
+      new NextRequest("http://localhost:3000/api/auth/two-factor/enable", {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: updatedCookie },
+        body: JSON.stringify({ password: ENROLLED_PASSWORD }),
+      })
+    );
     const enableData = (await enableRes.json()) as { totpURI?: string; error?: string };
     if (!enableData.totpURI) {
       throw new Error(
-        `Better Auth two-factor/enable failed (status ${enableRes.status}) for ${email}: ${JSON.stringify(enableData)}`
+        `two-factor/enable failed (${enableRes.status}) for ${email}: ${JSON.stringify(enableData)}`
       );
     }
 
-    // Step 4: Derive the TOTP secret from the URI for use during browser login.
-    // Better Auth stores base32-encoded secret in the TOTP URI query param.
+    // Step 4: Extract the base32 TOTP secret from the URI.
     const totpUriParsed = new URL(enableData.totpURI);
     const totpSecret = totpUriParsed.searchParams.get("secret")!;
 
-    // Step 5: Verify one code to complete enrollment (marks verified=true in DB).
+    // Step 5: Verify one TOTP code to complete enrollment (marks verified=true in DB).
     const enrollCode = await createOTP(totpSecret, { digits: 6, period: 30 }).totp();
-    const verifyRes = await fetch(`${baseUrl}/api/auth/two-factor/verify-totp`, {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie: cookieJar },
-      body: JSON.stringify({ code: enrollCode }),
-    });
+    const verifyRes = await handleAuth(
+      new NextRequest("http://localhost:3000/api/auth/two-factor/verify-totp", {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: updatedCookie },
+        body: JSON.stringify({ code: enrollCode }),
+      })
+    );
     if (verifyRes.status !== 200) {
-      const verifyBody = await verifyRes.text();
       throw new Error(
-        `TOTP enrollment verification failed for ${email} (status ${verifyRes.status}): ${verifyBody}`
+        `TOTP verify failed (${verifyRes.status}) for ${email}: ${await verifyRes.text()}`
       );
     }
 
-    // Step 6: Ensure mustChangePassword is cleared in the membership record.
+    // Step 6: Ensure membership is fully active with no forced password change.
     await prisma.internalStaffMembership.update({
       where: { userId: user.id },
       data: { mustChangePassword: false, isActive: true },
     });
 
-    // Notice: ZERO handmade session cookies injected into the browser.
-    // The browser authenticates through /staff/login and /staff/mfa/verify using
-    // ENROLLED_PASSWORD and totpSecret (the base32 secret from the TOTP URI).
+    // The browser authenticates through /staff/login → /staff/mfa/verify using
+    // ENROLLED_PASSWORD and totpSecret. Zero handmade session cookies injected.
     return {
       user,
       email,
