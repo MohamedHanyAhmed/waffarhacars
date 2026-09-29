@@ -114,6 +114,9 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
             await prisma.internalStaffMembership.deleteMany({
               where: { userId: { in: userIds } },
             });
+            await prisma.twoFactor.deleteMany({
+              where: { userId: { in: userIds } },
+            });
             await prisma.session.deleteMany({
               where: { userId: { in: userIds } },
             });
@@ -168,6 +171,7 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
       fullName: `Test Staff ${role}`,
       employeeNumber: `EMP-${uid}`,
       department: dept,
+      role,
       isBootstrap: false,
     });
 
@@ -179,6 +183,15 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
     await prisma.user.update({
       where: { id: user.id },
       data: { twoFactorEnabled: true },
+    });
+
+    await prisma.twoFactor.create({
+      data: {
+        userId: user.id,
+        secret: "JBSWY3DPEHPK3PXP",
+        backupCodes: "[]",
+        verified: true,
+      },
     });
 
     await prisma.internalStaffMembership.update({
