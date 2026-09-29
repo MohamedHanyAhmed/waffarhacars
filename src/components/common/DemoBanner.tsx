@@ -2,15 +2,22 @@
 
 import React, { useState } from "react";
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { useI18n } from "../../context/I18nContext";
 import { LocaleToggle } from "./LocaleToggle";
 import { DemoScenarioDrawer } from "./DemoScenarioDrawer";
+import { StaffNavHeader } from "@/components/staff/StaffNavHeader";
 import { Sliders, Wrench, Menu, X } from "lucide-react";
 
 export function DemoBanner() {
+  const pathname = usePathname();
   const { t } = useI18n();
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
+  if (pathname?.startsWith("/staff")) {
+    return <StaffNavHeader />;
+  }
 
   return (
     <>

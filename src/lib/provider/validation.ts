@@ -18,8 +18,57 @@ export const CAIRO_CLUSTERS = [
 ] as const;
 
 export type CairoClusterType = (typeof CAIRO_CLUSTERS)[number];
+export type CairoCluster = CairoClusterType;
 
 export const ACTIVE_PILOT_CLUSTER: CairoClusterType = "NASR_CITY_HELIOPOLIS";
+
+export type ProviderStatus =
+  "DRAFT" | "PENDING_REVIEW" | "ACTIVE" | "PAUSED" | "REJECTED" | "TERMINATED";
+export type BranchStatus =
+  "DRAFT" | "PENDING_REVIEW" | "ACTIVE" | "PAUSED" | "REJECTED" | "TERMINATED";
+
+export interface ProviderBranchSummary {
+  id: string;
+  providerOrganizationId: string;
+  branchCode: string;
+  nameEn: string;
+  nameAr: string;
+  cluster: CairoCluster;
+  streetAddressEn: string;
+  streetAddressAr: string;
+  landmarkEn?: string | null;
+  landmarkAr?: string | null;
+  latitude: number;
+  longitude: number;
+  contactPhone: string;
+  operatingHours: OperatingHoursEntry[];
+  status: BranchStatus;
+  version: number;
+  vettedAt?: Date | string | null;
+  evidenceDocumentRef?: string | null;
+  rejectionReason?: string | null;
+}
+
+export interface ProviderOrganizationWithBranches {
+  id: string;
+  nameEn: string;
+  nameAr: string;
+  legalName: string;
+  taxRegistrationNumber: string;
+  commercialRegistrationNumber: string;
+  primaryCluster: CairoCluster;
+  contactPersonName: string;
+  contactEmail: string;
+  contactPhone: string;
+  status: ProviderStatus;
+  version: number;
+  submittedByUserId?: string | null;
+  submittedAt?: Date | string | null;
+  activatedAt?: Date | string | null;
+  pausedAt?: Date | string | null;
+  rejectionReason?: string | null;
+  branches: ProviderBranchSummary[];
+}
 
 // Egyptian Tax ID: exactly 9 digits
 export const EGYPTIAN_TAX_ID_REGEX = /^\d{9}$/;
@@ -43,6 +92,8 @@ export const OperatingHoursDaySchema = z.object({
   }),
   isClosed: z.boolean().default(false),
 });
+
+export type OperatingHoursEntry = z.infer<typeof OperatingHoursDaySchema>;
 
 export const OperatingHoursSchema = z
   .array(OperatingHoursDaySchema)

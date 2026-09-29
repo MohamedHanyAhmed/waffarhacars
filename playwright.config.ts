@@ -15,12 +15,14 @@ export default defineConfig({
   projects: [
     {
       name: "Desktop Chrome",
-      testMatch: /(showcase|customer-auth|staff-auth-ui-mocked)\.spec\.ts/,
+      testMatch:
+        /(showcase|customer-auth|staff-auth-ui-mocked|staff-provider-onboarding)\.spec\.ts/,
       use: { ...devices["Desktop Chrome"], viewport: { width: 1440, height: 900 } },
     },
     {
       name: "Mobile Chrome",
-      testMatch: /(showcase|customer-auth|staff-auth-ui-mocked)\.spec\.ts/,
+      testMatch:
+        /(showcase|customer-auth|staff-auth-ui-mocked|staff-provider-onboarding)\.spec\.ts/,
       use: { ...devices["Pixel 5"], viewport: { width: 390, height: 844 } },
     },
     {

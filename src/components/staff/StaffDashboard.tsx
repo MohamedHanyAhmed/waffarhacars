@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useI18n } from "@/context/I18nContext";
 import {
@@ -227,6 +228,78 @@ export function StaffDashboard() {
             <span className="px-2.5 py-1 bg-slate-200 font-mono text-xs font-semibold rounded-lg text-slate-700">
               ZERO-BYPASS
             </span>
+          </div>
+        </div>
+
+        {/* Onboarding Workflows Navigation */}
+        <div className="mt-6 pt-6 border-t border-slate-100 space-y-4">
+          <h2 className="text-xs font-bold text-slate-400 uppercase tracking-wider">
+            {t("onboarding.nav.brand") || "Provider Onboarding"}
+          </h2>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <Link
+              href="/staff/providers"
+              className="flex items-center justify-between p-4 rounded-xl border border-slate-200 hover:border-brand-500 hover:shadow-xs bg-white transition-all group"
+            >
+              <div className="flex items-center space-x-3 rtl:space-x-reverse">
+                <div className="p-2 bg-slate-100 group-hover:bg-brand-50 rounded-lg text-slate-600 group-hover:text-brand-600 transition-colors">
+                  <Building2 className="w-5 h-5" />
+                </div>
+                <div>
+                  <span className="text-sm font-bold text-slate-900 block">
+                    {t("onboarding.nav.directory") || "Provider Directory"}
+                  </span>
+                  <span className="text-xs text-slate-500">
+                    Search and manage service workshops
+                  </span>
+                </div>
+              </div>
+              <span className="text-xs font-semibold text-brand-600">→</span>
+            </Link>
+
+            {(data.department === "SALES" || data.department === "ADMIN") && (
+              <Link
+                href="/staff/providers/new"
+                className="flex items-center justify-between p-4 rounded-xl border border-slate-200 hover:border-brand-500 hover:shadow-xs bg-white transition-all group"
+              >
+                <div className="flex items-center space-x-3 rtl:space-x-reverse">
+                  <div className="p-2 bg-slate-100 group-hover:bg-brand-50 rounded-lg text-slate-600 group-hover:text-brand-600 transition-colors">
+                    <ShieldCheck className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <span className="text-sm font-bold text-slate-900 block">
+                      {t("onboarding.nav.newProvider") || "New Provider"}
+                    </span>
+                    <span className="text-xs text-slate-500">
+                      Create and onboard workshop draft
+                    </span>
+                  </div>
+                </div>
+                <span className="text-xs font-semibold text-brand-600">→</span>
+              </Link>
+            )}
+
+            {(data.department === "OPERATIONS" || data.department === "ADMIN") && (
+              <Link
+                href="/staff/ops/queue"
+                className="flex items-center justify-between p-4 rounded-xl border border-slate-200 hover:border-brand-500 hover:shadow-xs bg-white transition-all group"
+              >
+                <div className="flex items-center space-x-3 rtl:space-x-reverse">
+                  <div className="p-2 bg-slate-100 group-hover:bg-brand-50 rounded-lg text-slate-600 group-hover:text-brand-600 transition-colors">
+                    <BadgeCheck className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <span className="text-sm font-bold text-slate-900 block">
+                      {t("onboarding.nav.opsQueue") || "Operations Queue"}
+                    </span>
+                    <span className="text-xs text-slate-500">
+                      Review submissions & vet branches
+                    </span>
+                  </div>
+                </div>
+                <span className="text-xs font-semibold text-brand-600">→</span>
+              </Link>
+            )}
           </div>
         </div>
       </div>

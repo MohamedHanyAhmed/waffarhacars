@@ -15,6 +15,7 @@ export type StaffLifecycleState =
 
 export interface StaffAuthStatusResponse {
   state: StaffLifecycleState;
+  userId?: string;
   email?: string;
   name?: string;
   department?: StaffDepartment;
