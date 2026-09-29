@@ -4,15 +4,8 @@ import React, { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useI18n } from "@/context/I18nContext";
-import {
-  Building2,
-  ArrowLeft,
-  Save,
-  Loader2,
-  AlertCircle,
-  CheckCircle2,
-  AlertTriangle,
-} from "lucide-react";
+import { Building2, ArrowLeft, Save, Loader2, AlertCircle, CheckCircle2 } from "lucide-react";
+import { OutcomeUnknownBanner } from "@/components/staff/OutcomeUnknownBanner";
 import type { CairoCluster } from "@/lib/provider/validation";
 
 export default function NewProviderPage() {
@@ -35,6 +28,9 @@ export default function NewProviderPage() {
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [generalError, setGeneralError] = useState<string | null>(null);
   const [uncertainOutcome, setUncertainOutcome] = useState(false);
+  const [uncertainMessage, setUncertainMessage] = useState<string | null>(null);
+  const [isRechecking, setIsRechecking] = useState(false);
+  const [canDeliberateRetry, setCanDeliberateRetry] = useState(false);
 
   const handleFieldChange = (setter: React.Dispatch<React.SetStateAction<string>>) => {
     return (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
@@ -154,13 +150,57 @@ export default function NewProviderPage() {
       const targetId = json.id || json.provider?.id;
       router.push(`/staff/providers/${targetId}`);
     } catch {
-      // Network timeout / unknown outcome: do NOT create blindly again
-      setUncertainOutcome(true);
-      setGeneralError(
-        "Network connection interrupted. The server outcome is unconfirmed. Do NOT submit again blindly; please check the Provider Directory to reconcile before attempting again."
-      );
+      // Invariant: Treat lost mutation responses as unknown, not failed.
+      // A single read-back that fails or sees an old version cannot authorize "safe retry".
       setIsSubmitting(false);
+      setUncertainOutcome(true);
+      setCanDeliberateRetry(false);
+      setUncertainMessage(null);
     }
+  };
+
+  const handleRecheckStatus = async () => {
+    setIsRechecking(true);
+    const cleanTax = taxRegistrationNumber.trim();
+    try {
+      const checkRes = await fetch("/api/v1/staff/providers", {
+        cache: "no-store",
+        headers: { Accept: "application/json" },
+      });
+      if (checkRes.ok) {
+        const list = await checkRes.json();
+        const existing = Array.isArray(list)
+          ? list.find(
+              (p: { taxRegistrationNumber?: string }) => p.taxRegistrationNumber === cleanTax
+            )
+          : null;
+        if (existing) {
+          // Late commit verified! Reconcile immediately.
+          setIsDirty(false);
+          router.push(`/staff/providers/${existing.id}`);
+          return;
+        } else {
+          // Confirmed NOT committed by fresh authoritative server read-back.
+          setCanDeliberateRetry(true);
+          setUncertainMessage(t("onboarding.uncertainty.confirmedNotCommitted"));
+        }
+      } else {
+        setCanDeliberateRetry(false);
+        setUncertainMessage(t("onboarding.uncertainty.readBackFailed"));
+      }
+    } catch {
+      setCanDeliberateRetry(false);
+      setUncertainMessage(t("onboarding.uncertainty.readBackFailed"));
+    } finally {
+      setIsRechecking(false);
+    }
+  };
+
+  const handleDeliberateRetry = () => {
+    setUncertainOutcome(false);
+    setCanDeliberateRetry(false);
+    setUncertainMessage(null);
+    handleSubmit(new Event("submit") as unknown as React.FormEvent);
   };
 
   return (
@@ -198,38 +238,28 @@ export default function NewProviderPage() {
         </div>
       </div>
 
+      {/* Outcome Unknown Banner */}
+      <OutcomeUnknownBanner
+        isOpen={uncertainOutcome}
+        message={uncertainMessage}
+        isRechecking={isRechecking}
+        canRetry={canDeliberateRetry}
+        onRecheck={handleRecheckStatus}
+        onRetry={handleDeliberateRetry}
+      />
+
       {/* Error Summary Banner */}
-      {generalError && (
+      {generalError && !uncertainOutcome && (
         <div
           role="alert"
-          className={`p-4 rounded-2xl text-xs flex items-start gap-3 ${
-            uncertainOutcome
-              ? "bg-amber-50 border border-amber-300 text-amber-950"
-              : "bg-rose-50 border border-rose-200 text-rose-900"
-          }`}
+          className="p-4 rounded-2xl text-xs flex items-start gap-3 bg-rose-50 border border-rose-200 text-rose-900"
         >
-          {uncertainOutcome ? (
-            <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
-          ) : (
-            <AlertCircle className="w-5 h-5 text-rose-600 flex-shrink-0 mt-0.5" />
-          )}
+          <AlertCircle className="w-5 h-5 text-rose-600 flex-shrink-0 mt-0.5" />
           <div className="space-y-1">
             <span className="font-bold block">
-              {uncertainOutcome
-                ? "Unconfirmed Operation Outcome"
-                : t("onboarding.providerForm.errorSummaryTitle")}
+              {t("onboarding.providerForm.errorSummaryTitle")}
             </span>
             <p className="leading-relaxed">{generalError}</p>
-            {uncertainOutcome && (
-              <div className="pt-2">
-                <Link
-                  href="/staff/providers"
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-600 text-white font-bold hover:bg-amber-700 transition-colors"
-                >
-                  <span>Go to Provider Directory to Reconcile</span>
-                </Link>
-              </div>
-            )}
           </div>
         </div>
       )}
@@ -500,7 +530,7 @@ export default function NewProviderPage() {
 
           <button
             type="submit"
-            disabled={isSubmitting}
+            disabled={isSubmitting || (uncertainOutcome && !canDeliberateRetry)}
             className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl text-xs font-bold text-white bg-brand-600 hover:bg-brand-700 disabled:opacity-50 transition-colors shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
           >
             {isSubmitting ? (

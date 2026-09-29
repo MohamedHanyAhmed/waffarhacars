@@ -7,6 +7,7 @@ import { useI18n } from "@/context/I18nContext";
 import { Building2, ArrowLeft, Save, Loader2, AlertCircle, AlertTriangle } from "lucide-react";
 import { ConflictResolver } from "@/components/staff/ConflictResolver";
 import { ProviderStatusBadge } from "@/components/staff/ProviderStatusBadge";
+import { OutcomeUnknownBanner } from "@/components/staff/OutcomeUnknownBanner";
 import type { CairoCluster } from "@/lib/provider/validation";
 import type { ProviderOrganizationDto } from "@/lib/provider/dto";
 
@@ -41,6 +42,9 @@ export default function EditProviderOrganizationPage({
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [generalError, setGeneralError] = useState<string | null>(null);
   const [uncertainOutcome, setUncertainOutcome] = useState(false);
+  const [uncertainMessage, setUncertainMessage] = useState<string | null>(null);
+  const [isRechecking, setIsRechecking] = useState(false);
+  const [canDeliberateRetry, setCanDeliberateRetry] = useState(false);
 
   // Concurrency Conflict State
   const [conflictOpen, setConflictOpen] = useState(false);
@@ -224,28 +228,56 @@ export default function EditProviderOrganizationPage({
       setIsDirty(false);
       router.push(`/staff/providers/${providerId}`);
     } catch {
-      // Invariant: Treat outcome as unknown, read back record before allowing deliberate retry
-      try {
-        const checkRes = await fetch(`/api/v1/staff/providers/${providerId}`);
-        if (checkRes.ok) {
-          const latest: ProviderOrganizationDto = await checkRes.json();
-          if (latest.version > expectedVersion) {
-            // Update actually succeeded on the server before network interruption
-            setIsDirty(false);
-            router.push(`/staff/providers/${providerId}`);
-            return;
-          }
-        }
-      } catch {
-        // Read-back failed as well
-      }
-
-      setUncertainOutcome(true);
-      setGeneralError(
-        "Network connection interrupted. We verified the server and your draft updates were not applied. Your entered data has been preserved; you may safely retry."
-      );
+      // Invariant: Treat lost mutation responses as unknown, not failed.
+      // A single read-back that fails or sees an old version cannot authorize "safe retry".
       setIsSubmitting(false);
+      setUncertainOutcome(true);
+      setCanDeliberateRetry(false);
+      setUncertainMessage(null);
     }
+  };
+
+  const handleRecheckStatus = async () => {
+    setIsRechecking(true);
+    try {
+      const checkRes = await fetch(`/api/v1/staff/providers/${providerId}`, {
+        cache: "no-store",
+        headers: { Accept: "application/json" },
+      });
+      if (checkRes.ok) {
+        const latest: ProviderOrganizationDto = await checkRes.json();
+        if (latest.version > expectedVersion) {
+          // Late commit verified! Reconcile immediately.
+          setIsDirty(false);
+          router.push(`/staff/providers/${providerId}`);
+          return;
+        } else if (latest.version === expectedVersion) {
+          // Confirmed NOT committed by fresh authoritative server read-back.
+          // Now outcome is established -> permit deliberate retry.
+          setCanDeliberateRetry(true);
+          setUncertainMessage(t("onboarding.uncertainty.confirmedNotCommitted"));
+        } else {
+          // Version conflict
+          setServerProvider(latest);
+          setConflictOpen(true);
+        }
+      } else {
+        setCanDeliberateRetry(false);
+        setUncertainMessage(t("onboarding.uncertainty.readBackFailed"));
+      }
+    } catch {
+      setCanDeliberateRetry(false);
+      setUncertainMessage(t("onboarding.uncertainty.readBackFailed"));
+    } finally {
+      setIsRechecking(false);
+    }
+  };
+
+  const handleDeliberateRetry = () => {
+    setUncertainOutcome(false);
+    setCanDeliberateRetry(false);
+    setUncertainMessage(null);
+    handleSubmit(new Event("submit") as unknown as React.FormEvent);
   };
 
   const handleApplyServerState = () => {
@@ -359,8 +391,18 @@ export default function EditProviderOrganizationPage({
         </div>
       </div>
 
+      {/* Outcome Unknown Banner (Lost response / unconfirmed outcome) */}
+      <OutcomeUnknownBanner
+        isOpen={uncertainOutcome}
+        message={uncertainMessage}
+        isRechecking={isRechecking}
+        canRetry={canDeliberateRetry}
+        onRecheck={handleRecheckStatus}
+        onRetry={handleDeliberateRetry}
+      />
+
       {/* General Error Notice */}
-      {generalError && (
+      {generalError && !uncertainOutcome && (
         <div
           role="alert"
           className="p-4 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-start gap-3"
@@ -368,12 +410,6 @@ export default function EditProviderOrganizationPage({
           <AlertCircle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
           <div className="flex-1">
             <p className="font-semibold">{generalError}</p>
-            {uncertainOutcome && (
-              <p className="mt-1 text-rose-700 text-[11px]">
-                Your form changes are safely preserved. Click &quot;Save Changes&quot; below to
-                retry.
-              </p>
-            )}
           </div>
         </div>
       )}
@@ -644,7 +680,7 @@ export default function EditProviderOrganizationPage({
           <button
             type="submit"
             id="save-provider-edit-btn"
-            disabled={isSubmitting || !isDirty}
+            disabled={isSubmitting || !isDirty || (uncertainOutcome && !canDeliberateRetry)}
             className="inline-flex items-center gap-1.5 px-5 py-2.5 bg-brand-600 hover:bg-brand-700 text-white rounded-xl text-xs font-semibold shadow-xs disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           >
             {isSubmitting ? (

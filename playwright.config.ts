@@ -26,6 +26,11 @@ export default defineConfig({
       use: { ...devices["Pixel 5"], viewport: { width: 390, height: 844 } },
     },
     {
+      name: "PostgreSQL Real Staff Provider Onboarding",
+      testMatch: /staff-provider-onboarding-real\.spec\.ts/,
+      use: { ...devices["Desktop Chrome"], viewport: { width: 1440, height: 900 } },
+    },
+    {
       name: "Visual Evidence Capture",
       testMatch: /screenshots\.spec\.ts/,
       use: { ...devices["Desktop Chrome"] },

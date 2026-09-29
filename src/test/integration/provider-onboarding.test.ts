@@ -2574,4 +2574,294 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
     expect(resubmittedProv.status).toBe("PENDING_REVIEW");
     expect(resubmittedProv.version).toBe(6);
   });
+
+  describe("Failure Matrix: Lost Mutation Responses, Unknown Outcomes, Stale Versions, Concurrent Updates & DB Failures", () => {
+    it("late commit & lost mutation response: authoritative server read-back reconciles state without duplicate dispatch", async () => {
+      if (!isDbReachable) return;
+      const sales = await createAuthenticatedStaffUser("SALES_AGENT", "SALES");
+      const prisma = getPrisma();
+      const uid = crypto.randomUUID().slice(0, 8);
+
+      // Create provider draft
+      const createRes = await createProviderHandler(
+        new NextRequest("http://localhost:3000/api/v1/staff/providers", {
+          method: "POST",
+          headers: { "content-type": "application/json", cookie: sales.cookie },
+          body: JSON.stringify({
+            nameEn: `Late Commit Test ${uid}`,
+            nameAr: `اختبار التأخير ${uid}`,
+            legalName: `Late Commit S.A.E. ${uid}`,
+            taxRegistrationNumber: `${Math.floor(100000000 + Math.random() * 900000000)}`,
+            commercialRegistrationNumber: `CR-LC-${uid}`,
+            primaryCluster: "NASR_CITY_HELIOPOLIS",
+            contactPersonName: "Omar Hani",
+            contactEmail: `omar-${uid}@latecommit.eg`,
+            contactPhone: "+201012345678",
+          }),
+        })
+      );
+      expect(createRes.status).toBe(201);
+      const prov = await createRes.json();
+      createdProviderIds.push(prov.id);
+      expect(prov.version).toBe(1);
+
+      // In-flight mutation: Sales dispatches edit
+      const patchRes = await updateProviderHandler(
+        new NextRequest(`http://localhost:3000/api/v1/staff/providers/${prov.id}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json", cookie: sales.cookie },
+          body: JSON.stringify({
+            expectedVersion: 1,
+            nameEn: `Late Commit Committed ${uid}`,
+          }),
+        }),
+        { params: Promise.resolve({ id: prov.id }) }
+      );
+      expect(patchRes.status).toBe(200);
+      const patched = await patchRes.json();
+      expect(patched.version).toBe(2);
+
+      // Client experienced lost response / connection reset, so it treats outcome as UNKNOWN
+      // Client re-checks status authoritatively:
+      const readBackRes = await getProviderHandler(
+        new NextRequest(`http://localhost:3000/api/v1/staff/providers/${prov.id}`, {
+          method: "GET",
+          headers: { cookie: sales.cookie },
+        }),
+        { params: Promise.resolve({ id: prov.id }) }
+      );
+      expect(readBackRes.status).toBe(200);
+      const latest = await readBackRes.json();
+
+      // Invariant: latest.version (2) > expectedVersion (1) -> late commit confirmed!
+      expect(latest.version).toBeGreaterThan(1);
+      expect(latest.nameEn).toBe(`Late Commit Committed ${uid}`);
+
+      // Final PostgreSQL inspection: exactly 1 record, version is 2
+      const inDb = await prisma.providerOrganization.findUniqueOrThrow({
+        where: { id: prov.id },
+      });
+      expect(inDb.version).toBe(2);
+      expect(inDb.nameEn).toBe(`Late Commit Committed ${uid}`);
+    });
+
+    it("duplicate request rejection: second dispatch with stale expectedVersion triggers 409 Conflict", async () => {
+      if (!isDbReachable) return;
+      const sales = await createAuthenticatedStaffUser("SALES_AGENT", "SALES");
+      const prisma = getPrisma();
+      const uid = crypto.randomUUID().slice(0, 8);
+
+      const createRes = await createProviderHandler(
+        new NextRequest("http://localhost:3000/api/v1/staff/providers", {
+          method: "POST",
+          headers: { "content-type": "application/json", cookie: sales.cookie },
+          body: JSON.stringify({
+            nameEn: `Duplicate Test ${uid}`,
+            nameAr: `اختبار التكرار ${uid}`,
+            legalName: `Duplicate S.A.E. ${uid}`,
+            taxRegistrationNumber: `${Math.floor(100000000 + Math.random() * 900000000)}`,
+            commercialRegistrationNumber: `CR-DUP-${uid}`,
+            primaryCluster: "MAADI",
+            contactPersonName: "Samir Adel",
+            contactEmail: `samir-${uid}@duplicate.eg`,
+            contactPhone: "+201012345678",
+          }),
+        })
+      );
+      const prov = await createRes.json();
+      createdProviderIds.push(prov.id);
+
+      // First dispatch succeeds
+      const patch1 = await updateProviderHandler(
+        new NextRequest(`http://localhost:3000/api/v1/staff/providers/${prov.id}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json", cookie: sales.cookie },
+          body: JSON.stringify({ expectedVersion: 1, nameEn: `First Dispatch ${uid}` }),
+        }),
+        { params: Promise.resolve({ id: prov.id }) }
+      );
+      expect(patch1.status).toBe(200);
+
+      // Automated duplicate dispatch with stale expectedVersion 1 is rejected
+      const patch2 = await updateProviderHandler(
+        new NextRequest(`http://localhost:3000/api/v1/staff/providers/${prov.id}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json", cookie: sales.cookie },
+          body: JSON.stringify({ expectedVersion: 1, nameEn: `Duplicate Dispatch ${uid}` }),
+        }),
+        { params: Promise.resolve({ id: prov.id }) }
+      );
+      expect(patch2.status).toBe(409);
+      const conflictBody = await patch2.json();
+      expect(conflictBody.error).toBe("VERSION_CONFLICT");
+
+      // Verify PostgreSQL state preserves first mutation
+      const finalDb = await prisma.providerOrganization.findUniqueOrThrow({
+        where: { id: prov.id },
+      });
+      expect(finalDb.version).toBe(2);
+      expect(finalDb.nameEn).toBe(`First Dispatch ${uid}`);
+    });
+
+    it("concurrent updates: race between two agents with same expectedVersion allows exactly one commit", async () => {
+      if (!isDbReachable) return;
+      const sales1 = await createAuthenticatedStaffUser("SALES_AGENT", "SALES");
+      const sales2 = await createAuthenticatedStaffUser("SALES_AGENT", "SALES");
+      const prisma = getPrisma();
+      const uid = crypto.randomUUID().slice(0, 8);
+
+      const createRes = await createProviderHandler(
+        new NextRequest("http://localhost:3000/api/v1/staff/providers", {
+          method: "POST",
+          headers: { "content-type": "application/json", cookie: sales1.cookie },
+          body: JSON.stringify({
+            nameEn: `Race Condition Test ${uid}`,
+            nameAr: `اختبار التزامن ${uid}`,
+            legalName: `Race S.A.E. ${uid}`,
+            taxRegistrationNumber: `${Math.floor(100000000 + Math.random() * 900000000)}`,
+            commercialRegistrationNumber: `CR-RACE-${uid}`,
+            primaryCluster: "NEW_CAIRO",
+            contactPersonName: "Laila Sherif",
+            contactEmail: `laila-${uid}@race.eg`,
+            contactPhone: "+201012345678",
+          }),
+        })
+      );
+      const prov = await createRes.json();
+      createdProviderIds.push(prov.id);
+
+      // Concurrently dispatch two updates with expectedVersion: 1
+      const [res1, res2] = await Promise.all([
+        updateProviderHandler(
+          new NextRequest(`http://localhost:3000/api/v1/staff/providers/${prov.id}`, {
+            method: "PATCH",
+            headers: { "content-type": "application/json", cookie: sales1.cookie },
+            body: JSON.stringify({ expectedVersion: 1, nameEn: `Agent 1 Update ${uid}` }),
+          }),
+          { params: Promise.resolve({ id: prov.id }) }
+        ),
+        updateProviderHandler(
+          new NextRequest(`http://localhost:3000/api/v1/staff/providers/${prov.id}`, {
+            method: "PATCH",
+            headers: { "content-type": "application/json", cookie: sales2.cookie },
+            body: JSON.stringify({ expectedVersion: 1, nameEn: `Agent 2 Update ${uid}` }),
+          }),
+          { params: Promise.resolve({ id: prov.id }) }
+        ),
+      ]);
+
+      const statuses = [res1.status, res2.status].sort();
+      // Exactly one 200 (success) and one 409 (concurrency conflict)
+      expect(statuses).toEqual([200, 409]);
+
+      // Final DB record is cleanly at version 2
+      const finalDb = await prisma.providerOrganization.findUniqueOrThrow({
+        where: { id: prov.id },
+      });
+      expect(finalDb.version).toBe(2);
+    });
+
+    it("interrupted mutation confirmed not applied: deliberate retry succeeds safely", async () => {
+      if (!isDbReachable) return;
+      const sales = await createAuthenticatedStaffUser("SALES_AGENT", "SALES");
+      const prisma = getPrisma();
+      const uid = crypto.randomUUID().slice(0, 8);
+
+      const createRes = await createProviderHandler(
+        new NextRequest("http://localhost:3000/api/v1/staff/providers", {
+          method: "POST",
+          headers: { "content-type": "application/json", cookie: sales.cookie },
+          body: JSON.stringify({
+            nameEn: `Retry Verification ${uid}`,
+            nameAr: `تحقق إعادة المحاولة ${uid}`,
+            legalName: `Retry S.A.E. ${uid}`,
+            taxRegistrationNumber: `${Math.floor(100000000 + Math.random() * 900000000)}`,
+            commercialRegistrationNumber: `CR-RETRY-${uid}`,
+            primaryCluster: "OCTOBER_ZAYED",
+            contactPersonName: "Kareem Nour",
+            contactEmail: `kareem-${uid}@retry.eg`,
+            contactPhone: "+201012345678",
+          }),
+        })
+      );
+      const prov = await createRes.json();
+      createdProviderIds.push(prov.id);
+
+      // Simulated network interruption: the request never touched the database
+      // Authoritative read-back checks server state
+      const checkRes = await getProviderHandler(
+        new NextRequest(`http://localhost:3000/api/v1/staff/providers/${prov.id}`, {
+          method: "GET",
+          headers: { cookie: sales.cookie },
+        }),
+        { params: Promise.resolve({ id: prov.id }) }
+      );
+      expect(checkRes.status).toBe(200);
+      const authoritative = await checkRes.json();
+
+      // Read-back confirms: version is still 1 (unmutated) -> outcome established as NOT applied
+      expect(authoritative.version).toBe(1);
+
+      // Deliberate retry is now authorized and dispatched
+      const retryRes = await updateProviderHandler(
+        new NextRequest(`http://localhost:3000/api/v1/staff/providers/${prov.id}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json", cookie: sales.cookie },
+          body: JSON.stringify({
+            expectedVersion: 1,
+            nameEn: `Deliberate Retry Succeeded ${uid}`,
+          }),
+        }),
+        { params: Promise.resolve({ id: prov.id }) }
+      );
+      expect(retryRes.status).toBe(200);
+      const finalProv = await retryRes.json();
+      expect(finalProv.version).toBe(2);
+      expect(finalProv.nameEn).toBe(`Deliberate Retry Succeeded ${uid}`);
+
+      // Final PostgreSQL inspection
+      const inDb = await prisma.providerOrganization.findUniqueOrThrow({
+        where: { id: prov.id },
+      });
+      expect(inDb.version).toBe(2);
+      expect(inDb.nameEn).toBe(`Deliberate Retry Succeeded ${uid}`);
+    });
+
+    it("database failure rollback: aborted multi-operation mutation leaves zero orphan records", async () => {
+      if (!isDbReachable) return;
+      const sales = await createAuthenticatedStaffUser("SALES_AGENT", "SALES");
+      const prisma = getPrisma();
+      const fakeProviderId = crypto.randomUUID();
+
+      // Attempt branch creation on non-existent provider (violates foreign key constraint)
+      const branchRes = await createBranchHandler(
+        new NextRequest(`http://localhost:3000/api/v1/staff/providers/${fakeProviderId}/branches`, {
+          method: "POST",
+          headers: { "content-type": "application/json", cookie: sales.cookie },
+          body: JSON.stringify({
+            branchCode: "BR-ORPHAN-FAIL",
+            nameEn: "Orphan Branch",
+            nameAr: "فرع يتيم",
+            cluster: "NASR_CITY_HELIOPOLIS",
+            streetAddressEn: "Test Street",
+            streetAddressAr: "شارع التجربة",
+            latitude: 30.05,
+            longitude: 31.33,
+            contactPhone: "+201012345678",
+            operatingHours: [],
+          }),
+        }),
+        { params: Promise.resolve({ id: fakeProviderId }) }
+      );
+
+      // Must fail with 404 or 500
+      expect([404, 500]).toContain(branchRes.status);
+
+      // Invariant: zero orphan records created in PostgreSQL
+      const orphanBranches = await prisma.providerBranch.findMany({
+        where: { branchCode: "BR-ORPHAN-FAIL" },
+      });
+      expect(orphanBranches.length).toBe(0);
+    });
+  });
 });

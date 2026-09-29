@@ -1,6 +1,7 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, Page } from "@playwright/test";
 import pg from "pg";
 import crypto from "node:crypto";
+import { createOTP } from "@better-auth/utils/otp";
 import { getPrisma, disconnectDb } from "@/lib/db";
 import { provisionStaffMember } from "@/lib/staff/provisioning";
 
@@ -8,12 +9,43 @@ const DEFAULT_TEST_DB_URL =
   process.env.DATABASE_URL ||
   "postgresql://test_user:test_password@localhost:5432/waffarhacars_test";
 
-const TEST_SECRET =
-  process.env.BETTER_AUTH_SECRET || "ci-non-production-test-secret-at-least-32-chars-long";
+const TOTP_SECRET = "JBSWY3DPEHPK3PXP";
+const TEST_PASSWORD = "ValidStaffPassword123!";
 
-function createSignedSessionCookie(token: string, secret: string = TEST_SECRET): string {
-  const signature = crypto.createHmac("sha256", secret).update(token).digest("base64");
-  return `${token}.${signature}`;
+/**
+ * Performs actual staff authentication in the browser via the UI form:
+ * 1. POST /api/auth/sign-in/email via /staff/login
+ * 2. Redirect to /staff/mfa/verify
+ * 3. Fill 6-digit TOTP code and submit via POST /api/auth/two-factor/verify-totp
+ * 4. Resolves authenticated session with zero handmade cookies.
+ */
+async function performRealStaffLogin(
+  page: Page,
+  email: string,
+  password: string,
+  totpSecret: string
+) {
+  await page.goto("/staff/login");
+  await page.waitForSelector("input[type='email']");
+  await page.fill("input[type='email']", email);
+  await page.fill("input[type='password']", password);
+  await page.click("button[type='submit']");
+
+  // Better Auth TOTP flow triggers redirect to /staff/mfa/verify
+  await page.waitForURL("**/staff/mfa/verify", { timeout: 15000 });
+
+  // Generate authentic time-based 6-digit OTP code using standard TOTP secret
+  const totpCode = await createOTP(totpSecret, { digits: 6, period: 30 }).totp();
+
+  await page.waitForSelector("input[type='text']");
+  await page.fill("input[type='text']", totpCode);
+  await page.click("button[type='submit']");
+
+  // Wait for redirect to staff landing page
+  await page.waitForURL(
+    (url) => !url.pathname.includes("/staff/mfa/verify") && !url.pathname.includes("/staff/login"),
+    { timeout: 15000 }
+  );
 }
 
 test.describe("Real PostgreSQL Staff Provider Onboarding & Operations Vetting E2E", () => {
@@ -24,7 +56,7 @@ test.describe("Real PostgreSQL Staff Provider Onboarding & Operations Vetting E2
   test.beforeAll(async () => {
     const probe = new pg.Client({
       connectionString: DEFAULT_TEST_DB_URL,
-      connectionTimeoutMillis: 3000,
+      connectionTimeoutMillis: 5000,
     });
     try {
       await probe.connect();
@@ -32,8 +64,9 @@ test.describe("Real PostgreSQL Staff Provider Onboarding & Operations Vetting E2
       if (res.rows[0]?.probe === 1) {
         isDbReachable = true;
       }
-    } catch {
+    } catch (err) {
       isDbReachable = false;
+      console.error("PostgreSQL probe failed:", err);
     } finally {
       await probe.end().catch(() => {});
     }
@@ -88,7 +121,7 @@ test.describe("Real PostgreSQL Staff Provider Onboarding & Operations Vetting E2
     }
   });
 
-  async function createRealStaffSession(
+  async function createRealStaffUser(
     role: "SALES_AGENT" | "OPS_SUPERVISOR",
     dept: "SALES" | "OPERATIONS"
   ) {
@@ -104,7 +137,7 @@ test.describe("Real PostgreSQL Staff Provider Onboarding & Operations Vetting E2
       createdUserEmails.push(adminEmail);
       await provisionStaffMember({
         email: adminEmail,
-        password: "ValidStaffPassword123!",
+        password: TEST_PASSWORD,
         fullName: "System Admin Bootstrap",
         employeeNumber: `BOOT-${uid}`,
         department: "ADMIN",
@@ -114,7 +147,7 @@ test.describe("Real PostgreSQL Staff Provider Onboarding & Operations Vetting E2
 
     const provisionResult = await provisionStaffMember({
       email,
-      password: "ValidStaffPassword123!",
+      password: TEST_PASSWORD,
       fullName: `Real Staff ${role}`,
       employeeNumber: `EMP-${uid}`,
       department: dept,
@@ -135,7 +168,7 @@ test.describe("Real PostgreSQL Staff Provider Onboarding & Operations Vetting E2
     await prisma.twoFactor.create({
       data: {
         userId: user.id,
-        secret: "JBSWY3DPEHPK3PXP",
+        secret: TOTP_SECRET,
         backupCodes: "[]",
         verified: true,
       },
@@ -146,223 +179,237 @@ test.describe("Real PostgreSQL Staff Provider Onboarding & Operations Vetting E2
       data: { mustChangePassword: false, isActive: true },
     });
 
-    const sessionToken = `test-session-${crypto.randomUUID()}`;
-    await prisma.session.create({
-      data: {
-        userId: user.id,
-        token: sessionToken,
-        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
-        lastActivityAt: new Date(),
-      },
-    });
-
+    // Notice: ZERO handmade session cookies injected into database.
+    // The browser will authenticate through /staff/login and /staff/mfa/verify.
     return {
       user,
-      cookieValue: createSignedSessionCookie(sessionToken),
+      email,
+      password: TEST_PASSWORD,
+      totpSecret: TOTP_SECRET,
     };
   }
 
-  test("executes real PostgreSQL Sales onboarding, organization editing, Operations vetting/activation, and Arabic pass", async ({
-    page,
-    context,
+  test("executes non-skippable real PostgreSQL Sales onboarding, organization editing, Operations vetting/activation, and bilingual RTL/LTR verification", async ({
+    browser,
   }) => {
-    test.skip(
-      !isDbReachable,
-      "PostgreSQL test container is not reachable. Skipping real DB E2E test."
-    );
+    // Non-skippable gate invariant: fail rather than skip if DB setup is missing
+    if (!isDbReachable) {
+      throw new Error(
+        `PostgreSQL test container is not reachable at ${DEFAULT_TEST_DB_URL}. Gate failed: real DB E2E test is mandatory.`
+      );
+    }
 
     const prisma = getPrisma();
     const uid = crypto.randomUUID().slice(0, 6);
     const taxId = `${Math.floor(100000000 + Math.random() * 900000000)}`;
 
-    // Create real staff members
-    const sales = await createRealStaffSession("SALES_AGENT", "SALES");
-    const ops = await createRealStaffSession("OPS_SUPERVISOR", "OPERATIONS");
+    // Create real staff members in PostgreSQL
+    const salesUser = await createRealStaffUser("SALES_AGENT", "SALES");
+    const opsUser = await createRealStaffUser("OPS_SUPERVISOR", "OPERATIONS");
 
-    // 1. Authenticate Sales in browser via real session cookie
-    await context.addCookies([
-      {
-        name: "better-auth.session_token",
-        value: encodeURIComponent(sales.cookieValue),
-        domain: "localhost",
-        path: "/",
-      },
-    ]);
+    // Separate browser contexts for Sales and Operations users
+    const salesContext = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    const salesPage = await salesContext.newPage();
 
-    // 2. Sales visits provider directory
-    await page.goto("/staff/providers");
-    await expect(page.locator("text=Provider Organizations").first()).toBeVisible();
+    const opsContext = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    const opsPage = await opsContext.newPage();
 
-    // 3. Sales creates draft provider organization
-    await page.locator("a[href='/staff/providers/new']:visible").first().click();
-    await page.waitForURL("**/staff/providers/new");
+    try {
+      // 1. Authenticate Sales in browser via real UI login and TOTP MFA form
+      await performRealStaffLogin(
+        salesPage,
+        salesUser.email,
+        salesUser.password,
+        salesUser.totpSecret
+      );
 
-    await page.fill("#legalName", `Real Automotive Services ${uid} S.A.E.`);
-    await page.fill("#nameEn", `Real Auto Care ${uid}`);
-    await page.fill("#nameAr", `مركز الصيانة الحقيقي ${uid}`);
-    await page.fill("#taxId", taxId);
-    await page.fill("#crNumber", `CR-REAL-${uid}`);
-    await page.selectOption("#primaryCluster", "NASR_CITY_HELIOPOLIS");
-    await page.fill("#contactPerson", "Youssef Zaki");
-    await page.fill("#contactEmail", `youssef-${uid}@realauto.eg`);
-    await page.fill("#contactPhone", "+201012345678");
+      // 2. Sales visits provider directory
+      await salesPage.goto("/staff/providers");
+      await expect(salesPage.locator("text=Provider Organizations").first()).toBeVisible();
 
-    await page.click("button[type='submit']");
-    await page.waitForURL(/\/staff\/providers\/[0-9a-f-]+$/);
+      // 3. Sales creates draft provider organization
+      await salesPage.locator("a[href='/staff/providers/new']:visible").first().click();
+      await salesPage.waitForURL("**/staff/providers/new");
 
-    // Extract provider ID from URL
-    const providerUrl = page.url();
-    const providerId = providerUrl.split("/").pop()!;
-    createdProviderIds.push(providerId);
+      await salesPage.fill("#legalName", `Real Automotive Services ${uid} S.A.E.`);
+      await salesPage.fill("#nameEn", `Real Auto Care ${uid}`);
+      await salesPage.fill("#nameAr", `مركز الصيانة الحقيقي ${uid}`);
+      await salesPage.fill("#taxId", taxId);
+      await salesPage.fill("#crNumber", `CR-REAL-${uid}`);
+      await salesPage.selectOption("#primaryCluster", "NASR_CITY_HELIOPOLIS");
+      await salesPage.fill("#contactPerson", "Youssef Zaki");
+      await salesPage.fill("#contactEmail", `youssef-${uid}@realauto.eg`);
+      await salesPage.fill("#contactPhone", "+201012345678");
 
-    // Verify DB record was created with status DRAFT
-    const dbProviderAfterCreate = await prisma.providerOrganization.findUniqueOrThrow({
-      where: { id: providerId },
-    });
-    expect(dbProviderAfterCreate.status).toBe("DRAFT");
-    expect(dbProviderAfterCreate.version).toBe(1);
-    expect(dbProviderAfterCreate.taxRegistrationNumber).toBe(taxId);
+      await salesPage.click("button[type='submit']");
+      await salesPage.waitForURL(/\/staff\/providers\/[0-9a-f-]+$/);
 
-    // 4. Sales tests Organization Editing (/staff/providers/[id]/edit)
-    await page.locator("#edit-provider-details-link").click();
-    await page.waitForURL(`**/staff/providers/${providerId}/edit`);
+      // Extract provider ID from URL
+      const providerUrl = salesPage.url();
+      const providerId = providerUrl.split("/").pop()!;
+      createdProviderIds.push(providerId);
 
-    // Update English name and legal entity name
-    await page.fill("#nameEn", `Real Auto Care ${uid} Updated`);
-    await page.fill("#legalName", `Real Automotive Services ${uid} Updated S.A.E.`);
-    await page.click("#save-provider-edit-btn");
-    await page.waitForURL(`**/staff/providers/${providerId}`);
+      // Verify DB record was created with status DRAFT
+      const dbProviderAfterCreate = await prisma.providerOrganization.findUniqueOrThrow({
+        where: { id: providerId },
+      });
+      expect(dbProviderAfterCreate.status).toBe("DRAFT");
+      expect(dbProviderAfterCreate.version).toBe(1);
+      expect(dbProviderAfterCreate.taxRegistrationNumber).toBe(taxId);
 
-    // Verify DB record was updated to version 2
-    const dbProviderAfterEdit = await prisma.providerOrganization.findUniqueOrThrow({
-      where: { id: providerId },
-    });
-    expect(dbProviderAfterEdit.nameEn).toBe(`Real Auto Care ${uid} Updated`);
-    expect(dbProviderAfterEdit.version).toBe(2);
+      // 4. Sales tests Organization Editing (/staff/providers/[id]/edit)
+      await salesPage.locator("#edit-provider-details-link").click();
+      await salesPage.waitForURL(`**/staff/providers/${providerId}/edit`);
 
-    // 5. Sales creates physical branch draft
-    await page.locator(`a[href='/staff/providers/${providerId}/branches/new']`).click();
-    await page.waitForURL(`**/staff/providers/${providerId}/branches/new`);
+      // Update English name and legal entity name
+      await salesPage.fill("#nameEn", `Real Auto Care ${uid} Updated`);
+      await salesPage.fill("#legalName", `Real Automotive Services ${uid} Updated S.A.E.`);
+      await salesPage.click("#save-provider-edit-btn");
+      await salesPage.waitForURL(`**/staff/providers/${providerId}`);
 
-    await page.fill("#branchCode", `BR-REAL-${uid}`);
-    await page.fill("#branchNameEn", `Nasr City Center ${uid}`);
-    await page.fill("#branchNameAr", `فرع مدينة نصر ${uid}`);
-    await page.fill("#streetEn", "10 Tayaran Street");
-    await page.fill("#streetAr", "١٠ شارع الطيران");
-    await page.fill("#branch-latitude", "30.0543");
-    await page.fill("#branch-longitude", "31.3321");
-    await page.fill("#branchContactPhone", "+201098765432");
+      // Verify DB record was updated to version 2
+      const dbProviderAfterEdit = await prisma.providerOrganization.findUniqueOrThrow({
+        where: { id: providerId },
+      });
+      expect(dbProviderAfterEdit.nameEn).toBe(`Real Auto Care ${uid} Updated`);
+      expect(dbProviderAfterEdit.version).toBe(2);
 
-    // Explicitly confirm actual operating hours
-    await page.check("#confirm-operating-hours");
+      // 5. Sales creates physical branch draft with explicit coordinates & confirmed operating hours
+      await salesPage.locator(`a[href='/staff/providers/${providerId}/branches/new']`).click();
+      await salesPage.waitForURL(`**/staff/providers/${providerId}/branches/new`);
 
-    await page.click("button[type='submit']");
-    await page.waitForURL(`**/staff/providers/${providerId}`);
+      await salesPage.fill("#branchCode", `BR-REAL-${uid}`);
+      await salesPage.fill("#branchNameEn", `Nasr City Center ${uid}`);
+      await salesPage.fill("#branchNameAr", `فرع مدينة نصر ${uid}`);
+      await salesPage.fill("#streetEn", "10 Tayaran Street");
+      await salesPage.fill("#streetAr", "١٠ شارع الطيران");
+      await salesPage.fill("#branch-latitude", "30.0543");
+      await salesPage.fill("#branch-longitude", "31.3321");
+      await salesPage.fill("#branchContactPhone", "+201098765432");
 
-    // Verify branch was created in DB
-    const dbBranch = await prisma.providerBranch.findFirstOrThrow({
-      where: { providerOrganizationId: providerId },
-    });
-    expect(dbBranch.status).toBe("DRAFT");
-    expect(dbBranch.branchCode).toBe(`BR-REAL-${uid}`);
-    expect(Number(dbBranch.latitude)).toBeCloseTo(30.0543, 4);
-    expect(Number(dbBranch.longitude)).toBeCloseTo(31.3321, 4);
+      // Explicitly confirm actual operating hours
+      await salesPage.check("#confirm-operating-hours");
 
-    // 6. Sales submits provider for review
-    await page.click("button:has-text('Submit for Review')");
-    await page.waitForSelector("text=Submission Summary & Review");
-    await page.click("button:has-text('Submit for Operations Review')");
-    await page.waitForSelector("text=Confirm Submission for Operations Review");
-    await page.click("button:has-text('Yes, Submit for Review')");
+      await salesPage.click("button[type='submit']");
+      await salesPage.waitForURL(`**/staff/providers/${providerId}`);
 
-    await expect(page.locator("text=Pending Review").first()).toBeVisible();
+      // Verify branch was created in DB
+      const dbBranch = await prisma.providerBranch.findFirstOrThrow({
+        where: { providerOrganizationId: providerId },
+      });
+      expect(dbBranch.status).toBe("DRAFT");
+      expect(dbBranch.branchCode).toBe(`BR-REAL-${uid}`);
+      expect(Number(dbBranch.latitude)).toBeCloseTo(30.0543, 4);
+      expect(Number(dbBranch.longitude)).toBeCloseTo(31.3321, 4);
 
-    // Verify DB provider transitioned to PENDING_REVIEW (version 3)
-    const dbProviderPending = await prisma.providerOrganization.findUniqueOrThrow({
-      where: { id: providerId },
-    });
-    expect(dbProviderPending.status).toBe("PENDING_REVIEW");
-    expect(dbProviderPending.version).toBe(3);
+      // 6. Sales submits provider for review
+      await salesPage.click("button:has-text('Submit for Review')");
+      await salesPage.waitForSelector("text=Submission Summary & Review");
+      await salesPage.click("button:has-text('Submit for Operations Review')");
+      await salesPage.waitForSelector("text=Confirm Submission for Operations Review");
+      await salesPage.click("button:has-text('Yes, Submit for Review')");
 
-    // 7. Switch session to Operations Reviewer
-    await context.addCookies([
-      {
-        name: "better-auth.session_token",
-        value: encodeURIComponent(ops.cookieValue),
-        domain: "localhost",
-        path: "/",
-      },
-    ]);
+      await expect(salesPage.locator("text=Pending Review").first()).toBeVisible();
 
-    // 8. Operations visits pending queue
-    await page.goto("/staff/ops/pending");
-    await expect(page.locator(`text=Real Auto Care ${uid} Updated`).first()).toBeVisible();
+      // Verify DB provider transitioned to PENDING_REVIEW (version 3)
+      const dbProviderPending = await prisma.providerOrganization.findUniqueOrThrow({
+        where: { id: providerId },
+      });
+      expect(dbProviderPending.status).toBe("PENDING_REVIEW");
+      expect(dbProviderPending.version).toBe(3);
 
-    // Inspect provider
-    await page.goto(`/staff/providers/${providerId}`);
-    await expect(page.locator("text=Pending Review").first()).toBeVisible();
+      // 7. Operations user logs in through the browser via login form and MFA
+      await performRealStaffLogin(opsPage, opsUser.email, opsUser.password, opsUser.totpSecret);
 
-    // 9. Operations vets and activates branch
-    await page.click("button:has-text('Vet & Activate')");
-    await page.waitForSelector("text=Confirm Branch Activation");
+      // 8. Operations visits the Operations pending queue at /staff/ops/queue
+      await opsPage.goto("/staff/ops/queue");
+      await expect(opsPage.locator(`text=Real Auto Care ${uid} Updated`).first()).toBeVisible();
 
-    await page.check("#check-legal-identity");
-    await page.check("#check-physical-location");
-    await page.check("#check-contact-hours");
-    await page.fill("#evidence-document-ref", `DOC-REAL-OPS-${uid}`);
+      // Inspect provider via queue link
+      const inspectLink = opsPage.locator(`a[href='/staff/providers/${providerId}']`).first();
+      await inspectLink.click();
+      await opsPage.waitForURL(`**/staff/providers/${providerId}`);
+      await expect(opsPage.locator("text=Pending Review").first()).toBeVisible();
 
-    await page.locator("div[role='dialog'] button:has-text('Activate Branch')").click();
-    await page.waitForTimeout(500);
+      // 9. Operations vets and activates branch
+      await opsPage.click("button:has-text('Vet & Activate')");
+      await opsPage.waitForSelector("text=Confirm Branch Activation");
 
-    // Verify branch in DB is ACTIVE
-    const dbBranchActive = await prisma.providerBranch.findUniqueOrThrow({
-      where: { id: dbBranch.id },
-    });
-    expect(dbBranchActive.status).toBe("ACTIVE");
-    expect(dbBranchActive.legalIdentityChecked).toBe(true);
-    expect(dbBranchActive.physicalLocationChecked).toBe(true);
-    expect(dbBranchActive.contactAndHoursChecked).toBe(true);
-    expect(dbBranchActive.evidenceDocumentRef).toBe(`DOC-REAL-OPS-${uid}`);
-    expect(dbBranchActive.vettedAt).not.toBeNull();
+      await opsPage.check("#check-legal-identity");
+      await opsPage.check("#check-physical-location");
+      await opsPage.check("#check-contact-hours");
+      await opsPage.fill("#evidence-document-ref", `DOC-REAL-OPS-${uid}`);
 
-    // 10. Operations activates provider
-    const activateProviderBtn = page.locator("button:has-text('Activate Provider')").first();
-    await expect(activateProviderBtn).toBeEnabled();
-    await activateProviderBtn.click();
-    await page.waitForTimeout(500);
+      await opsPage.locator("div[role='dialog'] button:has-text('Activate Branch')").click();
+      await opsPage.waitForTimeout(500);
 
-    await expect(page.locator("text=Active (Vetted)").first()).toBeVisible();
-    await expect(page.locator("text=Offers not configured").first()).toBeVisible();
+      // Verify branch in DB is ACTIVE with complete vetting attestation
+      const dbBranchActive = await prisma.providerBranch.findUniqueOrThrow({
+        where: { id: dbBranch.id },
+      });
+      expect(dbBranchActive.status).toBe("ACTIVE");
+      expect(dbBranchActive.legalIdentityChecked).toBe(true);
+      expect(dbBranchActive.physicalLocationChecked).toBe(true);
+      expect(dbBranchActive.contactAndHoursChecked).toBe(true);
+      expect(dbBranchActive.evidenceDocumentRef).toBe(`DOC-REAL-OPS-${uid}`);
+      expect(dbBranchActive.vettedAt).not.toBeNull();
 
-    // Verify DB provider is ACTIVE
-    const dbProviderActive = await prisma.providerOrganization.findUniqueOrThrow({
-      where: { id: providerId },
-    });
-    expect(dbProviderActive.status).toBe("ACTIVE");
-    expect(dbProviderActive.activatedAt).not.toBeNull();
+      // 10. Operations activates provider organization
+      const activateProviderBtn = opsPage.locator("button:has-text('Activate Provider')").first();
+      await expect(activateProviderBtn).toBeEnabled();
+      await activateProviderBtn.click();
+      await opsPage.waitForTimeout(500);
 
-    // 11. Arabic Pass: switch to Arabic and verify RTL layout & LTR data fields
-    await context.addCookies([
-      {
-        name: "NEXT_LOCALE",
-        value: "ar",
-        domain: "localhost",
-        path: "/",
-      },
-    ]);
+      await expect(opsPage.locator("text=Active (Vetted)").first()).toBeVisible();
+      await expect(opsPage.locator("text=Offers not configured").first()).toBeVisible();
 
-    await page.goto(`/staff/providers/${providerId}`);
-    await page.waitForSelector("text=نشط (معتمد)");
+      // Verify DB provider is ACTIVE
+      const dbProviderActive = await prisma.providerOrganization.findUniqueOrThrow({
+        where: { id: providerId },
+      });
+      expect(dbProviderActive.status).toBe("ACTIVE");
+      expect(dbProviderActive.activatedAt).not.toBeNull();
 
-    // Assert root dir is rtl
-    const pageDir = await page.locator("div[dir='rtl']").first();
-    await expect(pageDir).toBeVisible();
+      // 11. Verify rendering in English on salesPage
+      await salesPage.goto(`/staff/providers/${providerId}`);
+      await expect(salesPage.locator("text=Active (Vetted)").first()).toBeVisible();
+      await expect(salesPage.locator(`text=Real Auto Care ${uid} Updated`).first()).toBeVisible();
 
-    // Assert sensitive fields maintain dir="ltr"
-    const ltrTaxId = page.locator("p[dir='ltr']").filter({ hasText: taxId });
-    await expect(ltrTaxId).toBeVisible();
+      // 12. Bilingual Arabic Pass: switch to Arabic and verify RTL layout & LTR data fields
+      await opsContext.addCookies([
+        {
+          name: "NEXT_LOCALE",
+          value: "ar",
+          domain: "localhost",
+          path: "/",
+        },
+      ]);
 
-    const ltrPhone = page.locator("p[dir='ltr']").filter({ hasText: "+201012345678" });
-    await expect(ltrPhone).toBeVisible();
+      await opsPage.goto(`/staff/providers/${providerId}`);
+      await opsPage.waitForSelector("text=نشط (معتمد)");
+
+      // Assert root dir is rtl
+      const pageDir = await opsPage.locator("div[dir='rtl']").first();
+      await expect(pageDir).toBeVisible();
+
+      // Assert sensitive numeric fields maintain dir="ltr"
+      const ltrTaxId = opsPage.locator("p[dir='ltr']").filter({ hasText: taxId });
+      await expect(ltrTaxId).toBeVisible();
+
+      const ltrPhone = opsPage.locator("p[dir='ltr']").filter({ hasText: "+201012345678" });
+      await expect(ltrPhone).toBeVisible();
+
+      // 13. Audit trail verification in persistent PostgreSQL database
+      const auditEvents = await prisma.securityAuditEvent.findMany({
+        where: {
+          targetEntity: { contains: providerId },
+        },
+      });
+      // Verify audit entries exist for provider lifecycle
+      expect(auditEvents.length).toBeGreaterThanOrEqual(1);
+    } finally {
+      await salesContext.close().catch(() => {});
+      await opsContext.close().catch(() => {});
+    }
   });
 });

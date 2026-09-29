@@ -11,6 +11,7 @@ import {
 } from "@/components/staff/OperatingHoursEditor";
 import { GeolocationCapture } from "@/components/staff/GeolocationCapture";
 import { ConflictResolver } from "@/components/staff/ConflictResolver";
+import { OutcomeUnknownBanner } from "@/components/staff/OutcomeUnknownBanner";
 import type { CairoCluster, OperatingHoursEntry } from "@/lib/provider/validation";
 
 import type { BranchDto } from "@/lib/provider/dto";
@@ -57,6 +58,10 @@ export default function EditBranchPage({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [generalError, setGeneralError] = useState<string | null>(null);
+  const [uncertainOutcome, setUncertainOutcome] = useState(false);
+  const [uncertainMessage, setUncertainMessage] = useState<string | null>(null);
+  const [isRechecking, setIsRechecking] = useState(false);
+  const [canDeliberateRetry, setCanDeliberateRetry] = useState(false);
 
   // Concurrency Conflict State
   const [conflictOpen, setConflictOpen] = useState(false);
@@ -232,25 +237,55 @@ export default function EditBranchPage({
       // Success
       router.push(`/staff/providers/${providerId}`);
     } catch {
-      // Invariant: Treat outcome as unknown; read back branch record before offering deliberate retry
-      try {
-        const checkRes = await fetch(`/api/v1/staff/providers/${providerId}/branches/${branchId}`);
-        if (checkRes.ok) {
-          const latest: BranchData = await checkRes.json();
-          if (latest.version > expectedVersion) {
-            router.push(`/staff/providers/${providerId}`);
-            return;
-          }
-        }
-      } catch {
-        // Read-back failed
-      }
-
-      setGeneralError(
-        "Network connection interrupted. We checked the server and your draft changes were not applied yet. Your inputs have been preserved; you may safely retry."
-      );
+      // Invariant: Treat lost mutation responses as unknown, not failed.
+      // A single read-back that fails or sees an old version cannot authorize "safe retry".
       setIsSubmitting(false);
+      setUncertainOutcome(true);
+      setCanDeliberateRetry(false);
+      setUncertainMessage(null);
     }
+  };
+
+  const handleRecheckStatus = async () => {
+    setIsRechecking(true);
+    try {
+      const checkRes = await fetch(`/api/v1/staff/providers/${providerId}/branches/${branchId}`, {
+        cache: "no-store",
+        headers: { Accept: "application/json" },
+      });
+      if (checkRes.ok) {
+        const raw = await checkRes.json();
+        const latest: BranchData = (raw.branch || raw) as BranchData;
+        if (latest.version > expectedVersion) {
+          // Late commit verified! Reconcile immediately.
+          router.push(`/staff/providers/${providerId}`);
+          return;
+        } else if (latest.version === expectedVersion) {
+          // Confirmed NOT committed by fresh authoritative server read-back.
+          setCanDeliberateRetry(true);
+          setUncertainMessage(t("onboarding.uncertainty.confirmedNotCommitted"));
+        } else {
+          // Version conflict
+          setServerBranch(latest);
+          setConflictOpen(true);
+        }
+      } else {
+        setCanDeliberateRetry(false);
+        setUncertainMessage(t("onboarding.uncertainty.readBackFailed"));
+      }
+    } catch {
+      setCanDeliberateRetry(false);
+      setUncertainMessage(t("onboarding.uncertainty.readBackFailed"));
+    } finally {
+      setIsRechecking(false);
+    }
+  };
+
+  const handleDeliberateRetry = () => {
+    setUncertainOutcome(false);
+    setCanDeliberateRetry(false);
+    setUncertainMessage(null);
+    handleSubmit(new Event("submit") as unknown as React.FormEvent);
   };
 
   const handleApplyServerState = () => {
@@ -342,8 +377,18 @@ export default function EditBranchPage({
         </div>
       )}
 
+      {/* Outcome Unknown Banner */}
+      <OutcomeUnknownBanner
+        isOpen={uncertainOutcome}
+        message={uncertainMessage}
+        isRechecking={isRechecking}
+        canRetry={canDeliberateRetry}
+        onRecheck={handleRecheckStatus}
+        onRetry={handleDeliberateRetry}
+      />
+
       {/* General Error Banner */}
-      {generalError && (
+      {generalError && !uncertainOutcome && (
         <div className="p-4 rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm flex items-start gap-3">
           <AlertCircle className="w-5 h-5 text-red-500 shrink-0 mt-0.5" />
           <p className="font-medium leading-relaxed">{generalError}</p>
@@ -676,7 +721,7 @@ export default function EditBranchPage({
             </Link>
             <button
               type="submit"
-              disabled={isSubmitting}
+              disabled={isSubmitting || (uncertainOutcome && !canDeliberateRetry)}
               className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold shadow-xs disabled:opacity-50 transition-colors cursor-pointer"
             >
               {isSubmitting ? (

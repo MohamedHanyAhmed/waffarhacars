@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 import { ProviderStatusBadge } from "@/components/staff/ProviderStatusBadge";
 import { OffersNotConfiguredNotice } from "@/components/staff/OffersNotConfiguredNotice";
+import { OutcomeUnknownBanner } from "@/components/staff/OutcomeUnknownBanner";
 import { BranchVettingModal } from "@/components/staff/BranchVettingModal";
 import { BranchRejectModal } from "@/components/staff/BranchRejectModal";
 import { ProviderRejectModal } from "@/components/staff/ProviderRejectModal";
@@ -68,6 +69,28 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
   // Concurrency conflict modal
   const [conflictOpen, setConflictOpen] = useState(false);
   const [serverProvider, setServerProvider] = useState<Provider | null>(null);
+
+  // Outcome Unknown / Lost Response state
+  const [uncertainAction, setUncertainAction] = useState<{
+    type:
+      | "submit"
+      | "activate_provider"
+      | "activate_branch"
+      | "reject_branch"
+      | "reject_provider"
+      | "pause_resume";
+    payload?: {
+      branchId?: string;
+      branchCode?: string;
+      isProv?: boolean;
+      action?: "pause" | "resume";
+      data?: Record<string, unknown>;
+    };
+  } | null>(null);
+  const [uncertainOutcome, setUncertainOutcome] = useState(false);
+  const [uncertainMessage, setUncertainMessage] = useState<string | null>(null);
+  const [isRechecking, setIsRechecking] = useState(false);
+  const [canDeliberateRetry, setCanDeliberateRetry] = useState(false);
 
   const [reloadTrigger, setReloadTrigger] = useState(0);
 
@@ -126,6 +149,149 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
     };
   }, [providerId, router, reloadTrigger]);
 
+  const handleRecheckStatus = async () => {
+    if (!provider) return;
+    setIsRechecking(true);
+    try {
+      const checkRes = await fetch(`/api/v1/staff/providers/${provider.id}`, {
+        cache: "no-store",
+        headers: { Accept: "application/json" },
+      });
+      if (checkRes.ok) {
+        const raw = await checkRes.json();
+        const latest: Provider = (raw.provider ? raw.provider : raw) as Provider;
+
+        let committed = false;
+        if (uncertainAction?.type === "submit") {
+          committed = latest.status === "PENDING_REVIEW" || latest.version > provider.version;
+        } else if (uncertainAction?.type === "activate_provider") {
+          committed = latest.status === "ACTIVE" || latest.version > provider.version;
+        } else if (uncertainAction?.type === "activate_branch") {
+          const targetBranch = latest.branches.find(
+            (b) => b.id === uncertainAction.payload?.branchId
+          );
+          committed = targetBranch?.status === "ACTIVE";
+        } else if (uncertainAction?.type === "reject_branch") {
+          const targetBranch = latest.branches.find(
+            (b) => b.id === uncertainAction.payload?.branchId
+          );
+          committed = targetBranch?.status === "DECOMMISSIONED" || targetBranch?.status === "DRAFT";
+        } else if (uncertainAction?.type === "reject_provider") {
+          committed = latest.status === "REJECTED" || latest.version > provider.version;
+        } else if (uncertainAction?.type === "pause_resume") {
+          if (uncertainAction.payload?.isProv) {
+            committed =
+              uncertainAction.payload.action === "pause"
+                ? latest.status === "PAUSED"
+                : latest.status === "ACTIVE";
+          } else {
+            const targetBranch = latest.branches.find(
+              (b) => b.id === uncertainAction.payload?.branchId
+            );
+            committed =
+              uncertainAction.payload?.action === "pause"
+                ? targetBranch?.status === "PAUSED"
+                : targetBranch?.status === "ACTIVE";
+          }
+        }
+
+        if (committed) {
+          setProvider(latest);
+          setUncertainOutcome(false);
+          setUncertainAction(null);
+          setCanDeliberateRetry(false);
+          setUncertainMessage(null);
+          setSuccessNotice("Action verified and successfully committed on the server.");
+          setCheckAnswersOpen(false);
+          setVettingBranch(null);
+          setRejectingBranch(null);
+          setRejectingProviderOpen(false);
+          setPauseResumeTarget(null);
+        } else {
+          setCanDeliberateRetry(true);
+          setUncertainMessage(t("onboarding.uncertainty.confirmedNotCommitted"));
+        }
+      } else {
+        setCanDeliberateRetry(false);
+        setUncertainMessage(t("onboarding.uncertainty.readBackFailed"));
+      }
+    } catch {
+      setCanDeliberateRetry(false);
+      setUncertainMessage(t("onboarding.uncertainty.readBackFailed"));
+    } finally {
+      setIsRechecking(false);
+    }
+  };
+
+  const handleDeliberateRetry = () => {
+    if (!uncertainAction || !provider) return;
+    const action = uncertainAction;
+    setUncertainOutcome(false);
+    setCanDeliberateRetry(false);
+    setUncertainMessage(null);
+
+    if (action.type === "submit") {
+      handleSubmitForReview();
+    } else if (action.type === "activate_provider") {
+      handleActivateProvider();
+    } else if (
+      action.type === "activate_branch" &&
+      action.payload?.branchId &&
+      action.payload?.data
+    ) {
+      const b = provider.branches.find((br) => br.id === action.payload?.branchId);
+      if (b) {
+        performActivateBranch(
+          b.id,
+          b.version,
+          action.payload.data as unknown as {
+            legalIdentityChecked: boolean;
+            physicalLocationChecked: boolean;
+            contactAndHoursChecked: boolean;
+            evidenceDocumentRef: string;
+          }
+        );
+      }
+    } else if (
+      action.type === "reject_branch" &&
+      action.payload?.branchId &&
+      action.payload?.data
+    ) {
+      const b = provider.branches.find((br) => br.id === action.payload?.branchId);
+      if (b) {
+        performRejectBranch(
+          b.id,
+          b.version,
+          action.payload.data as unknown as {
+            remediable: boolean;
+            reasonCode: string;
+            rejectionReason: string;
+          }
+        );
+      }
+    } else if (action.type === "reject_provider" && action.payload?.data) {
+      performRejectProvider(
+        provider.version,
+        action.payload.data as unknown as {
+          remediable: boolean;
+          reasonCode: string;
+          rejectionReason: string;
+        }
+      );
+    } else if (action.type === "pause_resume" && action.payload?.action && action.payload?.data) {
+      const expectedVersion = action.payload.isProv
+        ? provider.version
+        : provider.branches.find((b) => b.id === action.payload?.branchId)?.version || 1;
+      performPauseResume(
+        !!action.payload.isProv,
+        action.payload.branchId,
+        expectedVersion,
+        action.payload.action,
+        action.payload.data as unknown as { reasonCode?: string; pauseReason?: string }
+      );
+    }
+  };
+
   // Operations: Submit provider for review (Sales action)
   const handleSubmitForReview = async () => {
     if (!provider || isSubmitting) return;
@@ -163,7 +329,12 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
       setCheckAnswersOpen(false);
       await fetchProvider();
     } catch {
-      setGeneralError("Network error while submitting provider.");
+      setIsSubmitting(false);
+      setCheckAnswersOpen(false);
+      setUncertainAction({ type: "submit" });
+      setUncertainOutcome(true);
+      setCanDeliberateRetry(false);
+      setUncertainMessage(null);
     } finally {
       setIsSubmitting(false);
     }
@@ -205,9 +376,233 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
       setSuccessNotice("Provider organization activated successfully.");
       await fetchProvider();
     } catch {
-      setGeneralError("Network error while activating provider.");
+      setIsActivatingProvider(false);
+      setUncertainAction({ type: "activate_provider" });
+      setUncertainOutcome(true);
+      setCanDeliberateRetry(false);
+      setUncertainMessage(null);
     } finally {
       setIsActivatingProvider(false);
+    }
+  };
+
+  const performActivateBranch = async (
+    branchId: string,
+    expectedVersion: number,
+    data: {
+      legalIdentityChecked: boolean;
+      physicalLocationChecked: boolean;
+      contactAndHoursChecked: boolean;
+      evidenceDocumentRef: string;
+    }
+  ) => {
+    if (!provider) return;
+    try {
+      const res = await fetch(
+        `/api/v1/staff/ops/providers/${provider.id}/branches/${branchId}/activate`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            expectedVersion,
+            ...data,
+          }),
+        }
+      );
+      if (res.status === 409) {
+        const fresh = await fetch(`/api/v1/staff/providers/${provider.id}`).then((r) => r.json());
+        setServerProvider(fresh);
+        setConflictOpen(true);
+        setVettingBranch(null);
+        return;
+      }
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.message || "Failed to activate branch.");
+      }
+      setVettingBranch(null);
+      setSuccessNotice("Branch vetted and activated.");
+      await fetchProvider();
+    } catch (err: unknown) {
+      const isNetwork =
+        err instanceof TypeError ||
+        (err instanceof Error &&
+          (err.name === "AbortError" ||
+            err.message.toLowerCase().includes("fetch") ||
+            err.message.toLowerCase().includes("network")));
+      if (isNetwork) {
+        setVettingBranch(null);
+        setUncertainAction({
+          type: "activate_branch",
+          payload: { branchId, data: data as unknown as Record<string, unknown> },
+        });
+        setUncertainOutcome(true);
+        setCanDeliberateRetry(false);
+        setUncertainMessage(null);
+      } else {
+        throw err;
+      }
+    }
+  };
+
+  const performRejectBranch = async (
+    branchId: string,
+    expectedVersion: number,
+    data: { remediable: boolean; reasonCode: string; rejectionReason: string }
+  ) => {
+    if (!provider) return;
+    try {
+      const res = await fetch(
+        `/api/v1/staff/ops/providers/${provider.id}/branches/${branchId}/reject`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            expectedVersion,
+            ...data,
+          }),
+        }
+      );
+      if (res.status === 409) {
+        const fresh = await fetch(`/api/v1/staff/providers/${provider.id}`).then((r) => r.json());
+        setServerProvider(fresh);
+        setConflictOpen(true);
+        setRejectingBranch(null);
+        return;
+      }
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.message || "Failed to reject branch.");
+      }
+      setRejectingBranch(null);
+      setSuccessNotice("Branch rejection processed.");
+      await fetchProvider();
+    } catch (err: unknown) {
+      const isNetwork =
+        err instanceof TypeError ||
+        (err instanceof Error &&
+          (err.name === "AbortError" ||
+            err.message.toLowerCase().includes("fetch") ||
+            err.message.toLowerCase().includes("network")));
+      if (isNetwork) {
+        setRejectingBranch(null);
+        setUncertainAction({
+          type: "reject_branch",
+          payload: { branchId, data: data as unknown as Record<string, unknown> },
+        });
+        setUncertainOutcome(true);
+        setCanDeliberateRetry(false);
+        setUncertainMessage(null);
+      } else {
+        throw err;
+      }
+    }
+  };
+
+  const performRejectProvider = async (
+    expectedVersion: number,
+    data: { remediable: boolean; reasonCode: string; rejectionReason: string }
+  ) => {
+    if (!provider) return;
+    try {
+      const res = await fetch(`/api/v1/staff/ops/providers/${provider.id}/reject`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expectedVersion,
+          ...data,
+        }),
+      });
+      if (res.status === 409) {
+        const fresh = await fetch(`/api/v1/staff/providers/${provider.id}`).then((r) => r.json());
+        setServerProvider(fresh);
+        setConflictOpen(true);
+        setRejectingProviderOpen(false);
+        return;
+      }
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.message || "Failed to reject provider.");
+      }
+      setRejectingProviderOpen(false);
+      setSuccessNotice("Provider rejection processed.");
+      await fetchProvider();
+    } catch (err: unknown) {
+      const isNetwork =
+        err instanceof TypeError ||
+        (err instanceof Error &&
+          (err.name === "AbortError" ||
+            err.message.toLowerCase().includes("fetch") ||
+            err.message.toLowerCase().includes("network")));
+      if (isNetwork) {
+        setRejectingProviderOpen(false);
+        setUncertainAction({
+          type: "reject_provider",
+          payload: { data: data as unknown as Record<string, unknown> },
+        });
+        setUncertainOutcome(true);
+        setCanDeliberateRetry(false);
+        setUncertainMessage(null);
+      } else {
+        throw err;
+      }
+    }
+  };
+
+  const performPauseResume = async (
+    isProv: boolean,
+    branchId: string | undefined,
+    expectedVersion: number,
+    action: "pause" | "resume",
+    data: { reasonCode?: string; pauseReason?: string }
+  ) => {
+    if (!provider) return;
+    const url = isProv
+      ? `/api/v1/staff/ops/providers/${provider.id}/${action}`
+      : `/api/v1/staff/ops/providers/${provider.id}/branches/${branchId}/${action}`;
+
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expectedVersion,
+          ...data,
+        }),
+      });
+      if (res.status === 409) {
+        const fresh = await fetch(`/api/v1/staff/providers/${provider.id}`).then((r) => r.json());
+        setServerProvider(fresh);
+        setConflictOpen(true);
+        setPauseResumeTarget(null);
+        return;
+      }
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.message || `Failed to ${action} entity.`);
+      }
+      setPauseResumeTarget(null);
+      setSuccessNotice(`${isProv ? "Provider" : "Branch"} ${action}d successfully.`);
+      await fetchProvider();
+    } catch (err: unknown) {
+      const isNetwork =
+        err instanceof TypeError ||
+        (err instanceof Error &&
+          (err.name === "AbortError" ||
+            err.message.toLowerCase().includes("fetch") ||
+            err.message.toLowerCase().includes("network")));
+      if (isNetwork) {
+        setPauseResumeTarget(null);
+        setUncertainAction({
+          type: "pause_resume",
+          payload: { isProv, branchId, action, data: data as unknown as Record<string, unknown> },
+        });
+        setUncertainOutcome(true);
+        setCanDeliberateRetry(false);
+        setUncertainMessage(null);
+      } else {
+        throw err;
+      }
     }
   };
 
@@ -412,8 +807,18 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
         </div>
       )}
 
+      {/* Outcome Unknown Banner */}
+      <OutcomeUnknownBanner
+        isOpen={uncertainOutcome}
+        message={uncertainMessage}
+        isRechecking={isRechecking}
+        canRetry={canDeliberateRetry}
+        onRecheck={handleRecheckStatus}
+        onRetry={handleDeliberateRetry}
+      />
+
       {/* Success Notification */}
-      {successNotice && (
+      {successNotice && !uncertainOutcome && (
         <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm flex items-center justify-between">
           <div className="flex items-center gap-2">
             <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
@@ -429,7 +834,7 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
       )}
 
       {/* Error Notification */}
-      {generalError && (
+      {generalError && !uncertainOutcome && (
         <div className="p-4 rounded-2xl bg-red-50 border border-red-200 text-red-700 text-sm flex items-start gap-3">
           <AlertCircle className="w-5 h-5 text-red-500 shrink-0 mt-0.5" />
           <p className="font-medium">{generalError}</p>
@@ -748,33 +1153,7 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
           branchName={vettingBranch.nameEn}
           onClose={() => setVettingBranch(null)}
           onConfirm={async (data) => {
-            const res = await fetch(
-              `/api/v1/staff/ops/providers/${provider.id}/branches/${vettingBranch.id}/activate`,
-              {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  expectedVersion: vettingBranch.version,
-                  ...data,
-                }),
-              }
-            );
-            if (res.status === 409) {
-              const fresh = await fetch(`/api/v1/staff/providers/${provider.id}`).then((r) =>
-                r.json()
-              );
-              setServerProvider(fresh);
-              setConflictOpen(true);
-              setVettingBranch(null);
-              return;
-            }
-            if (!res.ok) {
-              const err = await res.json().catch(() => ({}));
-              throw new Error(err.message || "Failed to activate branch.");
-            }
-            setVettingBranch(null);
-            setSuccessNotice(`Branch ${vettingBranch.branchCode} vetted and activated.`);
-            await fetchProvider();
+            await performActivateBranch(vettingBranch.id, vettingBranch.version, data);
           }}
         />
       )}
@@ -786,33 +1165,7 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
           branchName={rejectingBranch.nameEn}
           onClose={() => setRejectingBranch(null)}
           onConfirm={async (data) => {
-            const res = await fetch(
-              `/api/v1/staff/ops/providers/${provider.id}/branches/${rejectingBranch.id}/reject`,
-              {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  expectedVersion: rejectingBranch.version,
-                  ...data,
-                }),
-              }
-            );
-            if (res.status === 409) {
-              const fresh = await fetch(`/api/v1/staff/providers/${provider.id}`).then((r) =>
-                r.json()
-              );
-              setServerProvider(fresh);
-              setConflictOpen(true);
-              setRejectingBranch(null);
-              return;
-            }
-            if (!res.ok) {
-              const err = await res.json().catch(() => ({}));
-              throw new Error(err.message || "Failed to reject branch.");
-            }
-            setRejectingBranch(null);
-            setSuccessNotice(`Branch ${rejectingBranch.branchCode} rejection processed.`);
-            await fetchProvider();
+            await performRejectBranch(rejectingBranch.id, rejectingBranch.version, data);
           }}
         />
       )}
@@ -824,30 +1177,7 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
           providerName={provider.nameEn}
           onClose={() => setRejectingProviderOpen(false)}
           onConfirm={async (data) => {
-            const res = await fetch(`/api/v1/staff/ops/providers/${provider.id}/reject`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                expectedVersion: provider.version,
-                ...data,
-              }),
-            });
-            if (res.status === 409) {
-              const fresh = await fetch(`/api/v1/staff/providers/${provider.id}`).then((r) =>
-                r.json()
-              );
-              setServerProvider(fresh);
-              setConflictOpen(true);
-              setRejectingProviderOpen(false);
-              return;
-            }
-            if (!res.ok) {
-              const err = await res.json().catch(() => ({}));
-              throw new Error(err.message || "Failed to reject provider.");
-            }
-            setRejectingProviderOpen(false);
-            setSuccessNotice("Provider rejection processed.");
-            await fetchProvider();
+            await performRejectProvider(provider.version, data);
           }}
         />
       )}
@@ -865,43 +1195,16 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
           onClose={() => setPauseResumeTarget(null)}
           onConfirm={async (data) => {
             const isProv = pauseResumeTarget.entityType === "provider";
-            const url = isProv
-              ? `/api/v1/staff/ops/providers/${provider.id}/${pauseResumeTarget.action}`
-              : `/api/v1/staff/ops/providers/${provider.id}/branches/${pauseResumeTarget.branchId}/${pauseResumeTarget.action}`;
-
             const expectedVersion = isProv
               ? provider.version
               : provider.branches.find((b) => b.id === pauseResumeTarget.branchId)?.version || 1;
-
-            const res = await fetch(url, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                expectedVersion,
-                ...data,
-              }),
-            });
-
-            if (res.status === 409) {
-              const fresh = await fetch(`/api/v1/staff/providers/${provider.id}`).then((r) =>
-                r.json()
-              );
-              setServerProvider(fresh);
-              setConflictOpen(true);
-              setPauseResumeTarget(null);
-              return;
-            }
-
-            if (!res.ok) {
-              const err = await res.json().catch(() => ({}));
-              throw new Error(err.message || `Failed to ${pauseResumeTarget.action} entity.`);
-            }
-
-            setPauseResumeTarget(null);
-            setSuccessNotice(
-              `${isProv ? "Provider" : "Branch"} ${pauseResumeTarget.action}d successfully.`
+            await performPauseResume(
+              isProv,
+              pauseResumeTarget.branchId,
+              expectedVersion,
+              pauseResumeTarget.action,
+              data
             );
-            await fetchProvider();
           }}
         />
       )}

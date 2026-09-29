@@ -120,6 +120,17 @@ jobs:
         run: npm run test:e2e
         env:
           CI: "true"
+          APP_RUNTIME_PROFILE: showcase
+          APP_DATA_BACKEND: postgres
+          DATABASE_URL: postgresql://test_user:test_password@localhost:5432/waffarhacars_test
+          DATABASE_DIRECT_URL: postgresql://test_user:test_password@localhost:5432/waffarhacars_test
+          BETTER_AUTH_SECRET: ci-non-production-test-secret-at-least-32-chars-long
+          BETTER_AUTH_URL: http://localhost:3000
+          OTP_PEPPER_SECRET: ci-otp-pepper-test-secret-at-least-32-chars-long
+          PHONE_ALIAS_HMAC_KEY: ci-phone-alias-test-secret-at-least-32-chars-long
+          PHONE_LOOKUP_HMAC_KEY: ci-phone-lookup-test-secret-at-least-32-chars-long
+          OTP_SMS_PROVIDER: test
+          STAFF_LOGIN_HMAC_KEY: ci-staff-login-test-secret-at-least-32-chars-long
 
       - name: Upload Playwright Diagnostics on Failure
         # actions/upload-artifact@v4.6.2

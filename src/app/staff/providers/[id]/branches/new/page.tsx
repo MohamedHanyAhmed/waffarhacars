@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useI18n } from "@/context/I18nContext";
 import { MapPin, ArrowLeft, Save, Loader2, AlertCircle, CheckCircle2 } from "lucide-react";
+import { OutcomeUnknownBanner } from "@/components/staff/OutcomeUnknownBanner";
 import {
   OperatingHoursEditor,
   DEFAULT_WEEKLY_HOURS,
@@ -35,6 +36,10 @@ export default function NewBranchPage({ params }: { params: Promise<{ id: string
   const [isDirty, setIsDirty] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [generalError, setGeneralError] = useState<string | null>(null);
+  const [uncertainOutcome, setUncertainOutcome] = useState(false);
+  const [uncertainMessage, setUncertainMessage] = useState<string | null>(null);
+  const [isRechecking, setIsRechecking] = useState(false);
+  const [canDeliberateRetry, setCanDeliberateRetry] = useState(false);
 
   const validate = (): boolean => {
     const errors: Record<string, string> = {};
@@ -134,32 +139,55 @@ export default function NewBranchPage({ params }: { params: Promise<{ id: string
       setIsDirty(false);
       router.push(`/staff/providers/${providerId}`);
     } catch {
-      // Invariant: Treat outcome as unknown; read back provider branches before offering deliberate retry
-      try {
-        const checkRes = await fetch(`/api/v1/staff/providers/${providerId}/branches`);
-        if (checkRes.ok) {
-          const branches = await checkRes.json();
-          const match = Array.isArray(branches)
-            ? branches.find(
-                (b: { branchCode: string }) => b.branchCode === branchCode.trim().toUpperCase()
-              )
-            : null;
-          if (match) {
-            // Branch was indeed created
-            setIsDirty(false);
-            router.push(`/staff/providers/${providerId}`);
-            return;
-          }
-        }
-      } catch {
-        // Read-back failed
-      }
-
-      setGeneralError(
-        "Network connection interrupted. We checked the server and this branch was not created yet. Your inputs have been preserved; you may safely retry."
-      );
+      // Invariant: Treat lost mutation responses as unknown, not failed.
+      // A single read-back that fails or sees an old version cannot authorize "safe retry".
       setIsSubmitting(false);
+      setUncertainOutcome(true);
+      setCanDeliberateRetry(false);
+      setUncertainMessage(null);
     }
+  };
+
+  const handleRecheckStatus = async () => {
+    setIsRechecking(true);
+    const targetCode = branchCode.trim().toUpperCase();
+    try {
+      const checkRes = await fetch(`/api/v1/staff/providers/${providerId}/branches`, {
+        cache: "no-store",
+        headers: { Accept: "application/json" },
+      });
+      if (checkRes.ok) {
+        const branches = await checkRes.json();
+        const match = Array.isArray(branches)
+          ? branches.find((b: { branchCode: string }) => b.branchCode === targetCode)
+          : null;
+        if (match) {
+          // Late commit verified! Reconcile immediately.
+          setIsDirty(false);
+          router.push(`/staff/providers/${providerId}`);
+          return;
+        } else {
+          // Confirmed NOT committed by fresh authoritative server read-back.
+          setCanDeliberateRetry(true);
+          setUncertainMessage(t("onboarding.uncertainty.confirmedNotCommitted"));
+        }
+      } else {
+        setCanDeliberateRetry(false);
+        setUncertainMessage(t("onboarding.uncertainty.readBackFailed"));
+      }
+    } catch {
+      setCanDeliberateRetry(false);
+      setUncertainMessage(t("onboarding.uncertainty.readBackFailed"));
+    } finally {
+      setIsRechecking(false);
+    }
+  };
+
+  const handleDeliberateRetry = () => {
+    setUncertainOutcome(false);
+    setCanDeliberateRetry(false);
+    setUncertainMessage(null);
+    handleSubmit(new Event("submit") as unknown as React.FormEvent);
   };
 
   return (
@@ -197,7 +225,17 @@ export default function NewBranchPage({ params }: { params: Promise<{ id: string
         </div>
       </div>
 
-      {generalError && (
+      {/* Outcome Unknown Banner */}
+      <OutcomeUnknownBanner
+        isOpen={uncertainOutcome}
+        message={uncertainMessage}
+        isRechecking={isRechecking}
+        canRetry={canDeliberateRetry}
+        onRecheck={handleRecheckStatus}
+        onRetry={handleDeliberateRetry}
+      />
+
+      {generalError && !uncertainOutcome && (
         <div
           role="alert"
           className="p-4 bg-rose-50 border border-rose-200 rounded-2xl text-rose-900 text-xs flex items-center gap-3"
@@ -500,7 +538,7 @@ export default function NewBranchPage({ params }: { params: Promise<{ id: string
 
           <button
             type="submit"
-            disabled={isSubmitting}
+            disabled={isSubmitting || (uncertainOutcome && !canDeliberateRetry)}
             className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl text-xs font-bold text-white bg-brand-600 hover:bg-brand-700 disabled:opacity-50 transition-colors shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
           >
             {isSubmitting ? (
