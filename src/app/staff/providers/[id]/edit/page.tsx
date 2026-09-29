@@ -1,25 +1,30 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect, use } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useI18n } from "@/context/I18nContext";
-import {
-  Building2,
-  ArrowLeft,
-  Save,
-  Loader2,
-  AlertCircle,
-  CheckCircle2,
-  AlertTriangle,
-} from "lucide-react";
+import { Building2, ArrowLeft, Save, Loader2, AlertCircle, AlertTriangle } from "lucide-react";
+import { ConflictResolver } from "@/components/staff/ConflictResolver";
+import { ProviderStatusBadge } from "@/components/staff/ProviderStatusBadge";
 import type { CairoCluster } from "@/lib/provider/validation";
+import type { ProviderOrganizationDto } from "@/lib/provider/dto";
 
-export default function NewProviderPage() {
+export default function EditProviderOrganizationPage({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}) {
+  const resolvedParams = use(params);
+  const providerId = resolvedParams.id;
+
   const { t, dir } = useI18n();
   const router = useRouter();
 
-  // Form State
+  const [loading, setLoading] = useState(true);
+  const [provider, setProvider] = useState<ProviderOrganizationDto | null>(null);
+
+  // Form Fields
   const [nameEn, setNameEn] = useState("");
   const [nameAr, setNameAr] = useState("");
   const [legalName, setLegalName] = useState("");
@@ -29,6 +34,7 @@ export default function NewProviderPage() {
   const [contactPersonName, setContactPersonName] = useState("");
   const [contactEmail, setContactEmail] = useState("");
   const [contactPhone, setContactPhone] = useState("+20");
+  const [expectedVersion, setExpectedVersion] = useState<number>(1);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isDirty, setIsDirty] = useState(false);
@@ -36,15 +42,59 @@ export default function NewProviderPage() {
   const [generalError, setGeneralError] = useState<string | null>(null);
   const [uncertainOutcome, setUncertainOutcome] = useState(false);
 
-  const handleFieldChange = (setter: React.Dispatch<React.SetStateAction<string>>) => {
-    return (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
-      setter(e.target.value);
-      setIsDirty(true);
-      setFieldErrors({});
-      setGeneralError(null);
-      setUncertainOutcome(false);
+  // Concurrency Conflict State
+  const [conflictOpen, setConflictOpen] = useState(false);
+  const [serverProvider, setServerProvider] = useState<ProviderOrganizationDto | null>(null);
+
+  useEffect(() => {
+    let isMounted = true;
+    async function loadProvider() {
+      try {
+        const res = await fetch(`/api/v1/staff/providers/${providerId}`, {
+          headers: { Accept: "application/json" },
+        });
+
+        if (res.status === 401) {
+          router.replace("/staff/login");
+          return;
+        }
+
+        if (!res.ok) {
+          if (isMounted) {
+            setGeneralError("Provider organization not found or access denied.");
+            setLoading(false);
+          }
+          return;
+        }
+
+        const data: ProviderOrganizationDto = await res.json();
+        if (isMounted) {
+          setProvider(data);
+          setNameEn(data.nameEn);
+          setNameAr(data.nameAr);
+          setLegalName(data.legalName);
+          setTaxRegistrationNumber(data.taxRegistrationNumber);
+          setCommercialRegistrationNumber(data.commercialRegistrationNumber);
+          setPrimaryCluster(data.primaryCluster as CairoCluster);
+          setContactPersonName(data.contactPersonName);
+          setContactEmail(data.contactEmail);
+          setContactPhone(data.contactPhone);
+          setExpectedVersion(data.version);
+          setLoading(false);
+        }
+      } catch {
+        if (isMounted) {
+          setGeneralError("Failed to load provider organization. Please refresh the page.");
+          setLoading(false);
+        }
+      }
+    }
+
+    loadProvider();
+    return () => {
+      isMounted = false;
     };
-  };
+  }, [providerId, router]);
 
   const validate = (): boolean => {
     const errors: Record<string, string> = {};
@@ -80,6 +130,20 @@ export default function NewProviderPage() {
     return Object.keys(errors).length === 0;
   };
 
+  const handleFieldChange =
+    (setter: React.Dispatch<React.SetStateAction<string>>) =>
+    (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
+      setter(e.target.value);
+      setIsDirty(true);
+      if (fieldErrors[e.target.id]) {
+        setFieldErrors((prev) => {
+          const next = { ...prev };
+          delete next[e.target.id];
+          return next;
+        });
+      }
+    };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSubmitting) return;
@@ -94,13 +158,14 @@ export default function NewProviderPage() {
     setUncertainOutcome(false);
 
     try {
-      const res = await fetch("/api/v1/staff/providers", {
-        method: "POST",
+      const res = await fetch(`/api/v1/staff/providers/${providerId}`, {
+        method: "PATCH",
         headers: {
           "Content-Type": "application/json",
           Accept: "application/json",
         },
         body: JSON.stringify({
+          expectedVersion,
           nameEn: nameEn.trim(),
           nameAr: nameAr.trim(),
           legalName: legalName.trim(),
@@ -119,7 +184,7 @@ export default function NewProviderPage() {
       }
 
       if (res.status === 403) {
-        setGeneralError("Access Denied: Only Sales agents can create provider drafts.");
+        setGeneralError("Access Denied: Only Sales or Admin staff can edit provider drafts.");
         setIsSubmitting(false);
         return;
       }
@@ -127,7 +192,13 @@ export default function NewProviderPage() {
       const json = await res.json().catch(() => ({}));
 
       if (res.status === 409) {
-        setGeneralError(json.message || "A provider with this Tax ID or CR already exists.");
+        // Concurrency conflict: fetch fresh server record without silently modifying expectedVersion
+        const freshRes = await fetch(`/api/v1/staff/providers/${providerId}`);
+        if (freshRes.ok) {
+          const freshData: ProviderOrganizationDto = await freshRes.json();
+          setServerProvider(freshData);
+        }
+        setConflictOpen(true);
         setIsSubmitting(false);
         return;
       }
@@ -144,103 +215,175 @@ export default function NewProviderPage() {
         } else if (json.details && typeof json.details === "object") {
           setFieldErrors(json.details);
         }
-        setGeneralError(json.message || "Failed to create provider draft.");
+        setGeneralError(json.message || "Failed to update provider draft.");
         setIsSubmitting(false);
         return;
       }
 
-      // Success -> navigate to provider detail page to add branches
+      // Success
       setIsDirty(false);
-      const targetId = json.id || json.provider?.id;
-      router.push(`/staff/providers/${targetId}`);
+      router.push(`/staff/providers/${providerId}`);
     } catch {
-      // Network timeout / unknown outcome: do NOT create blindly again
+      // Invariant: Treat outcome as unknown, read back record before allowing deliberate retry
+      try {
+        const checkRes = await fetch(`/api/v1/staff/providers/${providerId}`);
+        if (checkRes.ok) {
+          const latest: ProviderOrganizationDto = await checkRes.json();
+          if (latest.version > expectedVersion) {
+            // Update actually succeeded on the server before network interruption
+            setIsDirty(false);
+            router.push(`/staff/providers/${providerId}`);
+            return;
+          }
+        }
+      } catch {
+        // Read-back failed as well
+      }
+
       setUncertainOutcome(true);
       setGeneralError(
-        "Network connection interrupted. The server outcome is unconfirmed. Do NOT submit again blindly; please check the Provider Directory to reconcile before attempting again."
+        "Network connection interrupted. We verified the server and your draft updates were not applied. Your entered data has been preserved; you may safely retry."
       );
       setIsSubmitting(false);
     }
   };
 
+  const handleApplyServerState = () => {
+    if (!serverProvider) return;
+    setNameEn(serverProvider.nameEn);
+    setNameAr(serverProvider.nameAr);
+    setLegalName(serverProvider.legalName);
+    setTaxRegistrationNumber(serverProvider.taxRegistrationNumber);
+    setCommercialRegistrationNumber(serverProvider.commercialRegistrationNumber);
+    setPrimaryCluster(serverProvider.primaryCluster as CairoCluster);
+    setContactPersonName(serverProvider.contactPersonName);
+    setContactEmail(serverProvider.contactEmail);
+    setContactPhone(serverProvider.contactPhone);
+    setExpectedVersion(serverProvider.version);
+    setProvider(serverProvider);
+    setIsDirty(false);
+    setConflictOpen(false);
+  };
+
+  const handleKeepLocalWithNewVersion = () => {
+    if (!serverProvider) return;
+    setExpectedVersion(serverProvider.version);
+    setConflictOpen(false);
+  };
+
+  if (loading) {
+    return (
+      <div className="flex flex-col items-center justify-center py-24 text-slate-500">
+        <Loader2 className="w-8 h-8 animate-spin text-brand-600 mb-3" />
+        <p className="text-sm font-medium">Loading provider details...</p>
+      </div>
+    );
+  }
+
+  if (!provider) {
+    return (
+      <div className="max-w-xl mx-auto py-12 text-center">
+        <AlertCircle className="w-12 h-12 text-red-500 mx-auto mb-4" />
+        <h2 className="text-xl font-bold text-slate-900 mb-2">Provider Not Found</h2>
+        <p className="text-sm text-slate-600 mb-6">
+          {generalError || "Unable to locate provider organization."}
+        </p>
+        <Link
+          href="/staff/providers"
+          className="inline-flex items-center gap-2 px-4 py-2 bg-brand-600 text-white rounded-lg text-sm font-semibold hover:bg-brand-700"
+        >
+          {t("onboarding.nav.directory")}
+        </Link>
+      </div>
+    );
+  }
+
+  // Guard: Only DRAFT providers can be edited
+  if (provider.status !== "DRAFT") {
+    return (
+      <div className="max-w-2xl mx-auto py-12 space-y-6" dir={dir}>
+        <div className="p-6 rounded-2xl bg-amber-50 border border-amber-200 text-amber-900 space-y-4">
+          <div className="flex items-center gap-3">
+            <AlertTriangle className="w-6 h-6 text-amber-600 shrink-0" />
+            <div>
+              <h2 className="text-lg font-bold">Editing Not Permitted</h2>
+              <p className="text-xs text-amber-700 mt-0.5">
+                Current Status: <strong className="font-semibold">{provider.status}</strong>
+              </p>
+            </div>
+          </div>
+          <p className="text-xs text-amber-800 leading-relaxed">
+            Provider organization drafts can only be modified while in{" "}
+            <strong className="font-semibold">DRAFT</strong> status. Records in PENDING_REVIEW,
+            ACTIVE, PAUSED, or terminal statuses cannot be modified directly by Sales. If
+            operational changes are required for an active provider, please request an amendment
+            from Operations.
+          </p>
+          <div className="pt-2">
+            <Link
+              href={`/staff/providers/${provider.id}`}
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-amber-600 text-white text-xs font-semibold hover:bg-amber-700 transition-colors shadow-xs"
+            >
+              <ArrowLeft className="w-4 h-4 rtl:rotate-180" />
+              <span>{t("onboarding.nav.backToProvider")}</span>
+            </Link>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="max-w-3xl mx-auto space-y-6" dir={dir}>
-      {/* Top Header & Breadcrumb */}
-      <div className="flex items-center justify-between gap-4">
+      {/* Top Header */}
+      <div className="flex items-center justify-between">
         <div>
           <Link
-            href="/staff/providers"
+            href={`/staff/providers/${provider.id}`}
             className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-500 hover:text-brand-600 transition-colors mb-2"
           >
-            <ArrowLeft className="w-4 h-4 rtl:rotate-180" />
-            <span>{t("onboarding.nav.backToDirectory")}</span>
+            <ArrowLeft className="w-3.5 h-3.5 rtl:rotate-180" />
+            <span>{t("onboarding.nav.backToProvider")}</span>
           </Link>
-          <h1 className="text-2xl font-bold text-slate-900 tracking-tight flex items-center gap-2.5">
-            <Building2 className="w-7 h-7 text-brand-600" />
-            <span>{t("onboarding.providerForm.newTitle")}</span>
+          <h1 className="text-xl font-bold text-slate-900 tracking-tight flex items-center gap-2">
+            <Building2 className="w-5 h-5 text-brand-600" />
+            <span>{t("onboarding.providerForm.editTitle")}</span>
           </h1>
-          <p className="text-xs text-slate-500 mt-1">{t("onboarding.providerForm.newSubtitle")}</p>
+          <p className="text-xs text-slate-500 mt-0.5">
+            {t("onboarding.providerForm.editSubtitle")} • Version v{expectedVersion}
+          </p>
         </div>
 
-        {/* Saved/Unsaved Status Indicator */}
         <div className="flex items-center gap-2">
-          {isDirty ? (
-            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-amber-50 text-amber-800 border border-amber-200">
-              <AlertCircle className="w-3.5 h-3.5 text-amber-600" />
-              <span>{t("onboarding.providerForm.unsavedChanges")}</span>
-            </span>
-          ) : (
-            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-slate-100 text-slate-600 border border-slate-200">
-              <CheckCircle2 className="w-3.5 h-3.5 text-slate-400" />
-              <span>{t("onboarding.providerForm.allChangesSaved")}</span>
-            </span>
-          )}
+          <ProviderStatusBadge status={provider.status} />
         </div>
       </div>
 
-      {/* Error Summary Banner */}
+      {/* General Error Notice */}
       {generalError && (
         <div
           role="alert"
-          className={`p-4 rounded-2xl text-xs flex items-start gap-3 ${
-            uncertainOutcome
-              ? "bg-amber-50 border border-amber-300 text-amber-950"
-              : "bg-rose-50 border border-rose-200 text-rose-900"
-          }`}
+          className="p-4 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-start gap-3"
         >
-          {uncertainOutcome ? (
-            <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
-          ) : (
-            <AlertCircle className="w-5 h-5 text-rose-600 flex-shrink-0 mt-0.5" />
-          )}
-          <div className="space-y-1">
-            <span className="font-bold block">
-              {uncertainOutcome
-                ? "Unconfirmed Operation Outcome"
-                : t("onboarding.providerForm.errorSummaryTitle")}
-            </span>
-            <p className="leading-relaxed">{generalError}</p>
+          <AlertCircle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
+          <div className="flex-1">
+            <p className="font-semibold">{generalError}</p>
             {uncertainOutcome && (
-              <div className="pt-2">
-                <Link
-                  href="/staff/providers"
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-600 text-white font-bold hover:bg-amber-700 transition-colors"
-                >
-                  <span>Go to Provider Directory to Reconcile</span>
-                </Link>
-              </div>
+              <p className="mt-1 text-rose-700 text-[11px]">
+                Your form changes are safely preserved. Click &quot;Save Changes&quot; below to
+                retry.
+              </p>
             )}
           </div>
         </div>
       )}
 
-      {/* Main Form */}
+      {/* Form */}
       <form onSubmit={handleSubmit} className="space-y-6">
-        {/* Section 1: Legal & Commercial Identity */}
+        {/* Section 1: Legal Entity Identity */}
         <div className="bg-white p-6 rounded-2xl border border-slate-200/80 shadow-xs space-y-4">
-          <h2 className="text-sm font-bold text-slate-900 border-b border-slate-100 pb-3 flex items-center gap-2">
-            <Building2 className="w-4 h-4 text-brand-600" />
-            <span>{t("onboarding.providerForm.legalSection")}</span>
+          <h2 className="text-sm font-bold text-slate-900 border-b border-slate-100 pb-3">
+            {t("onboarding.providerForm.legalSection")}
           </h2>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -320,8 +463,8 @@ export default function NewProviderPage() {
               <input
                 id="taxId"
                 type="text"
-                maxLength={9}
                 required
+                maxLength={9}
                 disabled={isSubmitting}
                 value={taxRegistrationNumber}
                 dir="ltr"
@@ -395,7 +538,7 @@ export default function NewProviderPage() {
           </div>
         </div>
 
-        {/* Section 2: Contact Information */}
+        {/* Section 2: Primary Business Contact */}
         <div className="bg-white p-6 rounded-2xl border border-slate-200/80 shadow-xs space-y-4">
           <h2 className="text-sm font-bold text-slate-900 border-b border-slate-100 pb-3">
             {t("onboarding.providerForm.contactSection")}
@@ -490,33 +633,69 @@ export default function NewProviderPage() {
         </div>
 
         {/* Action Buttons */}
-        <div className="flex items-center justify-between gap-4 pt-2">
+        <div className="flex items-center justify-between pt-2">
           <Link
-            href="/staff/providers"
-            className="px-4 py-2.5 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl transition-colors"
+            href={`/staff/providers/${provider.id}`}
+            className="px-4 py-2 text-xs font-semibold text-slate-600 hover:text-slate-900 border border-slate-200 bg-white hover:bg-slate-50 rounded-xl transition-colors"
           >
             {t("onboarding.providerForm.cancel")}
           </Link>
 
           <button
             type="submit"
-            disabled={isSubmitting}
-            className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl text-xs font-bold text-white bg-brand-600 hover:bg-brand-700 disabled:opacity-50 transition-colors shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
+            id="save-provider-edit-btn"
+            disabled={isSubmitting || !isDirty}
+            className="inline-flex items-center gap-1.5 px-5 py-2.5 bg-brand-600 hover:bg-brand-700 text-white rounded-xl text-xs font-semibold shadow-xs disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           >
             {isSubmitting ? (
               <>
-                <Loader2 className="w-4 h-4 animate-spin" />
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
                 <span>{t("onboarding.providerForm.saving")}</span>
               </>
             ) : (
               <>
-                <Save className="w-4 h-4" />
-                <span>{t("onboarding.providerForm.saveDraft")}</span>
+                <Save className="w-3.5 h-3.5" />
+                <span>{t("onboarding.providerForm.saveChanges")}</span>
               </>
             )}
           </button>
         </div>
       </form>
+
+      {/* Concurrency Conflict Dialog */}
+      {conflictOpen && serverProvider && (
+        <ConflictResolver
+          isOpen={conflictOpen}
+          serverVersion={serverProvider.version}
+          expectedVersion={expectedVersion}
+          entityType="Provider Organization"
+          clientValues={{
+            nameEn,
+            nameAr,
+            legalName,
+            taxRegistrationNumber,
+            commercialRegistrationNumber,
+            primaryCluster,
+            contactPersonName,
+            contactEmail,
+            contactPhone,
+          }}
+          serverValues={{
+            nameEn: serverProvider.nameEn,
+            nameAr: serverProvider.nameAr,
+            legalName: serverProvider.legalName,
+            taxRegistrationNumber: serverProvider.taxRegistrationNumber,
+            commercialRegistrationNumber: serverProvider.commercialRegistrationNumber,
+            primaryCluster: serverProvider.primaryCluster,
+            contactPersonName: serverProvider.contactPersonName,
+            contactEmail: serverProvider.contactEmail,
+            contactPhone: serverProvider.contactPhone,
+          }}
+          onClose={() => setConflictOpen(false)}
+          onAcceptServer={handleApplyServerState}
+          onKeepLocalWithNewVersion={handleKeepLocalWithNewVersion}
+        />
+      )}
     </div>
   );
 }

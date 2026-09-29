@@ -24,8 +24,7 @@ export const ACTIVE_PILOT_CLUSTER: CairoClusterType = "NASR_CITY_HELIOPOLIS";
 
 export type ProviderStatus =
   "DRAFT" | "PENDING_REVIEW" | "ACTIVE" | "PAUSED" | "REJECTED" | "TERMINATED";
-export type BranchStatus =
-  "DRAFT" | "PENDING_REVIEW" | "ACTIVE" | "PAUSED" | "REJECTED" | "TERMINATED";
+export type BranchStatus = "DRAFT" | "ACTIVE" | "PAUSED" | "DECOMMISSIONED";
 
 export interface ProviderBranchSummary {
   id: string;

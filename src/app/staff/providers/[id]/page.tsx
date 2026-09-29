@@ -30,51 +30,11 @@ import { ProviderRejectModal } from "@/components/staff/ProviderRejectModal";
 import { PauseResumeModal } from "@/components/staff/PauseResumeModal";
 import { CheckAnswersSummary } from "@/components/staff/CheckAnswersSummary";
 import { ConflictResolver } from "@/components/staff/ConflictResolver";
-import type { CairoCluster, OperatingHoursEntry } from "@/lib/provider/validation";
 import type { StaffAuthStatusResponse } from "@/lib/staff/status-contract";
+import type { BranchDto, ProviderOrganizationDto } from "@/lib/provider/dto";
 
-interface Branch {
-  id: string;
-  providerOrganizationId: string;
-  branchCode: string;
-  nameEn: string;
-  nameAr: string;
-  cluster: CairoCluster;
-  streetAddressEn: string;
-  streetAddressAr: string;
-  landmarkEn?: string | null;
-  landmarkAr?: string | null;
-  latitude: number;
-  longitude: number;
-  contactPhone: string;
-  operatingHours: OperatingHoursEntry[];
-  status: "DRAFT" | "PENDING_REVIEW" | "ACTIVE" | "PAUSED" | "REJECTED" | "TERMINATED";
-  version: number;
-  vettedAt?: string | null;
-  evidenceDocumentRef?: string | null;
-  rejectionReason?: string | null;
-}
-
-interface Provider {
-  id: string;
-  nameEn: string;
-  nameAr: string;
-  legalName: string;
-  taxRegistrationNumber: string;
-  commercialRegistrationNumber: string;
-  primaryCluster: CairoCluster;
-  contactPersonName: string;
-  contactEmail: string;
-  contactPhone: string;
-  status: "DRAFT" | "PENDING_REVIEW" | "ACTIVE" | "PAUSED" | "REJECTED" | "TERMINATED";
-  version: number;
-  submittedByUserId?: string | null;
-  submittedAt?: string | null;
-  activatedAt?: string | null;
-  pausedAt?: string | null;
-  rejectionReason?: string | null;
-  branches: Branch[];
-}
+type Branch = BranchDto;
+type Provider = ProviderOrganizationDto;
 
 export default function ProviderDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const resolvedParams = use(params);
@@ -341,6 +301,14 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
           {provider.status === "DRAFT" && (
             <>
               <Link
+                id="edit-provider-details-link"
+                href={`/staff/providers/${provider.id}/edit`}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold shadow-xs transition-colors"
+              >
+                <Edit2 className="w-4 h-4 text-slate-600" />
+                <span>{t("onboarding.actions.editProvider")}</span>
+              </Link>
+              <Link
                 href={`/staff/providers/${provider.id}/branches/new`}
                 className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold shadow-xs transition-colors"
               >
@@ -476,9 +444,14 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
             <span>{t("onboarding.review.providerLegalSection")}</span>
           </h2>
           {provider.status === "DRAFT" && (
-            <span className="text-xs text-brand-600 font-semibold bg-brand-50 px-2.5 py-1 rounded-full">
-              Editable Draft
-            </span>
+            <Link
+              id="edit-org-card-button"
+              href={`/staff/providers/${provider.id}/edit`}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs text-brand-600 font-semibold bg-brand-50 hover:bg-brand-100 rounded-lg transition-colors"
+            >
+              <Edit2 className="w-3.5 h-3.5" />
+              <span>{t("onboarding.actions.editProvider")}</span>
+            </Link>
           )}
         </div>
 
@@ -621,7 +594,7 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
                     {isOps &&
                       (provider.status === "PENDING_REVIEW" || provider.status === "ACTIVE") && (
                         <>
-                          {(branch.status === "DRAFT" || branch.status === "PENDING_REVIEW") && (
+                          {branch.status === "DRAFT" && (
                             <>
                               <button
                                 type="button"
@@ -737,9 +710,10 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
                           </p>
                         )}
                       </div>
-                    ) : branch.status === "REJECTED" ? (
+                    ) : branch.status === "DECOMMISSIONED" || branch.rejectionReason ? (
                       <p className="text-red-600 font-medium">
-                        Rejected: {branch.rejectionReason || "Criteria not met"}
+                        {branch.status === "DECOMMISSIONED" ? "Decommissioned" : "Rejected"}:{" "}
+                        {branch.rejectionReason || "Criteria not met"}
                       </p>
                     ) : (
                       <p className="text-slate-400 italic">Pending offline human verification</p>

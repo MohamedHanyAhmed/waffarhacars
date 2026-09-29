@@ -362,6 +362,7 @@
     "signOut": "Sign Out",
     "unauthorized": "You do not have active staff membership privileges.",
     "suspended": "Your staff account has been suspended. Contact compliance.",
+    "authorizedSystems": "Authorized Internal Systems • Confidential",
     "switchLocale": "عربي"
   },
   "onboarding": {
@@ -398,7 +399,12 @@
       "rejected": "Rejected",
       "terminated": "Terminated",
       "decommissioned": "Decommissioned",
+      "unknown": "Unknown Status",
       "all": "All Statuses"
+    },
+    "actions": {
+      "editProvider": "Edit Provider Details",
+      "editBranch": "Edit Branch"
     },
     "clusters": {
       "all": "All Clusters",
@@ -509,6 +515,9 @@
       "openTime": "Open Time",
       "closeTime": "Close Time",
       "closed": "Closed",
+      "confirmOperatingHoursLabel": "I confirm that I have verified and entered the actual operating hours for this branch.",
+      "confirmOperatingHoursHelp": "Sales verification requirement: do not submit unverified hours defaults.",
+      "hoursConfirmedRequired": "You must explicitly confirm the actual operating hours for this branch.",
       "saveBranch": "Save Branch",
       "savingBranch": "Saving branch...",
       "noBranchesNotice": "At least one branch is required before this organization can be submitted for review."

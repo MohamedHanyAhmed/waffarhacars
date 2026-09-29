@@ -60,7 +60,7 @@ const opsSubmitterStaff = {
   userId: "usr-sales-101", // Matches submitter: triggers maker-checker violation
 };
 
-test.describe("Bilingual Staff Provider Onboarding Journey", () => {
+test.describe("Bilingual Staff Provider Onboarding UI Journey (Mocked APIs)", () => {
   test.setTimeout(90000);
 
   test("1. Sales draft creation, branch setup, review summary, and submission for review", async ({
@@ -253,6 +253,7 @@ test.describe("Bilingual Staff Provider Onboarding Journey", () => {
     await page.fill("#branch-latitude", "30.0500");
     await page.fill("#branch-longitude", "31.3300");
     await page.fill("#branchContactPhone", "+201012345678");
+    await page.check("#confirm-operating-hours");
 
     await captureArtifact(page, "staff_branch_new_draft.png");
 

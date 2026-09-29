@@ -3,6 +3,8 @@ import { assertStaffPermission, AuthorizationError } from "@/lib/dal";
 import { ResumeProviderSchema } from "@/lib/provider/validation";
 import { resumeProvider, ProviderError } from "@/lib/provider/service";
 
+import { normalizeProviderDto } from "@/lib/provider/dto";
+
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -30,7 +32,7 @@ export async function POST(
       undefined;
     const resumed = await resumeProvider(actor, id, parsed.data, clientIp);
 
-    return Response.json(resumed, {
+    return Response.json(normalizeProviderDto(resumed), {
       status: 200,
       headers: { "Cache-Control": "no-store" },
     });

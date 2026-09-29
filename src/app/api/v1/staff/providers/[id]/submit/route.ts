@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { assertStaffPermission, AuthorizationError } from "@/lib/dal";
 import { SubmitProviderSchema } from "@/lib/provider/validation";
 import { submitProviderForReview, ProviderError } from "@/lib/provider/service";
+import { normalizeProviderDto } from "@/lib/provider/dto";
 
 export async function POST(
   req: NextRequest,
@@ -29,8 +30,9 @@ export async function POST(
       req.headers.get("x-real-ip") ||
       undefined;
     const submitted = await submitProviderForReview(actor, id, parsed.data, clientIp);
+    const dto = normalizeProviderDto(submitted);
 
-    return Response.json(submitted, {
+    return Response.json(dto, {
       status: 200,
       headers: { "Cache-Control": "no-store" },
     });

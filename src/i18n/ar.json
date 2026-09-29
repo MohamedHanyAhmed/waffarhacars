@@ -362,6 +362,7 @@
     "signOut": "تسجيل الخروج",
     "unauthorized": "ليس لديك صلاحيات عضوية موظف نشطة.",
     "suspended": "تم تعليق حساب الموظف الخاص بك. يرجى مراجعة إدارة الامتثال.",
+    "authorizedSystems": "الأنظمة الداخلية المصرح بها • سري",
     "switchLocale": "English"
   },
   "onboarding": {
@@ -398,7 +399,12 @@
       "rejected": "مرفوض",
       "terminated": "تم الإنهاء",
       "decommissioned": "خارج الخدمة",
+      "unknown": "حالة غير معروفة",
       "all": "جميع الحالات"
+    },
+    "actions": {
+      "editProvider": "تعديل بيانات المنشأة",
+      "editBranch": "تعديل بيانات الفرع"
     },
     "clusters": {
       "all": "جميع النطاقات",
@@ -509,6 +515,9 @@
       "openTime": "وقت الفتح",
       "closeTime": "وقت الإغلاق",
       "closed": "مغلق",
+      "confirmOperatingHoursLabel": "أقر بأنني قمت بالتحقق من مواعيد العمل الفعلية لهذا الفرع وإدخالها بدقة.",
+      "confirmOperatingHoursHelp": "متطلب تدقيق المبيعات: يرجى عدم اعتماد مواعيد افتراضية دون مراجعة الشريك.",
+      "hoursConfirmedRequired": "يجب تأكيد مواعيد العمل الفعلية للفرع للمتابعة.",
       "saveBranch": "حفظ الفرع",
       "savingBranch": "جاري حفظ الفرع...",
       "noBranchesNotice": "يلزم إضافة فرع واحد على الأقل قبل تقديم المنشأة للمراجعة."

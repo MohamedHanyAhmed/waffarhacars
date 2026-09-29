@@ -58,8 +58,14 @@ export function ProviderStatusBadge({
       icon: <XCircle className="w-3.5 h-3.5 text-rose-600" />,
     },
     TERMINATED: {
-      label:
-        t("onboarding.status.terminated") || t("onboarding.status.decommissioned") || "Terminated",
+      label: t("onboarding.status.terminated") || "Terminated",
+      bg: "bg-stone-100",
+      text: "text-stone-700",
+      border: "border-stone-300",
+      icon: <AlertOctagon className="w-3.5 h-3.5 text-stone-500" />,
+    },
+    DECOMMISSIONED: {
+      label: t("onboarding.status.decommissioned") || "Decommissioned",
       bg: "bg-stone-100",
       text: "text-stone-700",
       border: "border-stone-300",
@@ -67,7 +73,15 @@ export function ProviderStatusBadge({
     },
   };
 
-  const current = config[status] || config.DRAFT;
+  const unknownConfig = {
+    label: t("onboarding.status.unknown") || "Unknown Status",
+    bg: "bg-rose-50",
+    text: "text-rose-700",
+    border: "border-rose-200",
+    icon: <AlertOctagon className="w-3.5 h-3.5 text-rose-500" />,
+  };
+
+  const current = status in config ? config[status as keyof typeof config] : unknownConfig;
   const sizeClasses = size === "sm" ? "px-2 py-0.5 text-xs" : "px-2.5 py-1 text-xs";
 
   return (

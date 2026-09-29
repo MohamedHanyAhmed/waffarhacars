@@ -13,30 +13,16 @@ import { GeolocationCapture } from "@/components/staff/GeolocationCapture";
 import { ConflictResolver } from "@/components/staff/ConflictResolver";
 import type { CairoCluster, OperatingHoursEntry } from "@/lib/provider/validation";
 
-interface BranchData {
-  id: string;
-  providerOrganizationId: string;
-  branchCode: string;
-  nameEn: string;
-  nameAr: string;
-  cluster: CairoCluster;
-  streetAddressEn: string;
-  streetAddressAr: string;
-  landmarkEn?: string | null;
-  landmarkAr?: string | null;
-  latitude: number;
-  longitude: number;
-  contactPhone: string;
-  operatingHours: OperatingHoursEntry[];
-  status: string;
-  version: number;
+import type { BranchDto } from "@/lib/provider/dto";
+
+type BranchData = BranchDto & {
   providerOrganization?: {
     id: string;
     nameEn: string;
     nameAr: string;
     status: string;
   };
-}
+};
 
 export default function EditBranchPage({
   params,
@@ -61,10 +47,11 @@ export default function EditBranchPage({
   const [streetAddressAr, setStreetAddressAr] = useState("");
   const [landmarkEn, setLandmarkEn] = useState("");
   const [landmarkAr, setLandmarkAr] = useState("");
-  const [latitude, setLatitude] = useState<number | "">(30.05);
-  const [longitude, setLongitude] = useState<number | "">(31.33);
+  const [latitude, setLatitude] = useState<number | "">("");
+  const [longitude, setLongitude] = useState<number | "">("");
   const [contactPhone, setContactPhone] = useState("+20");
   const [operatingHours, setOperatingHours] = useState<OperatingHoursEntry[]>(DEFAULT_WEEKLY_HOURS);
+  const [hoursConfirmed, setHoursConfirmed] = useState(true);
   const [expectedVersion, setExpectedVersion] = useState<number>(1);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -143,15 +130,21 @@ export default function EditBranchPage({
     if (!streetAddressAr.trim()) errors.streetAddressAr = "Arabic street address is required";
 
     if (typeof latitude !== "number" || latitude < 29.75 || latitude > 30.35) {
-      errors.latitude = "Latitude must be within Greater Cairo (29.75 to 30.35)";
+      errors.latitude = "Valid latitude within Greater Cairo (29.75 to 30.35) is required";
     }
 
     if (typeof longitude !== "number" || longitude < 31.05 || longitude > 31.75) {
-      errors.longitude = "Longitude must be within Greater Cairo (31.05 to 31.75)";
+      errors.longitude = "Valid longitude within Greater Cairo (31.05 to 31.75) is required";
     }
 
     if (!/^\+20\d{9,10}$/.test(contactPhone.trim())) {
       errors.contactPhone = "Egyptian phone number required (+20 followed by 9-10 digits)";
+    }
+
+    if (!hoursConfirmed) {
+      errors.operatingHours =
+        t("onboarding.branch.hoursConfirmedRequired") ||
+        "You must explicitly confirm the actual operating hours for this branch.";
     }
 
     setFieldErrors(errors);
@@ -207,13 +200,12 @@ export default function EditBranchPage({
       const json = await res.json().catch(() => ({}));
 
       if (res.status === 409) {
-        // Concurrency conflict: fetch latest server state to display diff
+        // Concurrency conflict: fetch latest server state to display diff without silently bumping expectedVersion
         const freshRes = await fetch(`/api/v1/staff/providers/${providerId}/branches/${branchId}`);
         if (freshRes.ok) {
           const freshRaw = await freshRes.json();
           const freshData: BranchData = (freshRaw.branch || freshRaw) as BranchData;
           setServerBranch(freshData);
-          setExpectedVersion(freshData.version);
         }
         setConflictOpen(true);
         setIsSubmitting(false);
@@ -221,7 +213,15 @@ export default function EditBranchPage({
       }
 
       if (!res.ok) {
-        if (json.details && typeof json.details === "object") {
+        if (Array.isArray(json.details)) {
+          const mapped: Record<string, string> = {};
+          for (const item of json.details) {
+            if (item.path && item.message) {
+              mapped[item.path] = item.message;
+            }
+          }
+          setFieldErrors(mapped);
+        } else if (json.details && typeof json.details === "object") {
           setFieldErrors(json.details);
         }
         setGeneralError(json.message || "Failed to update branch draft.");
@@ -232,7 +232,23 @@ export default function EditBranchPage({
       // Success
       router.push(`/staff/providers/${providerId}`);
     } catch {
-      setGeneralError("Network connection interrupted. Please verify connection and retry.");
+      // Invariant: Treat outcome as unknown; read back branch record before offering deliberate retry
+      try {
+        const checkRes = await fetch(`/api/v1/staff/providers/${providerId}/branches/${branchId}`);
+        if (checkRes.ok) {
+          const latest: BranchData = await checkRes.json();
+          if (latest.version > expectedVersion) {
+            router.push(`/staff/providers/${providerId}`);
+            return;
+          }
+        }
+      } catch {
+        // Read-back failed
+      }
+
+      setGeneralError(
+        "Network connection interrupted. We checked the server and your draft changes were not applied yet. Your inputs have been preserved; you may safely retry."
+      );
       setIsSubmitting(false);
     }
   };
@@ -608,9 +624,44 @@ export default function EditBranchPage({
             </label>
             <OperatingHoursEditor
               value={operatingHours}
-              onChange={setOperatingHours}
+              onChange={(h) => {
+                setOperatingHours(h);
+              }}
               readOnly={!isEditable || isSubmitting}
             />
+
+            <div className="pt-2">
+              <div className="flex items-start gap-2.5 p-3 rounded-xl bg-slate-50 border border-slate-200">
+                <input
+                  id="confirm-operating-hours"
+                  type="checkbox"
+                  checked={hoursConfirmed}
+                  disabled={!isEditable || isSubmitting}
+                  onChange={(e) => {
+                    setHoursConfirmed(e.target.checked);
+                    if (e.target.checked && fieldErrors.operatingHours) {
+                      setFieldErrors((prev) => {
+                        const next = { ...prev };
+                        delete next.operatingHours;
+                        return next;
+                      });
+                    }
+                  }}
+                  className="w-4 h-4 mt-0.5 rounded text-brand-600 focus:ring-brand-500 border-slate-300"
+                />
+                <label
+                  htmlFor="confirm-operating-hours"
+                  className="text-xs text-slate-700 font-medium cursor-pointer"
+                >
+                  {t("onboarding.branch.confirmOperatingHoursLabel")}
+                </label>
+              </div>
+              {fieldErrors.operatingHours && (
+                <p className="text-[11px] text-rose-600 font-medium mt-1">
+                  {fieldErrors.operatingHours}
+                </p>
+              )}
+            </div>
           </div>
         </div>
 

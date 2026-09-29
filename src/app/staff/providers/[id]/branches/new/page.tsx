@@ -25,10 +25,11 @@ export default function NewBranchPage({ params }: { params: Promise<{ id: string
   const [cluster, setCluster] = useState<CairoCluster>("NASR_CITY_HELIOPOLIS");
   const [streetAddressEn, setStreetAddressEn] = useState("");
   const [streetAddressAr, setStreetAddressAr] = useState("");
-  const [latitude, setLatitude] = useState<number | "">(30.05);
-  const [longitude, setLongitude] = useState<number | "">(31.33);
+  const [latitude, setLatitude] = useState<number | "">("");
+  const [longitude, setLongitude] = useState<number | "">("");
   const [contactPhone, setContactPhone] = useState("+20");
   const [operatingHours, setOperatingHours] = useState<OperatingHoursEntry[]>(DEFAULT_WEEKLY_HOURS);
+  const [hoursConfirmed, setHoursConfirmed] = useState(false);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isDirty, setIsDirty] = useState(false);
@@ -45,15 +46,21 @@ export default function NewBranchPage({ params }: { params: Promise<{ id: string
     if (!streetAddressAr.trim()) errors.streetAddressAr = "Arabic street address is required";
 
     if (typeof latitude !== "number" || latitude < 29.75 || latitude > 30.35) {
-      errors.latitude = "Latitude must be within Greater Cairo (29.75 to 30.35)";
+      errors.latitude = "Valid latitude within Greater Cairo (29.75 to 30.35) is required";
     }
 
     if (typeof longitude !== "number" || longitude < 31.05 || longitude > 31.75) {
-      errors.longitude = "Longitude must be within Greater Cairo (31.05 to 31.75)";
+      errors.longitude = "Valid longitude within Greater Cairo (31.05 to 31.75) is required";
     }
 
     if (!/^\+20\d{9,10}$/.test(contactPhone.trim())) {
       errors.contactPhone = "Egyptian phone number required (+20 followed by 9-10 digits)";
+    }
+
+    if (!hoursConfirmed) {
+      errors.operatingHours =
+        t("onboarding.branch.hoursConfirmedRequired") ||
+        "You must explicitly confirm the actual operating hours for this branch.";
     }
 
     setFieldErrors(errors);
@@ -107,7 +114,15 @@ export default function NewBranchPage({ params }: { params: Promise<{ id: string
       const json = await res.json().catch(() => ({}));
 
       if (!res.ok) {
-        if (json.details && typeof json.details === "object") {
+        if (Array.isArray(json.details)) {
+          const mapped: Record<string, string> = {};
+          for (const item of json.details) {
+            if (item.path && item.message) {
+              mapped[item.path] = item.message;
+            }
+          }
+          setFieldErrors(mapped);
+        } else if (json.details && typeof json.details === "object") {
           setFieldErrors(json.details);
         }
         setGeneralError(json.message || "Failed to create branch draft.");
@@ -119,7 +134,30 @@ export default function NewBranchPage({ params }: { params: Promise<{ id: string
       setIsDirty(false);
       router.push(`/staff/providers/${providerId}`);
     } catch {
-      setGeneralError("Network connection interrupted. Please verify connection and retry.");
+      // Invariant: Treat outcome as unknown; read back provider branches before offering deliberate retry
+      try {
+        const checkRes = await fetch(`/api/v1/staff/providers/${providerId}/branches`);
+        if (checkRes.ok) {
+          const branches = await checkRes.json();
+          const match = Array.isArray(branches)
+            ? branches.find(
+                (b: { branchCode: string }) => b.branchCode === branchCode.trim().toUpperCase()
+              )
+            : null;
+          if (match) {
+            // Branch was indeed created
+            setIsDirty(false);
+            router.push(`/staff/providers/${providerId}`);
+            return;
+          }
+        }
+      } catch {
+        // Read-back failed
+      }
+
+      setGeneralError(
+        "Network connection interrupted. We checked the server and this branch was not created yet. Your inputs have been preserved; you may safely retry."
+      );
       setIsSubmitting(false);
     }
   };
@@ -416,6 +454,39 @@ export default function NewBranchPage({ params }: { params: Promise<{ id: string
               setIsDirty(true);
             }}
           />
+
+          <div className="pt-2">
+            <div className="flex items-start gap-2.5 p-3 rounded-xl bg-slate-50 border border-slate-200">
+              <input
+                id="confirm-operating-hours"
+                type="checkbox"
+                checked={hoursConfirmed}
+                onChange={(e) => {
+                  setHoursConfirmed(e.target.checked);
+                  setIsDirty(true);
+                  if (e.target.checked && fieldErrors.operatingHours) {
+                    setFieldErrors((prev) => {
+                      const next = { ...prev };
+                      delete next.operatingHours;
+                      return next;
+                    });
+                  }
+                }}
+                className="w-4 h-4 mt-0.5 rounded text-brand-600 focus:ring-brand-500 border-slate-300"
+              />
+              <label
+                htmlFor="confirm-operating-hours"
+                className="text-xs text-slate-700 font-medium cursor-pointer"
+              >
+                {t("onboarding.branch.confirmOperatingHoursLabel")}
+              </label>
+            </div>
+            {fieldErrors.operatingHours && (
+              <p className="text-[11px] text-rose-600 font-medium mt-1">
+                {fieldErrors.operatingHours}
+              </p>
+            )}
+          </div>
         </div>
 
         {/* Form Actions */}

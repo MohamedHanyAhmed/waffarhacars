@@ -3,6 +3,7 @@ import { assertStaffPermission, AuthorizationError } from "@/lib/dal";
 import { getPrisma } from "@/lib/db";
 import { CreateBranchDraftSchema } from "@/lib/provider/validation";
 import { createBranchDraft, ProviderError } from "@/lib/provider/service";
+import { normalizeBranchDto } from "@/lib/provider/dto";
 
 export async function POST(
   req: NextRequest,
@@ -30,8 +31,9 @@ export async function POST(
       req.headers.get("x-real-ip") ||
       undefined;
     const branch = await createBranchDraft(actor, id, parsed.data, clientIp);
+    const dto = normalizeBranchDto(branch);
 
-    return Response.json(branch, {
+    return Response.json(dto, {
       status: 201,
       headers: { "Cache-Control": "no-store" },
     });
@@ -59,7 +61,9 @@ export async function GET(
       orderBy: { createdAt: "asc" },
     });
 
-    return Response.json(branches, {
+    const dtoList = branches.map(normalizeBranchDto);
+
+    return Response.json(dtoList, {
       status: 200,
       headers: { "Cache-Control": "no-store" },
     });

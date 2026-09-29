@@ -3,6 +3,8 @@ import { assertStaffPermission, AuthorizationError } from "@/lib/dal";
 import { RejectBranchSchema } from "@/lib/provider/validation";
 import { rejectBranch, ProviderError } from "@/lib/provider/service";
 
+import { normalizeBranchDto } from "@/lib/provider/dto";
+
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string; branchId: string }> }
@@ -30,7 +32,7 @@ export async function POST(
       undefined;
     const branch = await rejectBranch(actor, id, branchId, parsed.data, clientIp);
 
-    return Response.json(branch, {
+    return Response.json(normalizeBranchDto(branch), {
       status: 200,
       headers: { "Cache-Control": "no-store" },
     });
