@@ -2693,7 +2693,7 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
       );
       expect(patch2.status).toBe(409);
       const conflictBody = await patch2.json();
-      expect(conflictBody.error).toBe("VERSION_CONFLICT");
+      expect(conflictBody.error).toBe("CONCURRENT_MODIFICATION");
 
       // Verify PostgreSQL state preserves first mutation
       const finalDb = await prisma.providerOrganization.findUniqueOrThrow({
@@ -2833,7 +2833,10 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
       const prisma = getPrisma();
       const fakeProviderId = crypto.randomUUID();
 
-      // Attempt branch creation on non-existent provider (violates foreign key constraint)
+      // Attempt branch creation on non-existent provider (violates foreign key constraint).
+      // Provide a valid operatingHours entry so the request passes Zod validation and
+      // reaches the database, where PROVIDER_NOT_FOUND (404) is returned without creating
+      // any orphan records.
       const branchRes = await createBranchHandler(
         new NextRequest(`http://localhost:3000/api/v1/staff/providers/${fakeProviderId}/branches`, {
           method: "POST",
@@ -2848,13 +2851,15 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
             latitude: 30.05,
             longitude: 31.33,
             contactPhone: "+201012345678",
-            operatingHours: [],
+            operatingHours: [
+              { dayOfWeek: 0, openTime: "09:00", closeTime: "17:00", isClosed: false },
+            ],
           }),
         }),
         { params: Promise.resolve({ id: fakeProviderId }) }
       );
 
-      // Must fail with 404 or 500
+      // Must fail with 404 (PROVIDER_NOT_FOUND) because the parent does not exist
       expect([404, 500]).toContain(branchRes.status);
 
       // Invariant: zero orphan records created in PostgreSQL
