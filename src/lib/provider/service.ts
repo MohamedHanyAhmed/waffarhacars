@@ -68,10 +68,7 @@ function handlePrismaUniqueConstraint(err: unknown, entity: "provider" | "branch
         "A provider organization with this Commercial Registration Number already exists."
       );
     }
-    if (
-      combined.includes("branchcode") ||
-      combined.includes("branch_code")
-    ) {
+    if (combined.includes("branchcode") || combined.includes("branch_code")) {
       throw new ProviderError(
         409,
         "BRANCH_CODE_ALREADY_EXISTS",
@@ -95,7 +92,6 @@ function handlePrismaUniqueConstraint(err: unknown, entity: "provider" | "branch
   }
   throw err;
 }
-
 
 export async function createProviderDraft(
   actor: AuthorizedStaffContext,
