@@ -119,45 +119,50 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
     await disconnectDb();
   });
 
+  async function ensureBootstrapped() {
+    const prisma = getPrisma();
+    const count = await prisma.internalStaffMembership.count();
+    if (count === 0) {
+      const id = crypto.randomUUID().slice(0, 8);
+      const email = `bootstrap_admin_${id}@waffarhacars.com`.toLowerCase();
+      createdUserEmails.push(email);
+      await provisionStaffMember({
+        email,
+        fullName: `Bootstrap Admin ${id}`,
+        employeeNumber: `BOOT-${id.toUpperCase()}`,
+        department: "ADMIN",
+        role: "PLATFORM_ADMIN",
+        password: "TestPassword123!456",
+        isBootstrap: true,
+      });
+    }
+  }
+
   async function createAuthenticatedStaffUser(
     role: "SALES_AGENT" | "OPS_SUPERVISOR" | "PLATFORM_ADMIN",
     department: "SALES" | "OPERATIONS" | "ADMIN"
   ) {
+    await ensureBootstrapped();
+
     const id = crypto.randomUUID().slice(0, 8);
     const email = `staff_${role.toLowerCase()}_${id}@waffarhacars.com`.toLowerCase();
     createdUserEmails.push(email);
 
-    // Bootstrap first admin if DB has 0 staff
     const prisma = getPrisma();
-    const count = await prisma.internalStaffMembership.count();
-    const isBootstrap = count === 0;
-
     await provisionStaffMember({
       email,
       fullName: `Staff ${role} ${id}`,
       employeeNumber: `EMP-${id.toUpperCase()}`,
       department,
-      role: isBootstrap ? "PLATFORM_ADMIN" : role,
+      role,
       password: "TestPassword123!456",
-      isBootstrap,
+      isBootstrap: false,
     });
 
     const user = await prisma.user.findUniqueOrThrow({
       where: { email },
       include: { internalStaffMembership: true },
     });
-
-    // If bootstrap created PLATFORM_ADMIN but we wanted another role, update it directly for test setup
-    if (isBootstrap && role !== "PLATFORM_ADMIN") {
-      await prisma.internalStaffMembership.update({
-        where: { id: user.internalStaffMembership!.id },
-        data: { department },
-      });
-      await prisma.internalRoleAssignment.updateMany({
-        where: { staffMembershipId: user.internalStaffMembership!.id },
-        data: { role },
-      });
-    }
 
     // Set mustChangePassword = false and create TwoFactor row so user is fully active
     await prisma.internalStaffMembership.update({
