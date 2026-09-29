@@ -9,7 +9,6 @@ const DEFAULT_TEST_DB_URL =
   process.env.DATABASE_URL ||
   "postgresql://test_user:test_password@localhost:5432/waffarhacars_test";
 
-const TOTP_SECRET = "JBSWY3DPEHPK3PXP";
 const TEST_PASSWORD = "ValidStaffPassword123!";
 
 /**
@@ -151,7 +150,6 @@ test.describe("Real PostgreSQL Staff Provider Onboarding & Operations Vetting E2
       fullName: `Real Staff ${role}`,
       employeeNumber: `EMP-${uid}`,
       department: dept,
-      role,
       isBootstrap: false,
     });
 
@@ -160,20 +158,66 @@ test.describe("Real PostgreSQL Staff Provider Onboarding & Operations Vetting E2
       include: { internalStaffMembership: true },
     });
 
-    await prisma.user.update({
-      where: { id: user.id },
-      data: { twoFactorEnabled: true },
+    // --- Complete the staff lifecycle using Better Auth's actual API ---
+    // Step 1: Sign in with the temporary password to get a session cookie.
+    const baseUrl = process.env.BETTER_AUTH_URL ?? "http://localhost:3000";
+    const signInRes = await fetch(`${baseUrl}/api/auth/sign-in/email`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, password: TEST_PASSWORD }),
     });
+    const rawCookies = signInRes.headers.getSetCookie?.() ?? [];
+    const sessionCookieHeader = rawCookies.map((c) => c.split(";")[0]).join("; ");
 
-    await prisma.twoFactor.create({
-      data: {
-        userId: user.id,
-        secret: TOTP_SECRET,
-        backupCodes: "[]",
-        verified: true,
-      },
+    // Step 2: Change password (clears mustChangePassword flag in Better Auth).
+    const ENROLLED_PASSWORD = `${TEST_PASSWORD}Enrolled!`;
+    const changePwRes = await fetch(`${baseUrl}/api/v1/staff/auth/change-password`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: sessionCookieHeader },
+      body: JSON.stringify({ currentPassword: TEST_PASSWORD, newPassword: ENROLLED_PASSWORD }),
     });
+    // Merge any rotated session cookies after password change
+    const changePwCookies = changePwRes.headers.getSetCookie?.() ?? [];
+    const mergedCookieHeader =
+      changePwCookies.length > 0
+        ? changePwCookies.map((c) => c.split(";")[0]).join("; ")
+        : sessionCookieHeader;
 
+    // Step 3: Enable TOTP via Better Auth — it encrypts and stores the secret.
+    const enableRes = await fetch(`${baseUrl}/api/auth/two-factor/enable`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: mergedCookieHeader },
+      body: JSON.stringify({ password: ENROLLED_PASSWORD }),
+    });
+    const enableData = (await enableRes.json()) as { totpURI?: string };
+    if (!enableData.totpURI) {
+      throw new Error(
+        `Better Auth two-factor/enable did not return a totpURI for ${email}: ${JSON.stringify(enableData)}`
+      );
+    }
+
+    // Step 4: Derive the actual plaintext TOTP secret from the URI.
+    // Better Auth base32-encodes the secret in the URI; decode to get the raw bytes.
+    const totpUriParsed = new URL(enableData.totpURI);
+    const base32Secret = totpUriParsed.searchParams.get("secret")!;
+    // Use the raw base32 string directly with createOTP — it accepts base32 encoded secrets.
+    const totpSecret = base32Secret;
+
+    // Step 5: Verify one TOTP code to complete the enrollment (marks verified=true in DB).
+    const enrollCode = await createOTP(totpSecret, { digits: 6, period: 30 }).totp();
+    const verifyRes = await fetch(`${baseUrl}/api/auth/two-factor/verify-totp`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: mergedCookieHeader },
+      body: JSON.stringify({ code: enrollCode }),
+    });
+    if (verifyRes.status !== 200) {
+      const verifyBody = await verifyRes.text();
+      throw new Error(
+        `TOTP enrollment verification failed for ${email} (status ${verifyRes.status}): ${verifyBody}`
+      );
+    }
+
+    // Step 6: Ensure mustChangePassword is cleared in the membership record.
     await prisma.internalStaffMembership.update({
       where: { userId: user.id },
       data: { mustChangePassword: false, isActive: true },
@@ -181,13 +225,15 @@ test.describe("Real PostgreSQL Staff Provider Onboarding & Operations Vetting E2
 
     // Notice: ZERO handmade session cookies injected into database.
     // The browser will authenticate through /staff/login and /staff/mfa/verify.
+    // The password used by the browser at login time is ENROLLED_PASSWORD.
     return {
       user,
       email,
-      password: TEST_PASSWORD,
-      totpSecret: TOTP_SECRET,
+      password: ENROLLED_PASSWORD,
+      totpSecret,
     };
   }
+
 
   test("executes non-skippable real PostgreSQL Sales onboarding, organization editing, Operations vetting/activation, and bilingual RTL/LTR verification", async ({
     browser,
