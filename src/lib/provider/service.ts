@@ -772,6 +772,15 @@ export async function rejectBranch(
       );
     }
 
+    // Branch rejection is an onboarding-review action ONLY: requires parent in PENDING_REVIEW
+    if (parent.status !== "PENDING_REVIEW") {
+      throw new ProviderError(
+        422,
+        "INVALID_STATE_TRANSITION",
+        `Branch rejection is an onboarding review action only and requires provider organization to be in PENDING_REVIEW status. Current status: ${parent.status}. For live branches, use branch pause.`
+      );
+    }
+
     if (branch.status !== "DRAFT" && branch.status !== "ACTIVE") {
       throw new ProviderError(
         422,

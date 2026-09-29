@@ -34,7 +34,6 @@ import { POST as pauseProviderBranchHandler } from "@/app/api/v1/staff/ops/provi
 import { POST as resumeProviderBranchHandler } from "@/app/api/v1/staff/ops/providers/[id]/branches/[branchId]/resume/route";
 import { POST as pauseBranchHandler } from "@/app/api/v1/staff/ops/branches/[branchId]/pause/route";
 import { POST as resumeBranchHandler } from "@/app/api/v1/staff/ops/branches/[branchId]/resume/route";
-import { setTestAuditFailureSimulation } from "@/lib/dal/audit";
 import { isBranchOperationallyAvailable } from "@/lib/provider/service";
 
 const DEFAULT_TEST_DB_URL =
@@ -73,7 +72,6 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
   });
 
   beforeEach(() => {
-    setTestAuditFailureSimulation(null);
     resetServerEnvCache();
     resetAuth();
     process.env = { ...originalEnv };
@@ -90,7 +88,6 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
   });
 
   afterEach(async () => {
-    setTestAuditFailureSimulation(null);
     if (isDbReachable) {
       const prisma = getPrisma();
       try {
@@ -1217,7 +1214,49 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
     expect(remediatedBranch.status).toBe("DRAFT");
     expect(remediatedBranch.version).toBe(2);
 
-    // Terminal branch rejection -> status becomes DECOMMISSIONED
+    // Verify parent was returned to DRAFT (version 3)
+    const providerAfterRemediable = await prisma.providerOrganization.findUniqueOrThrow({
+      where: { id: provider.id },
+    });
+    expect(providerAfterRemediable.status).toBe("DRAFT");
+    expect(providerAfterRemediable.version).toBe(3);
+
+    // Rejecting branch while parent is in DRAFT must return 422 with zero changes
+    const rejectedDraftParentReq = new NextRequest(
+      `http://localhost:3000/api/v1/staff/ops/providers/${provider.id}/branches/${branch.id}/reject`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: ops.cookie },
+        body: JSON.stringify({
+          expectedVersion: 2,
+          remediable: false,
+          reasonCode: "COMPLIANCE_HOLD",
+          rejectionReason: "Attempted rejection while provider in DRAFT",
+        }),
+      }
+    );
+    const rejectedDraftParentRes = await rejectBranchHandler(rejectedDraftParentReq, {
+      params: Promise.resolve({ id: provider.id, branchId: branch.id }),
+    });
+    expect(rejectedDraftParentRes.status).toBe(422);
+    const errorBody = await rejectedDraftParentRes.json();
+    expect(errorBody.error).toBe("INVALID_STATE_TRANSITION");
+
+    // Resubmit provider by Sales so parent returns to PENDING_REVIEW
+    const resubmitReq = new NextRequest(
+      `http://localhost:3000/api/v1/staff/providers/${provider.id}/submit`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: sales.cookie },
+        body: JSON.stringify({ expectedVersion: 3 }),
+      }
+    );
+    const resubmitRes = await submitProviderHandler(resubmitReq, {
+      params: Promise.resolve({ id: provider.id }),
+    });
+    expect(resubmitRes.status).toBe(200);
+
+    // Terminal branch rejection now succeeds -> status becomes DECOMMISSIONED
     const terminalReq = new NextRequest(
       `http://localhost:3000/api/v1/staff/ops/providers/${provider.id}/branches/${branch.id}/reject`,
       {
@@ -1237,6 +1276,143 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
     expect(terminalRes.status).toBe(200);
     const decommissionedBranch = await terminalRes.json();
     expect(decommissionedBranch.status).toBe("DECOMMISSIONED");
+  });
+
+  it("proves remediable rejection of a branch under an ACTIVE multi-branch provider is rejected with 422 leaving provider, branches, versions, and audit count unchanged", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+
+    const sales = await createAuthenticatedStaffUser("SALES_AGENT", "SALES");
+    const ops = await createAuthenticatedStaffUser("OPS_SUPERVISOR", "OPERATIONS");
+    const uid = crypto.randomUUID().slice(0, 6);
+
+    const prisma = getPrisma();
+    const provider = await prisma.providerOrganization.create({
+      data: {
+        nameEn: "Active Multi-Branch Provider",
+        nameAr: "مزود نشط متعدد الفروع",
+        legalName: "Active Multi-Branch SAE",
+        taxRegistrationNumber: `${Math.floor(100000000 + Math.random() * 900000000)}`,
+        commercialRegistrationNumber: `CR-${uid}`,
+        primaryCluster: "NASR_CITY_HELIOPOLIS",
+        contactPersonName: "Ops Manager",
+        contactEmail: "ops-manager@test.eg",
+        contactPhone: "+201012345678",
+        createdByUserId: sales.user.id,
+        submittedByUserId: sales.user.id,
+        activatedByUserId: ops.user.id,
+        activatedAt: new Date(),
+        status: "ACTIVE",
+        version: 5,
+        branches: {
+          create: [
+            {
+              branchCode: `BR-A-${uid}`,
+              nameEn: "Active Branch A",
+              nameAr: "فرع نشط أ",
+              cluster: "NASR_CITY_HELIOPOLIS",
+              streetAddressEn: "10 Road 9, Maadi",
+              streetAddressAr: "١٠ شارع ٩، المعادي",
+              latitude: 29.96,
+              longitude: 31.26,
+              contactPhone: "+201111111111",
+              operatingHours: [
+                { dayOfWeek: 0, openTime: "09:00", closeTime: "18:00", isClosed: false },
+              ],
+              status: "ACTIVE",
+              version: 2,
+              legalIdentityChecked: true,
+              physicalLocationChecked: true,
+              contactAndHoursChecked: true,
+              evidenceDocumentRef: "DOC-ACTIVE-01",
+              vettedByUserId: ops.user.id,
+              vettedAt: new Date(),
+            },
+            {
+              branchCode: `BR-B-${uid}`,
+              nameEn: "Active Branch B",
+              nameAr: "فرع نشط ب",
+              cluster: "NASR_CITY_HELIOPOLIS",
+              streetAddressEn: "20 Road 9, Maadi",
+              streetAddressAr: "٢٠ شارع ٩، المعادي",
+              latitude: 29.97,
+              longitude: 31.27,
+              contactPhone: "+201222222222",
+              operatingHours: [
+                { dayOfWeek: 0, openTime: "09:00", closeTime: "18:00", isClosed: false },
+              ],
+              status: "ACTIVE",
+              version: 2,
+              legalIdentityChecked: true,
+              physicalLocationChecked: true,
+              contactAndHoursChecked: true,
+              evidenceDocumentRef: "DOC-ACTIVE-02",
+              vettedByUserId: ops.user.id,
+              vettedAt: new Date(),
+            },
+          ],
+        },
+      },
+      include: { branches: true },
+    });
+    createdProviderIds.push(provider.id);
+
+    const branchA = provider.branches[0];
+    const branchB = provider.branches[1];
+
+    // Count initial audit events before attempt
+    const initialAuditCount = await prisma.securityAuditEvent.count();
+
+    // Operations attempts to reject branch A under the ACTIVE provider
+    const rejectReq = new NextRequest(
+      `http://localhost:3000/api/v1/staff/ops/providers/${provider.id}/branches/${branchA.id}/reject`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: ops.cookie },
+        body: JSON.stringify({
+          expectedVersion: branchA.version,
+          remediable: true,
+          reasonCode: "UNVERIFIED_LOCATION",
+          rejectionReason: "Attempted rejection on an already active multi-branch organization.",
+        }),
+      }
+    );
+    const rejectRes = await rejectBranchHandler(rejectReq, {
+      params: Promise.resolve({ id: provider.id, branchId: branchA.id }),
+    });
+
+    // Must return 422 INVALID_STATE_TRANSITION
+    expect(rejectRes.status).toBe(422);
+    const errBody = await rejectRes.json();
+    expect(errBody.error).toBe("INVALID_STATE_TRANSITION");
+    expect(errBody.message).toContain("PENDING_REVIEW");
+
+    // Verify direct PostgreSQL state: provider is unchanged
+    const dbProvider = await prisma.providerOrganization.findUniqueOrThrow({
+      where: { id: provider.id },
+    });
+    expect(dbProvider.status).toBe("ACTIVE");
+    expect(dbProvider.version).toBe(5);
+
+    // Verify direct PostgreSQL state: both branches are unchanged
+    const dbBranchA = await prisma.providerBranch.findUniqueOrThrow({
+      where: { id: branchA.id },
+    });
+    expect(dbBranchA.status).toBe("ACTIVE");
+    expect(dbBranchA.version).toBe(2);
+    expect(dbBranchA.evidenceDocumentRef).toBe("DOC-ACTIVE-01");
+
+    const dbBranchB = await prisma.providerBranch.findUniqueOrThrow({
+      where: { id: branchB.id },
+    });
+    expect(dbBranchB.status).toBe("ACTIVE");
+    expect(dbBranchB.version).toBe(2);
+    expect(dbBranchB.evidenceDocumentRef).toBe("DOC-ACTIVE-02");
+
+    // Verify audit count is completely unchanged (0 new rows)
+    const finalAuditCount = await prisma.securityAuditEvent.count();
+    expect(finalAuditCount).toBe(initialAuditCount);
   });
 
   it("supports listing and querying providers and branches via staff read endpoints and legacy pause/resume", async () => {
@@ -1812,7 +1988,29 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
       params: Promise.resolve({ id: provider.id }),
     });
 
-    // While route handler is blocked on row lock, advance version to 2 on the barrier connection and commit
+    // Deterministic waiting signal: monitor pg_stat_activity to confirm competing request
+    // is actively blocked waiting for row lock before releasing barrierClient
+    const monitorClient = new pg.Client({ connectionString: DEFAULT_TEST_DB_URL });
+    await monitorClient.connect();
+    let lockWaitDetected = false;
+    for (let i = 0; i < 50; i++) {
+      const statRes = await monitorClient.query(
+        `SELECT COUNT(*)::int AS count 
+         FROM pg_stat_activity 
+         WHERE pid <> pg_backend_pid() 
+           AND wait_event_type = 'Lock' 
+           AND query LIKE '%provider_organizations%'`
+      );
+      if (statRes.rows[0].count > 0) {
+        lockWaitDetected = true;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    await monitorClient.end();
+    expect(lockWaitDetected).toBe(true);
+
+    // Now advance version to 2 on the barrier connection and commit, releasing the lock to the waiting request
     await barrierClient.query("UPDATE provider_organizations SET version = 2 WHERE id = $1", [
       provider.id,
     ]);
@@ -1955,11 +2153,21 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
     createdProviderIds.push(provider.id);
     const branch = provider.branches[0];
 
-    // Inject simulated audit write failure
-    setTestAuditFailureSimulation({
-      shouldFail: true,
-      error: new Error("Simulated audit write failure: PostgreSQL disk quota exceeded"),
-    });
+    // Install real PostgreSQL database engine trigger to force write failure on security_audit_events
+    const ddlClient = new pg.Client({ connectionString: DEFAULT_TEST_DB_URL });
+    await ddlClient.connect();
+    await ddlClient.query(`
+      CREATE OR REPLACE FUNCTION fail_audit_insert() RETURNS trigger AS $$
+      BEGIN
+        RAISE EXCEPTION 'Simulated database engine audit storage write failure';
+      END;
+      $$ LANGUAGE plpgsql;
+    `);
+    await ddlClient.query(`
+      CREATE TRIGGER test_audit_failure_trigger
+      BEFORE INSERT ON security_audit_events
+      FOR EACH ROW EXECUTE FUNCTION fail_audit_insert();
+    `);
 
     try {
       const activateReq = new NextRequest(
@@ -1985,7 +2193,11 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
       const resBody = await activateRes.json();
       expect(resBody.error).toBe("INTERNAL_ERROR");
     } finally {
-      setTestAuditFailureSimulation(null);
+      await ddlClient.query(
+        "DROP TRIGGER IF EXISTS test_audit_failure_trigger ON security_audit_events;"
+      );
+      await ddlClient.query("DROP FUNCTION IF EXISTS fail_audit_insert();");
+      await ddlClient.end().catch(() => {});
     }
 
     // Inspect database directly: assert zero partial mutations were persisted
