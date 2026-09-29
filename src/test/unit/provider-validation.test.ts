@@ -188,4 +188,63 @@ describe("Provider & Branch Validation Unit Test Suite", () => {
       expect(result.success).toBe(false);
     });
   });
+
+  describe("ActivateBranchSchema & RejectBranchSchema", () => {
+    it("accepts valid branch activation payload with all checklist items true and evidence ref", async () => {
+      const { ActivateBranchSchema } = await import("@/lib/provider/validation");
+      const valid = {
+        expectedVersion: 1,
+        legalIdentityChecked: true,
+        physicalLocationChecked: true,
+        contactAndHoursChecked: true,
+        evidenceDocumentRef: "DOC-EGY-2026-0914-01",
+      };
+      const result = ActivateBranchSchema.safeParse(valid);
+      expect(result.success).toBe(true);
+    });
+
+    it("rejects branch activation if any checklist item is false or evidence ref missing", async () => {
+      const { ActivateBranchSchema } = await import("@/lib/provider/validation");
+      const incomplete = {
+        expectedVersion: 1,
+        legalIdentityChecked: true,
+        physicalLocationChecked: false, // Incomplete!
+        contactAndHoursChecked: true,
+        evidenceDocumentRef: "DOC-EGY-2026-0914-01",
+      };
+      expect(ActivateBranchSchema.safeParse(incomplete).success).toBe(false);
+
+      const missingRef = {
+        expectedVersion: 1,
+        legalIdentityChecked: true,
+        physicalLocationChecked: true,
+        contactAndHoursChecked: true,
+        evidenceDocumentRef: "",
+      };
+      expect(ActivateBranchSchema.safeParse(missingRef).success).toBe(false);
+    });
+
+    it("accepts valid branch rejection with allowlisted reason code", async () => {
+      const { RejectBranchSchema } = await import("@/lib/provider/validation");
+      const valid = {
+        expectedVersion: 1,
+        remediable: true,
+        reasonCode: "UNVERIFIED_LOCATION",
+        rejectionReason: "Workshop address does not match physical building number",
+      };
+      const result = RejectBranchSchema.safeParse(valid);
+      expect(result.success).toBe(true);
+    });
+
+    it("rejects branch rejection with non-allowlisted reason code", async () => {
+      const { RejectBranchSchema } = await import("@/lib/provider/validation");
+      const invalid = {
+        expectedVersion: 1,
+        remediable: true,
+        reasonCode: "ARBITRARY_UNRECOGNIZED_CODE",
+        rejectionReason: "Workshop address does not match physical building number",
+      };
+      expect(RejectBranchSchema.safeParse(invalid).success).toBe(false);
+    });
+  });
 });

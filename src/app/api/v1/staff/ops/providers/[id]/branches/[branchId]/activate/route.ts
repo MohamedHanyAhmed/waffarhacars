@@ -1,40 +1,26 @@
 import { NextRequest } from "next/server";
 import { assertStaffPermission, AuthorizationError } from "@/lib/dal";
-import { getPrisma } from "@/lib/db";
-import { ResumeBranchSchema } from "@/lib/provider/validation";
-import { resumeBranch, ProviderError } from "@/lib/provider/service";
+import { ActivateBranchSchema } from "@/lib/provider/validation";
+import { activateBranch, ProviderError } from "@/lib/provider/service";
 
 export async function POST(
   req: NextRequest,
-  { params }: { params: Promise<{ branchId: string }> }
+  { params }: { params: Promise<{ id: string; branchId: string }> }
 ): Promise<Response> {
   try {
-    const actor = await assertStaffPermission(req.headers, "branch:resume");
-    const { branchId } = await params;
+    const actor = await assertStaffPermission(req.headers, "branch:activate");
+    const { id, branchId } = await params;
     const json = await req.json().catch(() => null);
-    const parsed = ResumeBranchSchema.safeParse(json);
+    const parsed = ActivateBranchSchema.safeParse(json);
 
     if (!parsed.success) {
       return Response.json(
         {
           error: "VALIDATION_ERROR",
-          message: "Invalid branch resume payload (expectedVersion is required)",
+          message: "Invalid branch activation payload",
           details: parsed.error.issues.map((i) => ({ path: i.path.join("."), message: i.message })),
         },
         { status: 400, headers: { "Cache-Control": "no-store" } }
-      );
-    }
-
-    const prisma = getPrisma();
-    const branch = await prisma.providerBranch.findUnique({
-      where: { id: branchId },
-      select: { providerOrganizationId: true },
-    });
-
-    if (!branch) {
-      return Response.json(
-        { error: "BRANCH_NOT_FOUND", message: "Branch not found." },
-        { status: 404, headers: { "Cache-Control": "no-store" } }
       );
     }
 
@@ -42,15 +28,9 @@ export async function POST(
       req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
       req.headers.get("x-real-ip") ||
       undefined;
-    const resumed = await resumeBranch(
-      actor,
-      branch.providerOrganizationId,
-      branchId,
-      parsed.data,
-      clientIp
-    );
+    const branch = await activateBranch(actor, id, branchId, parsed.data, clientIp);
 
-    return Response.json(resumed, {
+    return Response.json(branch, {
       status: 200,
       headers: { "Cache-Control": "no-store" },
     });

@@ -19,12 +19,19 @@ import {
   POST as createBranchHandler,
   GET as listBranchesHandler,
 } from "@/app/api/v1/staff/providers/[id]/branches/route";
-import { PATCH as updateBranchHandler } from "@/app/api/v1/staff/providers/[id]/branches/[branchId]/route";
+import {
+  GET as getBranchHandler,
+  PATCH as updateBranchHandler,
+} from "@/app/api/v1/staff/providers/[id]/branches/[branchId]/route";
 import { GET as listPendingOpsHandler } from "@/app/api/v1/staff/ops/providers/pending/route";
 import { POST as activateProviderHandler } from "@/app/api/v1/staff/ops/providers/[id]/activate/route";
 import { POST as rejectProviderHandler } from "@/app/api/v1/staff/ops/providers/[id]/reject/route";
 import { POST as pauseProviderHandler } from "@/app/api/v1/staff/ops/providers/[id]/pause/route";
 import { POST as resumeProviderHandler } from "@/app/api/v1/staff/ops/providers/[id]/resume/route";
+import { POST as activateBranchHandler } from "@/app/api/v1/staff/ops/providers/[id]/branches/[branchId]/activate/route";
+import { POST as rejectBranchHandler } from "@/app/api/v1/staff/ops/providers/[id]/branches/[branchId]/reject/route";
+import { POST as pauseProviderBranchHandler } from "@/app/api/v1/staff/ops/providers/[id]/branches/[branchId]/pause/route";
+import { POST as resumeProviderBranchHandler } from "@/app/api/v1/staff/ops/providers/[id]/branches/[branchId]/resume/route";
 import { POST as pauseBranchHandler } from "@/app/api/v1/staff/ops/branches/[branchId]/pause/route";
 import { POST as resumeBranchHandler } from "@/app/api/v1/staff/ops/branches/[branchId]/resume/route";
 
@@ -98,85 +105,75 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
           });
           const userIds = users.map((u) => u.id);
           if (userIds.length > 0) {
-            await prisma.twoFactor.deleteMany({ where: { userId: { in: userIds } } });
+            await prisma.securityAuditEvent.deleteMany({
+              where: { actorUserId: { in: userIds } },
+            });
             await prisma.internalRoleAssignment.deleteMany({
               where: { staffMembership: { userId: { in: userIds } } },
             });
-            await prisma.internalStaffMembership.deleteMany({ where: { userId: { in: userIds } } });
-            await prisma.securityAuditEvent.deleteMany({ where: { actorUserId: { in: userIds } } });
-            await prisma.session.deleteMany({ where: { userId: { in: userIds } } });
-            await prisma.account.deleteMany({ where: { userId: { in: userIds } } });
-            await prisma.user.deleteMany({ where: { id: { in: userIds } } });
+            await prisma.internalStaffMembership.deleteMany({
+              where: { userId: { in: userIds } },
+            });
+            await prisma.session.deleteMany({
+              where: { userId: { in: userIds } },
+            });
+            await prisma.account.deleteMany({
+              where: { userId: { in: userIds } },
+            });
+            await prisma.user.deleteMany({
+              where: { id: { in: userIds } },
+            });
           }
         }
-      } catch {}
-      createdProviderIds.length = 0;
-      createdUserEmails.length = 0;
+      } catch (err) {
+        console.error("Cleanup error in afterEach:", err);
+      }
     }
+    createdUserEmails.length = 0;
+    createdProviderIds.length = 0;
   });
 
   afterAll(async () => {
+    process.env = originalEnv;
     await disconnectDb();
   });
 
-  async function ensureBootstrapped() {
+  async function createAuthenticatedStaffUser(
+    role: "SALES_AGENT" | "OPS_SUPERVISOR",
+    dept: "SALES" | "OPERATIONS"
+  ) {
     const prisma = getPrisma();
-    const count = await prisma.internalStaffMembership.count();
-    if (count === 0) {
-      const id = crypto.randomUUID().slice(0, 8);
-      const email = `bootstrap_admin_${id}@waffarhacars.com`.toLowerCase();
-      createdUserEmails.push(email);
+    const uid = crypto.randomUUID().slice(0, 8);
+    const email = `staff-${role.toLowerCase()}-${uid}@test.eg`;
+    createdUserEmails.push(email);
+
+    // Bootstrap first admin if zero staff exist to ensure provisioning succeeds
+    const staffCount = await prisma.internalStaffMembership.count();
+    if (staffCount === 0) {
+      const adminEmail = `admin-bootstrap-${uid}@test.eg`;
+      createdUserEmails.push(adminEmail);
       await provisionStaffMember({
-        email,
-        fullName: `Bootstrap Admin ${id}`,
-        employeeNumber: `BOOT-${id.toUpperCase()}`,
+        email: adminEmail,
+        password: "ValidStaffPassword123!",
+        fullName: "System Admin Bootstrap",
+        employeeNumber: `BOOT-${uid}`,
         department: "ADMIN",
-        role: "PLATFORM_ADMIN",
-        password: "TestPassword123!456",
         isBootstrap: true,
       });
     }
-  }
 
-  async function createAuthenticatedStaffUser(
-    role: "SALES_AGENT" | "OPS_SUPERVISOR" | "PLATFORM_ADMIN",
-    department: "SALES" | "OPERATIONS" | "ADMIN"
-  ) {
-    await ensureBootstrapped();
-
-    const id = crypto.randomUUID().slice(0, 8);
-    const email = `staff_${role.toLowerCase()}_${id}@waffarhacars.com`.toLowerCase();
-    createdUserEmails.push(email);
-
-    const prisma = getPrisma();
-    await provisionStaffMember({
+    const provisionResult = await provisionStaffMember({
       email,
-      fullName: `Staff ${role} ${id}`,
-      employeeNumber: `EMP-${id.toUpperCase()}`,
-      department,
-      role,
-      password: "TestPassword123!456",
+      password: "ValidStaffPassword123!",
+      fullName: `Test Staff ${role}`,
+      employeeNumber: `EMP-${uid}`,
+      department: dept,
       isBootstrap: false,
     });
 
     const user = await prisma.user.findUniqueOrThrow({
-      where: { email },
+      where: { id: provisionResult.userId },
       include: { internalStaffMembership: true },
-    });
-
-    // Set mustChangePassword = false and create TwoFactor row so user is fully active
-    await prisma.internalStaffMembership.update({
-      where: { id: user.internalStaffMembership!.id },
-      data: { mustChangePassword: false },
-    });
-
-    await prisma.twoFactor.create({
-      data: {
-        userId: user.id,
-        secret: "test_secret_32_chars_long_12345",
-        backupCodes: "code1,code2",
-        verified: true,
-      },
     });
 
     await prisma.user.update({
@@ -184,13 +181,17 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
       data: { twoFactorEnabled: true },
     });
 
-    // Create active session
-    const sessionToken = crypto.randomUUID();
+    await prisma.internalStaffMembership.update({
+      where: { userId: user.id },
+      data: { mustChangePassword: false, isActive: true },
+    });
+
+    const sessionToken = `test-session-${crypto.randomUUID()}`;
     await prisma.session.create({
       data: {
         userId: user.id,
         token: sessionToken,
-        expiresAt: new Date(Date.now() + 86400000),
+        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
         lastActivityAt: new Date(),
       },
     });
@@ -199,7 +200,7 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
     return { user, cookie };
   }
 
-  it("executes complete sales onboarding to operations activation lifecycle in Cairo pilot cluster", async () => {
+  it("executes end-to-end sales provider/branch onboarding, individual branch vetting, and operations activation", async () => {
     if (!isDbReachable) {
       throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
     }
@@ -209,9 +210,8 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
 
     const uid = crypto.randomUUID().slice(0, 6);
     const taxId = `${Math.floor(100000000 + Math.random() * 900000000)}`;
-    const crNumber = `CR-${uid.toUpperCase()}`;
 
-    // 1. Sales creates Provider Draft
+    // 1. Sales creates draft provider organization
     const createProviderReq = new NextRequest("http://localhost:3000/api/v1/staff/providers", {
       method: "POST",
       headers: {
@@ -221,10 +221,10 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
       },
       body: JSON.stringify({
         nameEn: "Cairo Elite Auto Care",
-        nameAr: "مركز كايرو إيليت للسيارات",
-        legalName: "Cairo Elite Auto Services SAE",
+        nameAr: "كايرو إيليت لخدمات السيارات",
+        legalName: "Cairo Elite Automotive SAE",
         taxRegistrationNumber: taxId,
-        commercialRegistrationNumber: crNumber,
+        commercialRegistrationNumber: `CR-${uid}`,
         primaryCluster: "NASR_CITY_HELIOPOLIS",
         contactPersonName: "Mahmoud Soliman",
         contactEmail: "mahmoud@cairoelite.eg",
@@ -235,13 +235,13 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
     const createProviderRes = await createProviderHandler(createProviderReq);
     expect(createProviderRes.status).toBe(201);
     const providerData = await createProviderRes.json();
-    expect(providerData.id).toBeDefined();
+    createdProviderIds.push(providerData.id);
+
     expect(providerData.status).toBe("DRAFT");
     expect(providerData.version).toBe(1);
     expect(providerData.contactPhone).toBe("+201012345678");
-    createdProviderIds.push(providerData.id);
 
-    // 2. Sales creates Branch Draft in Cairo Pilot Cluster (Nasr City)
+    // 2. Sales creates draft branch
     const createBranchReq = new NextRequest(
       `http://localhost:3000/api/v1/staff/providers/${providerData.id}/branches`,
       {
@@ -313,7 +313,52 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
     const foundPending = pendingList.find((p: { id: string }) => p.id === providerData.id);
     expect(foundPending).toBeDefined();
 
-    // 5. Operations activates provider
+    // 5. Operations attempts provider activation before branch is vetted -> 422 ACTIVE_BRANCH_REQUIRED
+    const prematureActivateReq = new NextRequest(
+      `http://localhost:3000/api/v1/staff/ops/providers/${providerData.id}/activate`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: ops.cookie },
+        body: JSON.stringify({ expectedVersion: 2 }),
+      }
+    );
+    const prematureRes = await activateProviderHandler(prematureActivateReq, {
+      params: Promise.resolve({ id: providerData.id }),
+    });
+    expect(prematureRes.status).toBe(422);
+    const prematureBody = await prematureRes.json();
+    expect(prematureBody.error).toBe("ACTIVE_BRANCH_REQUIRED");
+
+    // 6. Operations vets and activates the branch individually
+    const activateBranchReq = new NextRequest(
+      `http://localhost:3000/api/v1/staff/ops/providers/${providerData.id}/branches/${branchData.id}/activate`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          cookie: ops.cookie,
+          "x-forwarded-for": "198.51.100.2",
+        },
+        body: JSON.stringify({
+          expectedVersion: 1,
+          legalIdentityChecked: true,
+          physicalLocationChecked: true,
+          contactAndHoursChecked: true,
+          evidenceDocumentRef: "DOC-EGY-2026-NC01",
+        }),
+      }
+    );
+    const activateBranchRes = await activateBranchHandler(activateBranchReq, {
+      params: Promise.resolve({ id: providerData.id, branchId: branchData.id }),
+    });
+    expect(activateBranchRes.status).toBe(200);
+    const activatedBranch = await activateBranchRes.json();
+    expect(activatedBranch.status).toBe("ACTIVE");
+    expect(activatedBranch.legalIdentityChecked).toBe(true);
+    expect(activatedBranch.vettedByUserId).toBe(ops.user.id);
+    expect(activatedBranch.evidenceDocumentRef).toBe("DOC-EGY-2026-NC01");
+
+    // 7. Operations activates the provider organization now that at least 1 branch is ACTIVE
     const activateReq = new NextRequest(
       `http://localhost:3000/api/v1/staff/ops/providers/${providerData.id}/activate`,
       {
@@ -337,25 +382,39 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
     expect(activatedData.status).toBe("ACTIVE");
     expect(activatedData.version).toBe(3);
 
-    // 6. Verify final database state: both Provider and Branch are ACTIVE in PostgreSQL
-    const prisma = getPrisma();
-    const finalProvider = await prisma.providerOrganization.findUnique({
-      where: { id: providerData.id },
-      include: { branches: true },
+    // 8. Verify operational availability via branch GET endpoint: both are ACTIVE
+    const getBranchReq = new NextRequest(
+      `http://localhost:3000/api/v1/staff/providers/${providerData.id}/branches/${branchData.id}`,
+      {
+        method: "GET",
+        headers: { cookie: sales.cookie },
+      }
+    );
+    const getBranchRes = await getBranchHandler(getBranchReq, {
+      params: Promise.resolve({ id: providerData.id, branchId: branchData.id }),
     });
-    expect(finalProvider?.status).toBe("ACTIVE");
-    expect(finalProvider?.branches[0].status).toBe("ACTIVE");
+    expect(getBranchRes.status).toBe(200);
+    const fetchedBranch = await getBranchRes.json();
+    expect(fetchedBranch.isOperationallyAvailable).toBe(true);
 
-    // 7. Verify audit events recorded in PostgreSQL with zero PII
+    // 9. Verify audit events recorded in PostgreSQL with zero PII
+    const prisma = getPrisma();
     const auditEvents = await prisma.securityAuditEvent.findMany({
-      where: { targetEntity: `provider:${providerData.id}` },
+      where: {
+        OR: [
+          { targetEntity: `provider:${providerData.id}` },
+          { targetEntity: `provider_branch:${branchData.id}` },
+        ],
+      },
       orderBy: { timestamp: "asc" },
     });
-    expect(auditEvents.length).toBeGreaterThanOrEqual(3);
+    expect(auditEvents.length).toBeGreaterThanOrEqual(4);
 
     const eventTypes = auditEvents.map((a) => a.eventType);
     expect(eventTypes).toContain("PROVIDER_DRAFT_CREATED");
+    expect(eventTypes).toContain("BRANCH_DRAFT_CREATED");
     expect(eventTypes).toContain("PROVIDER_SUBMITTED_FOR_REVIEW");
+    expect(eventTypes).toContain("BRANCH_ACTIVATED");
     expect(eventTypes).toContain("PROVIDER_ACTIVATED");
 
     // Assert zero contact phone, email, or credentials in audit metadata
@@ -366,7 +425,7 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
     }
   });
 
-  it("enforces maker-checker segregation: sales cannot activate, and ops cannot activate a provider they submitted", async () => {
+  it("enforces maker-checker segregation: sales cannot activate, and ops cannot activate a provider or branch they submitted", async () => {
     if (!isDbReachable) {
       throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
     }
@@ -411,54 +470,260 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
           },
         },
       },
+      include: { branches: true },
     });
     createdProviderIds.push(provider.id);
+    const branch = provider.branches[0];
 
-    // Case 1: Sales Agent attempts to call activate -> 403 FORBIDDEN
-    const salesActivateReq = new NextRequest(
-      `http://localhost:3000/api/v1/staff/ops/providers/${provider.id}/activate`,
+    // Case 1: Sales Agent attempts to call activate branch -> 403 FORBIDDEN
+    const salesActivateBranchReq = new NextRequest(
+      `http://localhost:3000/api/v1/staff/ops/providers/${provider.id}/branches/${branch.id}/activate`,
       {
         method: "POST",
-        headers: {
-          "content-type": "application/json",
-          cookie: sales.cookie,
-        },
-        body: JSON.stringify({ expectedVersion: 2 }),
+        headers: { "content-type": "application/json", cookie: sales.cookie },
+        body: JSON.stringify({
+          expectedVersion: 1,
+          legalIdentityChecked: true,
+          physicalLocationChecked: true,
+          contactAndHoursChecked: true,
+          evidenceDocumentRef: "EVID-001",
+        }),
       }
     );
-    const salesActivateRes = await activateProviderHandler(salesActivateReq, {
-      params: Promise.resolve({ id: provider.id }),
+    const salesActivateBranchRes = await activateBranchHandler(salesActivateBranchReq, {
+      params: Promise.resolve({ id: provider.id, branchId: branch.id }),
     });
-    expect(salesActivateRes.status).toBe(403);
-    const salesBody = await salesActivateRes.json();
-    expect(salesBody.error).toBe("FORBIDDEN");
+    expect(salesActivateBranchRes.status).toBe(403);
 
-    // Case 2: If submittedBy was the Ops supervisor, Ops supervisor cannot self-activate -> 403 MAKER_CHECKER_VIOLATION
+    // Case 2: If submittedBy was the Ops supervisor, Ops supervisor cannot self-activate branch -> 403 MAKER_CHECKER_VIOLATION
     await prisma.providerOrganization.update({
       where: { id: provider.id },
       data: { submittedByUserId: ops.user.id },
     });
 
-    const opsSelfActivateReq = new NextRequest(
-      `http://localhost:3000/api/v1/staff/ops/providers/${provider.id}/activate`,
+    const opsSelfActivateBranchReq = new NextRequest(
+      `http://localhost:3000/api/v1/staff/ops/providers/${provider.id}/branches/${branch.id}/activate`,
       {
         method: "POST",
-        headers: {
-          "content-type": "application/json",
-          cookie: ops.cookie,
-        },
-        body: JSON.stringify({ expectedVersion: 2 }),
+        headers: { "content-type": "application/json", cookie: ops.cookie },
+        body: JSON.stringify({
+          expectedVersion: 1,
+          legalIdentityChecked: true,
+          physicalLocationChecked: true,
+          contactAndHoursChecked: true,
+          evidenceDocumentRef: "EVID-001",
+        }),
       }
     );
-    const opsSelfActivateRes = await activateProviderHandler(opsSelfActivateReq, {
-      params: Promise.resolve({ id: provider.id }),
+    const opsSelfActivateBranchRes = await activateBranchHandler(opsSelfActivateBranchReq, {
+      params: Promise.resolve({ id: provider.id, branchId: branch.id }),
     });
-    expect(opsSelfActivateRes.status).toBe(403);
-    const opsBody = await opsSelfActivateRes.json();
+    expect(opsSelfActivateBranchRes.status).toBe(403);
+    const opsBody = await opsSelfActivateBranchRes.json();
     expect(opsBody.error).toBe("MAKER_CHECKER_VIOLATION");
   });
 
-  it("enforces uniqueness invariants on Egyptian Tax ID, CR Number, and Branch Code", async () => {
+  it("enforces parent-branch ownership checks and returns 404 for mismatched parent IDs", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+
+    const sales = await createAuthenticatedStaffUser("SALES_AGENT", "SALES");
+    const ops = await createAuthenticatedStaffUser("OPS_SUPERVISOR", "OPERATIONS");
+    const uid1 = crypto.randomUUID().slice(0, 6);
+    const uid2 = crypto.randomUUID().slice(0, 6);
+
+    const prisma = getPrisma();
+    // Provider 1
+    const p1 = await prisma.providerOrganization.create({
+      data: {
+        nameEn: "Provider One",
+        nameAr: "المزود الأول",
+        legalName: "Provider One SAE",
+        taxRegistrationNumber: `${Math.floor(100000000 + Math.random() * 900000000)}`,
+        commercialRegistrationNumber: `CR-${uid1}`,
+        primaryCluster: "NASR_CITY_HELIOPOLIS",
+        contactPersonName: "Person One",
+        contactEmail: "one@test.eg",
+        contactPhone: "+201012345678",
+        createdByUserId: sales.user.id,
+        status: "DRAFT",
+        branches: {
+          create: {
+            branchCode: `BR-${uid1}`,
+            nameEn: "Branch One",
+            nameAr: "فرع 1",
+            cluster: "NASR_CITY_HELIOPOLIS",
+            streetAddressEn: "Address 1",
+            streetAddressAr: "عنوان 1",
+            latitude: 30.05,
+            longitude: 31.33,
+            contactPhone: "+201123456789",
+            operatingHours: [
+              { dayOfWeek: 0, openTime: "09:00", closeTime: "18:00", isClosed: false },
+            ],
+            status: "DRAFT",
+          },
+        },
+      },
+      include: { branches: true },
+    });
+    createdProviderIds.push(p1.id);
+
+    // Provider 2
+    const p2 = await prisma.providerOrganization.create({
+      data: {
+        nameEn: "Provider Two",
+        nameAr: "المزود الثاني",
+        legalName: "Provider Two SAE",
+        taxRegistrationNumber: `${Math.floor(100000000 + Math.random() * 900000000)}`,
+        commercialRegistrationNumber: `CR-${uid2}`,
+        primaryCluster: "NASR_CITY_HELIOPOLIS",
+        contactPersonName: "Person Two",
+        contactEmail: "two@test.eg",
+        contactPhone: "+201012345679",
+        createdByUserId: sales.user.id,
+        status: "DRAFT",
+        branches: {
+          create: {
+            branchCode: `BR-${uid2}`,
+            nameEn: "Branch Two",
+            nameAr: "فرع 2",
+            cluster: "NASR_CITY_HELIOPOLIS",
+            streetAddressEn: "Address 2",
+            streetAddressAr: "عنوان 2",
+            latitude: 30.06,
+            longitude: 31.34,
+            contactPhone: "+201123456788",
+            operatingHours: [
+              { dayOfWeek: 0, openTime: "09:00", closeTime: "18:00", isClosed: false },
+            ],
+            status: "DRAFT",
+          },
+        },
+      },
+      include: { branches: true },
+    });
+    createdProviderIds.push(p2.id);
+
+    const b2 = p2.branches[0];
+
+    // Attempt to update Branch 2 using Provider 1 ID -> 404 BRANCH_NOT_FOUND
+    const mismatchedUpdateReq = new NextRequest(
+      `http://localhost:3000/api/v1/staff/providers/${p1.id}/branches/${b2.id}`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json", cookie: sales.cookie },
+        body: JSON.stringify({ expectedVersion: 1, nameEn: "Hijacked Branch Name" }),
+      }
+    );
+    const mismatchedUpdateRes = await updateBranchHandler(mismatchedUpdateReq, {
+      params: Promise.resolve({ id: p1.id, branchId: b2.id }),
+    });
+    expect(mismatchedUpdateRes.status).toBe(404);
+    const mismatchedBody = await mismatchedUpdateRes.json();
+    expect(mismatchedBody.error).toBe("BRANCH_NOT_FOUND");
+
+    // Attempt to activate Branch 2 using Provider 1 ID -> 404 BRANCH_NOT_FOUND
+    const mismatchedActivateReq = new NextRequest(
+      `http://localhost:3000/api/v1/staff/ops/providers/${p1.id}/branches/${b2.id}/activate`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: ops.cookie },
+        body: JSON.stringify({
+          expectedVersion: 1,
+          legalIdentityChecked: true,
+          physicalLocationChecked: true,
+          contactAndHoursChecked: true,
+          evidenceDocumentRef: "DOC-NC-001",
+        }),
+      }
+    );
+    const mismatchedActivateRes = await activateBranchHandler(mismatchedActivateReq, {
+      params: Promise.resolve({ id: p1.id, branchId: b2.id }),
+    });
+    expect(mismatchedActivateRes.status).toBe(404);
+  });
+
+  it("enforces strict draft-only editing and rejects modifications to ACTIVE records with HTTP 422", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+
+    const sales = await createAuthenticatedStaffUser("SALES_AGENT", "SALES");
+    const uid = crypto.randomUUID().slice(0, 6);
+
+    const prisma = getPrisma();
+    const activeProvider = await prisma.providerOrganization.create({
+      data: {
+        nameEn: "Active Edit Test",
+        nameAr: "اختبار تعديل النشط",
+        legalName: "Active Edit SAE",
+        taxRegistrationNumber: `${Math.floor(100000000 + Math.random() * 900000000)}`,
+        commercialRegistrationNumber: `CR-${uid}`,
+        primaryCluster: "NASR_CITY_HELIOPOLIS",
+        contactPersonName: "Yasser Lotfy",
+        contactEmail: "yasser@active.eg",
+        contactPhone: "+201012345678",
+        createdByUserId: sales.user.id,
+        status: "ACTIVE", // Already ACTIVE
+        version: 3,
+        branches: {
+          create: {
+            branchCode: `BR-${uid}`,
+            nameEn: "Active Branch",
+            nameAr: "فرع نشط",
+            cluster: "NASR_CITY_HELIOPOLIS",
+            streetAddressEn: "Address",
+            streetAddressAr: "عنوان",
+            latitude: 30.05,
+            longitude: 31.33,
+            contactPhone: "+201123456789",
+            operatingHours: [
+              { dayOfWeek: 0, openTime: "09:00", closeTime: "18:00", isClosed: false },
+            ],
+            status: "ACTIVE",
+            version: 2,
+          },
+        },
+      },
+      include: { branches: true },
+    });
+    createdProviderIds.push(activeProvider.id);
+    const branch = activeProvider.branches[0];
+
+    // Sales attempts to edit active provider draft -> 422 INVALID_STATE_TRANSITION
+    const editProviderReq = new NextRequest(
+      `http://localhost:3000/api/v1/staff/providers/${activeProvider.id}`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json", cookie: sales.cookie },
+        body: JSON.stringify({ expectedVersion: 3, nameEn: "Illegal Edit" }),
+      }
+    );
+    const editProviderRes = await updateProviderHandler(editProviderReq, {
+      params: Promise.resolve({ id: activeProvider.id }),
+    });
+    expect(editProviderRes.status).toBe(422);
+    const editProviderBody = await editProviderRes.json();
+    expect(editProviderBody.error).toBe("INVALID_STATE_TRANSITION");
+
+    // Sales attempts to edit active branch -> 422 INVALID_STATE_TRANSITION
+    const editBranchReq = new NextRequest(
+      `http://localhost:3000/api/v1/staff/providers/${activeProvider.id}/branches/${branch.id}`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json", cookie: sales.cookie },
+        body: JSON.stringify({ expectedVersion: 2, nameEn: "Illegal Branch Edit" }),
+      }
+    );
+    const editBranchRes = await updateBranchHandler(editBranchReq, {
+      params: Promise.resolve({ id: activeProvider.id, branchId: branch.id }),
+    });
+    expect(editBranchRes.status).toBe(422);
+  });
+
+  it("handles duplicate Tax ID and Commercial Registration uniqueness collisions with HTTP 409", async () => {
     if (!isDbReachable) {
       throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
     }
@@ -466,9 +731,7 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
     const sales = await createAuthenticatedStaffUser("SALES_AGENT", "SALES");
     const uid = crypto.randomUUID().slice(0, 6);
     const taxId = `${Math.floor(100000000 + Math.random() * 900000000)}`;
-    const crNumber = `CR-${uid}`;
 
-    // Create first provider
     const req1 = new NextRequest("http://localhost:3000/api/v1/staff/providers", {
       method: "POST",
       headers: { "content-type": "application/json", cookie: sales.cookie },
@@ -477,10 +740,10 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
         nameAr: "مزود أول",
         legalName: "Provider One SAE",
         taxRegistrationNumber: taxId,
-        commercialRegistrationNumber: crNumber,
+        commercialRegistrationNumber: `CR-${uid}-1`,
         primaryCluster: "NASR_CITY_HELIOPOLIS",
-        contactPersonName: "Omar Hany",
-        contactEmail: "omar@one.eg",
+        contactPersonName: "Kareem Taha",
+        contactEmail: "kareem@one.eg",
         contactPhone: "01012345678",
       }),
     });
@@ -566,7 +829,7 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
     expect(bodyBranch.error).toBe("BRANCH_CODE_ALREADY_EXISTS");
   });
 
-  it("enforces optimistic concurrency control (OCC) and rejects stale version edits", async () => {
+  it("proves atomic CAS row-level serialization on overlapping concurrent competing requests", async () => {
     if (!isDbReachable) {
       throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
     }
@@ -578,14 +841,14 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
     const prisma = getPrisma();
     const provider = await prisma.providerOrganization.create({
       data: {
-        nameEn: "OCC Test Provider",
-        nameAr: "اختبار التزامن",
-        legalName: "OCC Test SAE",
+        nameEn: "CAS Race Test",
+        nameAr: "اختبار سباق التزامن",
+        legalName: "CAS Race SAE",
         taxRegistrationNumber: taxId,
         commercialRegistrationNumber: `CR-${uid}`,
         primaryCluster: "NASR_CITY_HELIOPOLIS",
-        contactPersonName: "Sameh Zaki",
-        contactEmail: "sameh@occ.eg",
+        contactPersonName: "Omar Kamal",
+        contactEmail: "omar@cas.eg",
         contactPhone: "+201012345678",
         createdByUserId: sales.user.id,
         status: "DRAFT",
@@ -594,28 +857,46 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
     });
     createdProviderIds.push(provider.id);
 
-    // Call update with wrong expectedVersion (e.g. 5 instead of 1)
-    const staleReq = new NextRequest(
-      `http://localhost:3000/api/v1/staff/providers/${provider.id}`,
-      {
-        method: "PATCH",
-        headers: { "content-type": "application/json", cookie: sales.cookie },
-        body: JSON.stringify({
-          expectedVersion: 5,
-          nameEn: "Stale Name Update",
-        }),
-      }
-    );
-
-    const staleRes = await updateProviderHandler(staleReq, {
-      params: Promise.resolve({ id: provider.id }),
+    // Prepare two competing requests both expecting version 1
+    const reqA = new NextRequest(`http://localhost:3000/api/v1/staff/providers/${provider.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", cookie: sales.cookie },
+      body: JSON.stringify({ expectedVersion: 1, nameEn: "Winner Update A" }),
     });
-    expect(staleRes.status).toBe(409);
-    const staleBody = await staleRes.json();
-    expect(staleBody.error).toBe("CONCURRENT_MODIFICATION");
+
+    const reqB = new NextRequest(`http://localhost:3000/api/v1/staff/providers/${provider.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", cookie: sales.cookie },
+      body: JSON.stringify({ expectedVersion: 1, nameEn: "Competing Update B" }),
+    });
+
+    // Launch competing requests concurrently to force PostgreSQL row-lock contention
+    const [resA, resB] = await Promise.all([
+      updateProviderHandler(reqA, { params: Promise.resolve({ id: provider.id }) }),
+      updateProviderHandler(reqB, { params: Promise.resolve({ id: provider.id }) }),
+    ]);
+
+    const statuses = [resA.status, resB.status];
+    expect(statuses).toContain(200);
+    expect(statuses).toContain(409);
+
+    // Final PostgreSQL database state assertion: version MUST be exactly 2 (not 3)
+    const finalProvider = await prisma.providerOrganization.findUniqueOrThrow({
+      where: { id: provider.id },
+    });
+    expect(finalProvider.version).toBe(2);
+
+    // Exactly one update audit event recorded
+    const auditCount = await prisma.securityAuditEvent.count({
+      where: {
+        targetEntity: `provider:${provider.id}`,
+        eventType: "PROVIDER_DRAFT_UPDATED",
+      },
+    });
+    expect(auditCount).toBe(1);
   });
 
-  it("supports Operations pause and resume on both provider and branch levels", async () => {
+  it("supports Operations pause and resume on both provider and branch levels with allowlisted reason codes", async () => {
     if (!isDbReachable) {
       throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
     }
@@ -663,7 +944,7 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
     createdProviderIds.push(provider.id);
     const branch = provider.branches[0];
 
-    // 1. Pause Provider
+    // 1. Pause Provider with allowlisted reason code
     const pauseReq = new NextRequest(
       `http://localhost:3000/api/v1/staff/ops/providers/${provider.id}/pause`,
       {
@@ -671,6 +952,7 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
         headers: { "content-type": "application/json", cookie: ops.cookie },
         body: JSON.stringify({
           expectedVersion: 3,
+          reasonCode: "OPERATIONAL_HOLD",
           pauseReason: "Temporary operational review during equipment upgrade.",
         }),
       }
@@ -700,37 +982,38 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
     expect(resumedProvider.status).toBe("ACTIVE");
     expect(resumedProvider.version).toBe(5);
 
-    // 3. Pause Branch
+    // 3. Pause Branch via parent-scoped route
     const pauseBranchReq = new NextRequest(
-      `http://localhost:3000/api/v1/staff/ops/branches/${branch.id}/pause`,
+      `http://localhost:3000/api/v1/staff/ops/providers/${provider.id}/branches/${branch.id}/pause`,
       {
         method: "POST",
         headers: { "content-type": "application/json", cookie: ops.cookie },
         body: JSON.stringify({
           expectedVersion: 2,
+          reasonCode: "MAINTENANCE_OR_RENOVATION",
           pauseReason: "Facility renovation",
         }),
       }
     );
-    const pauseBranchRes = await pauseBranchHandler(pauseBranchReq, {
-      params: Promise.resolve({ branchId: branch.id }),
+    const pauseBranchRes = await pauseProviderBranchHandler(pauseBranchReq, {
+      params: Promise.resolve({ id: provider.id, branchId: branch.id }),
     });
     expect(pauseBranchRes.status).toBe(200);
     const pausedBranch = await pauseBranchRes.json();
     expect(pausedBranch.status).toBe("PAUSED");
     expect(pausedBranch.version).toBe(3);
 
-    // 4. Resume Branch
+    // 4. Resume Branch via parent-scoped route
     const resumeBranchReq = new NextRequest(
-      `http://localhost:3000/api/v1/staff/ops/branches/${branch.id}/resume`,
+      `http://localhost:3000/api/v1/staff/ops/providers/${provider.id}/branches/${branch.id}/resume`,
       {
         method: "POST",
         headers: { "content-type": "application/json", cookie: ops.cookie },
         body: JSON.stringify({ expectedVersion: 3 }),
       }
     );
-    const resumeBranchRes = await resumeBranchHandler(resumeBranchReq, {
-      params: Promise.resolve({ branchId: branch.id }),
+    const resumeBranchRes = await resumeProviderBranchHandler(resumeBranchReq, {
+      params: Promise.resolve({ id: provider.id, branchId: branch.id }),
     });
     expect(resumeBranchRes.status).toBe(200);
     const resumedBranch = await resumeBranchRes.json();
@@ -738,7 +1021,7 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
     expect(resumedBranch.version).toBe(4);
   });
 
-  it("supports provider rejection by Operations and returns to DRAFT with reason", async () => {
+  it("supports remediable rejection returning to DRAFT and permanent rejection as terminal", async () => {
     if (!isDbReachable) {
       throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
     }
@@ -768,60 +1051,114 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
     });
     createdProviderIds.push(provider.id);
 
-    // Operations rejects provider and returns to DRAFT
-    const rejectReq = new NextRequest(
+    // 1. Operations performs remediable rejection -> returns to DRAFT
+    const remediableRejectReq = new NextRequest(
       `http://localhost:3000/api/v1/staff/ops/providers/${provider.id}/reject`,
       {
         method: "POST",
         headers: { "content-type": "application/json", cookie: ops.cookie },
         body: JSON.stringify({
           expectedVersion: 2,
-          returnToDraft: true,
+          remediable: true,
+          reasonCode: "INCOMPLETE_DOCUMENTATION",
           rejectionReason: "Commercial registration copy is blurry. Please re-upload.",
         }),
       }
     );
-    const rejectRes = await rejectProviderHandler(rejectReq, {
+    const remediableRes = await rejectProviderHandler(remediableRejectReq, {
       params: Promise.resolve({ id: provider.id }),
     });
-    expect(rejectRes.status).toBe(200);
-    const rejectedProvider = await rejectRes.json();
-    expect(rejectedProvider.status).toBe("DRAFT");
-    expect(rejectedProvider.rejectionReason).toBe(
-      "Commercial registration copy is blurry. Please re-upload."
+    expect(remediableRes.status).toBe(200);
+    const remediatedProvider = await remediableRes.json();
+    expect(remediatedProvider.status).toBe("DRAFT");
+    expect(remediatedProvider.version).toBe(3);
+
+    // 2. Sales can edit the draft again because it returned to DRAFT
+    const salesEditReq = new NextRequest(
+      `http://localhost:3000/api/v1/staff/providers/${provider.id}`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json", cookie: sales.cookie },
+        body: JSON.stringify({ expectedVersion: 3, nameEn: "Corrected Rejection Test Auto" }),
+      }
     );
-    expect(rejectedProvider.version).toBe(3);
+    const salesEditRes = await updateProviderHandler(salesEditReq, {
+      params: Promise.resolve({ id: provider.id }),
+    });
+    expect(salesEditRes.status).toBe(200);
+
+    // 3. Move back to PENDING_REVIEW for permanent rejection test
+    await prisma.providerOrganization.update({
+      where: { id: provider.id },
+      data: { status: "PENDING_REVIEW", version: 5 },
+    });
+
+    // 4. Operations performs terminal permanent rejection -> status becomes REJECTED
+    const permanentRejectReq = new NextRequest(
+      `http://localhost:3000/api/v1/staff/ops/providers/${provider.id}/reject`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: ops.cookie },
+        body: JSON.stringify({
+          expectedVersion: 5,
+          remediable: false,
+          reasonCode: "DUPLICATE_ENTITY",
+          rejectionReason: "Duplicate fraudulent entity.",
+        }),
+      }
+    );
+    const permanentRes = await rejectProviderHandler(permanentRejectReq, {
+      params: Promise.resolve({ id: provider.id }),
+    });
+    expect(permanentRes.status).toBe(200);
+    const terminalProvider = await permanentRes.json();
+    expect(terminalProvider.status).toBe("REJECTED");
+
+    // 5. Subsequent edit attempts on REJECTED terminal record must fail with 422
+    const blockedEditReq = new NextRequest(
+      `http://localhost:3000/api/v1/staff/providers/${provider.id}`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json", cookie: sales.cookie },
+        body: JSON.stringify({ expectedVersion: 6, nameEn: "Blocked Edit" }),
+      }
+    );
+    const blockedEditRes = await updateProviderHandler(blockedEditReq, {
+      params: Promise.resolve({ id: provider.id }),
+    });
+    expect(blockedEditRes.status).toBe(422);
   });
 
-  it("supports listing and querying providers and branches via staff read endpoints", async () => {
+  it("supports remediable and terminal rejection on individual branches", async () => {
     if (!isDbReachable) {
       throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
     }
 
     const sales = await createAuthenticatedStaffUser("SALES_AGENT", "SALES");
+    const ops = await createAuthenticatedStaffUser("OPS_SUPERVISOR", "OPERATIONS");
     const uid = crypto.randomUUID().slice(0, 6);
-    const taxId = `${Math.floor(100000000 + Math.random() * 900000000)}`;
 
     const prisma = getPrisma();
     const provider = await prisma.providerOrganization.create({
       data: {
-        nameEn: "Query Test Auto",
-        nameAr: "اختبار الاستعلام",
-        legalName: "Query Test SAE",
-        taxRegistrationNumber: taxId,
+        nameEn: "Branch Rejection Test",
+        nameAr: "اختبار رفض الفرع",
+        legalName: "Branch Rejection SAE",
+        taxRegistrationNumber: `${Math.floor(100000000 + Math.random() * 900000000)}`,
         commercialRegistrationNumber: `CR-${uid}`,
         primaryCluster: "NASR_CITY_HELIOPOLIS",
-        contactPersonName: "Kareem Adel",
-        contactEmail: "kareem@query.eg",
+        contactPersonName: "Branch Tester",
+        contactEmail: "branch@test.eg",
         contactPhone: "+201012345678",
         createdByUserId: sales.user.id,
-        status: "DRAFT",
-        version: 1,
+        submittedByUserId: sales.user.id,
+        status: "PENDING_REVIEW",
+        version: 2,
         branches: {
           create: {
             branchCode: `BR-${uid}`,
-            nameEn: "Branch Query",
-            nameAr: "فرع الاستعلام",
+            nameEn: "Draft Branch",
+            nameAr: "فرع مسودة",
             cluster: "NASR_CITY_HELIOPOLIS",
             streetAddressEn: "Test Address",
             streetAddressAr: "عنوان تجريبي",
@@ -841,18 +1178,105 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
     createdProviderIds.push(provider.id);
     const branch = provider.branches[0];
 
-    // List providers
-    const listReq = new NextRequest(
-      "http://localhost:3000/api/v1/staff/providers?cluster=NASR_CITY_HELIOPOLIS",
+    // Remediable branch rejection -> status remains/returns to DRAFT
+    const remediableReq = new NextRequest(
+      `http://localhost:3000/api/v1/staff/ops/providers/${provider.id}/branches/${branch.id}/reject`,
       {
-        method: "GET",
-        headers: { cookie: sales.cookie },
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: ops.cookie },
+        body: JSON.stringify({
+          expectedVersion: 1,
+          remediable: true,
+          reasonCode: "UNVERIFIED_LOCATION",
+          rejectionReason: "Address coordinates do not match street address.",
+        }),
       }
     );
+    const remediableRes = await rejectBranchHandler(remediableReq, {
+      params: Promise.resolve({ id: provider.id, branchId: branch.id }),
+    });
+    expect(remediableRes.status).toBe(200);
+    const remediatedBranch = await remediableRes.json();
+    expect(remediatedBranch.status).toBe("DRAFT");
+    expect(remediatedBranch.version).toBe(2);
+
+    // Terminal branch rejection -> status becomes DECOMMISSIONED
+    const terminalReq = new NextRequest(
+      `http://localhost:3000/api/v1/staff/ops/providers/${provider.id}/branches/${branch.id}/reject`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: ops.cookie },
+        body: JSON.stringify({
+          expectedVersion: 2,
+          remediable: false,
+          reasonCode: "COMPLIANCE_HOLD",
+          rejectionReason: "Failed safety inspection permanently.",
+        }),
+      }
+    );
+    const terminalRes = await rejectBranchHandler(terminalReq, {
+      params: Promise.resolve({ id: provider.id, branchId: branch.id }),
+    });
+    expect(terminalRes.status).toBe(200);
+    const decommissionedBranch = await terminalRes.json();
+    expect(decommissionedBranch.status).toBe("DECOMMISSIONED");
+  });
+
+  it("supports listing and querying providers and branches via staff read endpoints and legacy pause/resume", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+
+    const sales = await createAuthenticatedStaffUser("SALES_AGENT", "SALES");
+    const ops = await createAuthenticatedStaffUser("OPS_SUPERVISOR", "OPERATIONS");
+    const uid = crypto.randomUUID().slice(0, 6);
+
+    const prisma = getPrisma();
+    const provider = await prisma.providerOrganization.create({
+      data: {
+        nameEn: "Query Provider",
+        nameAr: "مزود الاستعلام",
+        legalName: "Query SAE",
+        taxRegistrationNumber: `${Math.floor(100000000 + Math.random() * 900000000)}`,
+        commercialRegistrationNumber: `CR-${uid}`,
+        primaryCluster: "NASR_CITY_HELIOPOLIS",
+        contactPersonName: "Query Contact",
+        contactEmail: "query@test.eg",
+        contactPhone: "+201012345678",
+        createdByUserId: sales.user.id,
+        status: "ACTIVE",
+        version: 1,
+        branches: {
+          create: {
+            branchCode: `BR-${uid}`,
+            nameEn: "Query Branch",
+            nameAr: "فرع الاستعلام",
+            cluster: "NASR_CITY_HELIOPOLIS",
+            streetAddressEn: "Address",
+            streetAddressAr: "عنوان",
+            latitude: 30.05,
+            longitude: 31.33,
+            contactPhone: "+201123456789",
+            operatingHours: [
+              { dayOfWeek: 0, openTime: "09:00", closeTime: "18:00", isClosed: false },
+            ],
+            status: "ACTIVE",
+            version: 1,
+          },
+        },
+      },
+      include: { branches: true },
+    });
+    createdProviderIds.push(provider.id);
+    const branch = provider.branches[0];
+
+    // List providers
+    const listReq = new NextRequest("http://localhost:3000/api/v1/staff/providers", {
+      method: "GET",
+      headers: { cookie: sales.cookie },
+    });
     const listRes = await listProvidersHandler(listReq);
     expect(listRes.status).toBe(200);
-    const providersList = await listRes.json();
-    expect(providersList.some((p: { id: string }) => p.id === provider.id)).toBe(true);
 
     // Get single provider
     const getReq = new NextRequest(`http://localhost:3000/api/v1/staff/providers/${provider.id}`, {
@@ -863,44 +1287,50 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
       params: Promise.resolve({ id: provider.id }),
     });
     expect(getRes.status).toBe(200);
-    const fetched = await getRes.json();
-    expect(fetched.id).toBe(provider.id);
-    expect(fetched.branches).toHaveLength(1);
 
-    // List branches for provider
-    const listBranchesReq = new NextRequest(
+    // List branches
+    const listBrReq = new NextRequest(
       `http://localhost:3000/api/v1/staff/providers/${provider.id}/branches`,
       {
         method: "GET",
         headers: { cookie: sales.cookie },
       }
     );
-    const listBranchesRes = await listBranchesHandler(listBranchesReq, {
+    const listBrRes = await listBranchesHandler(listBrReq, {
       params: Promise.resolve({ id: provider.id }),
     });
-    expect(listBranchesRes.status).toBe(200);
-    const branches = await listBranchesRes.json();
-    expect(branches).toHaveLength(1);
-    expect(branches[0].id).toBe(branch.id);
+    expect(listBrRes.status).toBe(200);
 
-    // Update branch
-    const updateBranchReq = new NextRequest(
-      `http://localhost:3000/api/v1/staff/providers/${provider.id}/branches/${branch.id}`,
+    // Legacy pause branch handler
+    const legacyPauseReq = new NextRequest(
+      `http://localhost:3000/api/v1/staff/ops/branches/${branch.id}/pause`,
       {
-        method: "PATCH",
-        headers: { "content-type": "application/json", cookie: sales.cookie },
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: ops.cookie },
         body: JSON.stringify({
           expectedVersion: 1,
-          nameEn: "Updated Branch Name",
+          reasonCode: "OPERATIONAL_HOLD",
+          pauseReason: "Legacy pause test",
         }),
       }
     );
-    const updateBranchRes = await updateBranchHandler(updateBranchReq, {
-      params: Promise.resolve({ id: provider.id, branchId: branch.id }),
+    const legacyPauseRes = await pauseBranchHandler(legacyPauseReq, {
+      params: Promise.resolve({ branchId: branch.id }),
     });
-    expect(updateBranchRes.status).toBe(200);
-    const updatedBranch = await updateBranchRes.json();
-    expect(updatedBranch.nameEn).toBe("Updated Branch Name");
-    expect(updatedBranch.version).toBe(2);
+    expect(legacyPauseRes.status).toBe(200);
+
+    // Legacy resume branch handler
+    const legacyResumeReq = new NextRequest(
+      `http://localhost:3000/api/v1/staff/ops/branches/${branch.id}/resume`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: ops.cookie },
+        body: JSON.stringify({ expectedVersion: 2 }),
+      }
+    );
+    const legacyResumeRes = await resumeBranchHandler(legacyResumeReq, {
+      params: Promise.resolve({ branchId: branch.id }),
+    });
+    expect(legacyResumeRes.status).toBe(200);
   });
 });

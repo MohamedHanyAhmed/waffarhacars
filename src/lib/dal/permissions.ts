@@ -35,6 +35,8 @@ export const STAFF_PERMISSIONS = [
   "provider:reject",
   "provider:pause",
   "provider:resume",
+  "branch:activate",
+  "branch:reject",
   "branch:pause",
   "branch:resume",
 
@@ -81,6 +83,8 @@ export const ROLE_PERMISSIONS_CATALOG: Record<StaffRole, ReadonlySet<StaffPermis
     "provider:reject",
     "provider:pause",
     "provider:resume",
+    "branch:activate",
+    "branch:reject",
     "branch:pause",
     "branch:resume",
     "offer_draft:review",

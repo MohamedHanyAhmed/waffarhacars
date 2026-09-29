@@ -31,6 +31,7 @@ export const SECURITY_AUDIT_EVENT_TYPES = [
   "BRANCH_DRAFT_CREATED",
   "BRANCH_DRAFT_UPDATED",
   "BRANCH_ACTIVATED",
+  "BRANCH_REJECTED",
   "BRANCH_PAUSED",
   "BRANCH_RESUMED",
 ] as const;
@@ -204,17 +205,38 @@ const ProviderActivatedMetadataSchema = z.object({
   submittedByUserId: z.string().uuid().optional(),
 });
 
+export const PROVIDER_REJECTION_REASON_CODES = [
+  "INCOMPLETE_DOCUMENTATION",
+  "INVALID_TAX_OR_CR",
+  "UNVERIFIED_LOCATION",
+  "CONTACT_UNREACHABLE",
+  "COMPLIANCE_HOLD",
+  "DUPLICATE_ENTITY",
+  "OTHER",
+] as const;
+export type ProviderRejectionReasonCode = (typeof PROVIDER_REJECTION_REASON_CODES)[number];
+
+export const PROVIDER_PAUSE_REASON_CODES = [
+  "OPERATIONAL_HOLD",
+  "COMPLIANCE_REVIEW",
+  "MAINTENANCE_OR_RENOVATION",
+  "PAYMENT_DISPUTE",
+  "LEGAL_DISPUTE",
+  "OTHER",
+] as const;
+export type ProviderPauseReasonCode = (typeof PROVIDER_PAUSE_REASON_CODES)[number];
+
 const ProviderRejectedMetadataSchema = z.object({
   action: z.literal("REJECT_PROVIDER"),
   providerId: z.string().uuid(),
   returnToDraft: z.boolean(),
-  rejectionReason: z.string().max(256),
+  reasonCode: z.enum(PROVIDER_REJECTION_REASON_CODES),
 });
 
 const ProviderPausedMetadataSchema = z.object({
   action: z.literal("PAUSE_PROVIDER"),
   providerId: z.string().uuid(),
-  pauseReason: z.string().max(256),
+  reasonCode: z.enum(PROVIDER_PAUSE_REASON_CODES),
 });
 
 const ProviderResumedMetadataSchema = z.object({
@@ -241,12 +263,21 @@ const BranchActivatedMetadataSchema = z.object({
   branchId: z.string().uuid(),
   providerId: z.string().uuid(),
   cluster: CairoClusterEnum,
+  evidenceDocumentRef: z.string().max(128),
+});
+
+const BranchRejectedMetadataSchema = z.object({
+  action: z.literal("REJECT_BRANCH"),
+  branchId: z.string().uuid(),
+  providerId: z.string().uuid(),
+  returnToDraft: z.boolean(),
+  reasonCode: z.enum(PROVIDER_REJECTION_REASON_CODES),
 });
 
 const BranchPausedMetadataSchema = z.object({
   action: z.literal("PAUSE_BRANCH"),
   branchId: z.string().uuid(),
-  pauseReason: z.string().max(256),
+  reasonCode: z.enum(PROVIDER_PAUSE_REASON_CODES),
 });
 
 const BranchResumedMetadataSchema = z.object({
@@ -277,6 +308,7 @@ export const AUDIT_METADATA_SCHEMAS: Record<SecurityAuditEventType, z.ZodTypeAny
   BRANCH_DRAFT_CREATED: BranchDraftCreatedMetadataSchema,
   BRANCH_DRAFT_UPDATED: BranchDraftUpdatedMetadataSchema,
   BRANCH_ACTIVATED: BranchActivatedMetadataSchema,
+  BRANCH_REJECTED: BranchRejectedMetadataSchema,
   BRANCH_PAUSED: BranchPausedMetadataSchema,
   BRANCH_RESUMED: BranchResumedMetadataSchema,
 };

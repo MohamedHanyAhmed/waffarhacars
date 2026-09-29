@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { assertStaffPermission, AuthorizationError } from "@/lib/dal";
+import { getPrisma } from "@/lib/db";
 import { PauseBranchSchema } from "@/lib/provider/validation";
 import { pauseBranch, ProviderError } from "@/lib/provider/service";
 
@@ -24,11 +25,30 @@ export async function POST(
       );
     }
 
+    const prisma = getPrisma();
+    const branch = await prisma.providerBranch.findUnique({
+      where: { id: branchId },
+      select: { providerOrganizationId: true },
+    });
+
+    if (!branch) {
+      return Response.json(
+        { error: "BRANCH_NOT_FOUND", message: "Branch not found." },
+        { status: 404, headers: { "Cache-Control": "no-store" } }
+      );
+    }
+
     const clientIp =
       req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
       req.headers.get("x-real-ip") ||
       undefined;
-    const paused = await pauseBranch(actor, branchId, parsed.data, clientIp);
+    const paused = await pauseBranch(
+      actor,
+      branch.providerOrganizationId,
+      branchId,
+      parsed.data,
+      clientIp
+    );
 
     return Response.json(paused, {
       status: 200,

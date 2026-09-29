@@ -372,39 +372,52 @@ All five HMAC/secret keys must be **mutually distinct**. Validation fails closed
 
 ## 13. Provider & Branch Onboarding & Activation Runbook (PR 3A)
 
-### 13.1 Ownership and Maker-Checker Roles
+### 13.1 Product Scope and Operational Meaning
 
-- **Sales Agents (`SALES_AGENT`)**: Responsible for data capture. Can create drafts, add branches in the active Cairo pilot cluster (`NASR_CITY_HELIOPOLIS`), edit draft attributes, and submit completed providers for Operations review. Sales agents **cannot** activate providers or branches.
-- **Operations Supervisors (`OPS_SUPERVISOR`)**: Responsible for due diligence and compliance verification. Reviews pending provider submissions, validates legal/tax registrations, and activates providers and branches. Operations supervisors **cannot** submit draft providers.
-- **Maker-Checker Segregation Invariant**: An Operations supervisor cannot activate a provider if they were recorded as the submitting user (`submittedByUserId`). Self-activation is blocked with HTTP 403 `MAKER_CHECKER_VIOLATION`.
+- **Backend Foundation Only**: PR 3A establishes the multi-tenant backend onboarding and compliance foundation, not a completed Sales UI. A thin bilingual (Arabic / English) Sales and Operations UI slice is the immediate follow-up required before field sales agents onboard merchant workshops.
+- **Vetted vs. Customer-Published**: In PR 3A, `ACTIVE` status means Operations has successfully vetted and approved the entity's compliance and physical readiness. It does **not** mean the workshop is published to consumers. Customer discovery and offer activation occur in PR 3B and PR 4.
+- **Cairo Cluster Selection**: Greater Cairo clusters (`NASR_CITY_HELIOPOLIS`, `NEW_CAIRO`, `MAADI`, `OCTOBER_ZAYED`) are captured as structured merchant data. Provider activation requires at least one individually approved branch in any valid Cairo cluster; launch-zone prioritization follows aggregate workshop density evidence.
 
-### 13.2 Cairo Pilot Cluster Restriction
+### 13.2 Ownership, Roles, and Maker-Checker Dual Custody
 
-During the initial Cairo pilot phase, onboarding is strictly restricted to the **`NASR_CITY_HELIOPOLIS`** cluster:
+- **Sales Agents (`SALES_AGENT`)**: Responsible for data capture.
+  - Can create provider organization drafts and branch drafts.
+  - Can edit drafts while in `DRAFT` status only.
+  - Can submit completed drafts for Operations review.
+  - **Cannot** review, activate, or reject providers or branches.
+- **Operations Supervisors (`OPS_SUPERVISOR`)**: Responsible for due diligence, physical verification, and compliance approval.
+  - Reviews pending submissions in the review queue (`/api/v1/staff/ops/providers/pending`).
+  - Vets and activates or rejects each physical workshop branch **individually**.
+  - Activates or rejects provider organizations.
+  - **Cannot** submit provider drafts.
+- **Maker-Checker Segregation Invariant**: An Operations supervisor cannot vet/activate a branch or activate a provider if they submitted the record (`submittedByUserId`). Self-activation is blocked with HTTP 403 `MAKER_CHECKER_VIOLATION`.
 
-- A provider cannot be submitted for review without at least one draft branch located in `NASR_CITY_HELIOPOLIS`.
-- All branch geographic coordinates must fall within the Greater Cairo bounding box (Latitude: `29.75` to `30.35`, Longitude: `31.05` to `31.75`).
-- Contact phone numbers must be valid Egyptian mobile numbers in canonical E.164 format (`+201[0125]XXXXXXXX`).
+### 13.3 Per-Branch Vetting Checklist Prior to Activation
 
-### 13.3 Operations Verification Checklist Prior to Activation
+Operations must vet each workshop location individually before the parent organization can be activated. The following checks are verified and immutably recorded in the database:
 
-1. **Tax Registration Number**: Verify exactly 9 digits matching official Egyptian Tax Authority documentation.
-2. **Commercial Registration (CR)**: Verify valid Commercial Registry certificate.
-3. **Physical Branch Inspection**: Confirm physical workshop facility, street address, and active operating hours.
-4. **Primary Business Contact**: Verify reachable workshop owner/manager contact details.
+1. **Legal Identity Verification (`legalIdentityChecked: true`)**: Confirm workshop commercial documentation, Tax ID (9 digits), and Commercial Registry (CR) match government records.
+2. **Physical Location Inspection (`physicalLocationChecked: true`)**: Verify workshop existence, street address, and geographic coordinates within Greater Cairo (Latitude: `29.75` to `30.35`, Longitude: `31.05` to `31.75`).
+3. **Contact & Operating Hours (`contactAndHoursChecked: true`)**: Verify direct reachable phone number (`+20...`) and weekly operating hours schedule.
+4. **Opaque Evidence Reference (`evidenceDocumentRef`)**: An opaque document or ticket storage identifier (e.g. `DOC-EGY-2026-0914-01`) is recorded with the reviewer's staff ID and timestamp.
 
-### 13.4 Emergency Pause and Resumption Procedures
+Endpoint: `POST /api/v1/staff/ops/providers/:id/branches/:branchId/activate`
 
-In case of serious customer disputes, safety allegations, or merchant default:
+### 13.4 Operational Availability & Status Transitions
 
-1. **Provider-Level Pause**:
-   - Endpoint: `POST /api/v1/staff/ops/providers/:id/pause`
-   - Payload: `{ "expectedVersion": <currentVersion>, "pauseReason": "<reason>" }`
-   - Immediately transitions status to `PAUSED` and logs `PROVIDER_PAUSED` audit event.
-2. **Branch-Level Pause**:
-   - Endpoint: `POST /api/v1/staff/ops/branches/:branchId/pause`
-   - Payload: `{ "expectedVersion": <currentVersion>, "pauseReason": "<reason>" }`
-   - Transitions individual branch to `PAUSED` without affecting other branches.
-3. **Resumption**:
-   - Endpoints: `POST /api/v1/staff/ops/providers/:id/resume` and `POST /api/v1/staff/ops/branches/:branchId/resume`
-   - Restores status to `ACTIVE` and records audit event.
+- **Operational Availability**: A branch is operationally available for appointments only when **both** the branch and its parent organization are in `ACTIVE` status (`isBranchOperationallyAvailable = branch.status === 'ACTIVE' && parent.status === 'ACTIVE'`).
+- **Remediable vs. Permanent Rejection**:
+  - Rejection with `remediable: true` returns the provider or branch status to `DRAFT`, allowing Sales to edit and re-submit.
+  - Rejection with `remediable: false` transitions provider to `REJECTED` or branch to `DECOMMISSIONED` (terminal states; no further transitions allowed).
+- **Post-Activation Changes Limitation**: Sales agents may **never** directly edit an active or pending record. Any operational correction to an active merchant or branch requires placing the entity on hold (`PAUSED`) and proceeding through an explicit reviewed amendment cycle. Active modifications without re-review are strictly blocked.
+
+### 13.5 Parent–Branch Ownership Guard
+
+Every branch request referencing a provider ID validates that the branch belongs to the parent organization (`branch.providerOrganizationId === providerId`). Any mismatch returns HTTP 404 `BRANCH_NOT_FOUND`, preventing cross-tenant access and confused deputy vulnerabilities across all view, edit, activate, reject, pause, and resume endpoints.
+
+### 13.6 Audit Privacy & Allowlisted Reason Codes
+
+To protect merchant privacy and system security:
+
+- **Zero PII**: Contact names, emails, and phone numbers are never written to `security_audit_events.metadata`.
+- **Zero Free-Text in Audit Metadata**: Rejection and pause reasons entered as free text are stored strictly in the database table (`rejectionReason`, `pauseReason`) for staff workflow notes. Security audit metadata accepts only allowlisted reason codes (`INCOMPLETE_DOCUMENTATION`, `INVALID_TAX_OR_CR`, `UNVERIFIED_LOCATION`, `CONTACT_UNREACHABLE`, `COMPLIANCE_HOLD`, `OPERATIONAL_HOLD`, `OTHER`).

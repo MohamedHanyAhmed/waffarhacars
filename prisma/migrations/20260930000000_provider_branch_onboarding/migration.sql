@@ -54,6 +54,13 @@ CREATE TABLE "provider_branches" (
     "status" "BranchStatus" NOT NULL DEFAULT 'DRAFT',
     "version" INTEGER NOT NULL DEFAULT 1,
     "pauseReason" TEXT,
+    "rejectionReason" TEXT,
+    "legalIdentityChecked" BOOLEAN NOT NULL DEFAULT false,
+    "physicalLocationChecked" BOOLEAN NOT NULL DEFAULT false,
+    "contactAndHoursChecked" BOOLEAN NOT NULL DEFAULT false,
+    "evidenceDocumentRef" VARCHAR(128),
+    "vettedByUserId" UUID,
+    "vettedAt" TIMESTAMP(3),
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
@@ -89,3 +96,7 @@ ALTER TABLE "provider_organizations" ADD CONSTRAINT "provider_organizations_acti
 
 -- AddForeignKey
 ALTER TABLE "provider_branches" ADD CONSTRAINT "provider_branches_providerOrganizationId_fkey" FOREIGN KEY ("providerOrganizationId") REFERENCES "provider_organizations"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "provider_branches" ADD CONSTRAINT "provider_branches_vettedByUserId_fkey" FOREIGN KEY ("vettedByUserId") REFERENCES "user"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+

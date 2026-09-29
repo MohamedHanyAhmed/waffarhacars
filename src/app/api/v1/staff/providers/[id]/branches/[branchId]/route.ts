@@ -1,7 +1,67 @@
 import { NextRequest } from "next/server";
 import { assertStaffPermission, AuthorizationError } from "@/lib/dal";
+import { getPrisma } from "@/lib/db";
 import { UpdateBranchDraftSchema } from "@/lib/provider/validation";
-import { updateBranchDraft, ProviderError } from "@/lib/provider/service";
+import {
+  updateBranchDraft,
+  isBranchOperationallyAvailable,
+  ProviderError,
+} from "@/lib/provider/service";
+
+export async function GET(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string; branchId: string }> }
+): Promise<Response> {
+  try {
+    await assertStaffPermission(req.headers, "provider:read");
+    const { id, branchId } = await params;
+    const prisma = getPrisma();
+
+    const branch = await prisma.providerBranch.findFirst({
+      where: {
+        id: branchId,
+        providerOrganizationId: id,
+      },
+      include: {
+        providerOrganization: {
+          select: {
+            id: true,
+            nameEn: true,
+            nameAr: true,
+            status: true,
+          },
+        },
+      },
+    });
+
+    if (!branch) {
+      return Response.json(
+        {
+          error: "BRANCH_NOT_FOUND",
+          message: "Branch not found for the specified provider organization.",
+        },
+        { status: 404, headers: { "Cache-Control": "no-store" } }
+      );
+    }
+
+    const isAvailable = isBranchOperationallyAvailable(
+      branch.status,
+      branch.providerOrganization.status
+    );
+
+    return Response.json(
+      { ...branch, isOperationallyAvailable: isAvailable },
+      { status: 200, headers: { "Cache-Control": "no-store" } }
+    );
+  } catch (err) {
+    if (err instanceof AuthorizationError) return err.toResponse();
+    if (err instanceof ProviderError) return err.toResponse();
+    return Response.json(
+      { error: "INTERNAL_ERROR", message: "An unexpected error occurred." },
+      { status: 500, headers: { "Cache-Control": "no-store" } }
+    );
+  }
+}
 
 export async function PATCH(
   req: NextRequest,
@@ -9,7 +69,7 @@ export async function PATCH(
 ): Promise<Response> {
   try {
     const actor = await assertStaffPermission(req.headers, "branch:edit");
-    const { branchId } = await params;
+    const { id, branchId } = await params;
     const json = await req.json().catch(() => null);
     const parsed = UpdateBranchDraftSchema.safeParse(json);
 
@@ -28,7 +88,7 @@ export async function PATCH(
       req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
       req.headers.get("x-real-ip") ||
       undefined;
-    const updated = await updateBranchDraft(actor, branchId, parsed.data, clientIp);
+    const updated = await updateBranchDraft(actor, id, branchId, parsed.data, clientIp);
 
     return Response.json(updated, {
       status: 200,

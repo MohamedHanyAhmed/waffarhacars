@@ -32,6 +32,7 @@ model User {
   createdProviders        ProviderOrganization[]   @relation("ProviderCreatedBy")
   submittedProviders      ProviderOrganization[]   @relation("ProviderSubmittedBy")
   activatedProviders      ProviderOrganization[]   @relation("ProviderActivatedBy")
+  vettedBranches          ProviderBranch[]         @relation("BranchVettedBy")
 
   @@unique([email])
   @@unique([phoneNumber])
@@ -313,6 +314,16 @@ model ProviderBranch {
   status                 BranchStatus         @default(DRAFT)
   version                Int                  @default(1)
   pauseReason            String?              @db.Text
+  rejectionReason        String?              @db.Text
+
+  // Vetting Verification Record (Operations Checker)
+  legalIdentityChecked    Boolean              @default(false)
+  physicalLocationChecked Boolean              @default(false)
+  contactAndHoursChecked  Boolean              @default(false)
+  evidenceDocumentRef     String?              @db.VarChar(128)
+  vettedByUserId          String?              @db.Uuid
+  vettedByUser            User?                @relation("BranchVettedBy", fields: [vettedByUserId], references: [id])
+  vettedAt                DateTime?
 
   createdAt              DateTime             @default(now())
   updatedAt              DateTime             @updatedAt

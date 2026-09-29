@@ -1,5 +1,14 @@
 import { z } from "zod";
 import { normalizeEgyptianPhone } from "@/lib/phone";
+import {
+  PROVIDER_REJECTION_REASON_CODES,
+  PROVIDER_PAUSE_REASON_CODES,
+  type ProviderRejectionReasonCode,
+  type ProviderPauseReasonCode,
+} from "@/lib/dal/audit";
+
+export { PROVIDER_REJECTION_REASON_CODES, PROVIDER_PAUSE_REASON_CODES };
+export type { ProviderRejectionReasonCode, ProviderPauseReasonCode };
 
 export const CAIRO_CLUSTERS = [
   "NASR_CITY_HELIOPOLIS",
@@ -156,23 +165,64 @@ export const ActivateProviderSchema = z.object({
 
 export const RejectProviderSchema = z.object({
   expectedVersion: z.number().int().positive(),
-  returnToDraft: z.boolean().default(true),
-  rejectionReason: z.string().trim().min(5).max(256),
+  remediable: z.boolean().default(true),
+  reasonCode: z.enum(PROVIDER_REJECTION_REASON_CODES),
+  rejectionReason: z.string().trim().min(5).max(1000),
 });
+
+export type RejectProviderInput = z.infer<typeof RejectProviderSchema>;
 
 export const PauseProviderSchema = z.object({
   expectedVersion: z.number().int().positive(),
-  pauseReason: z.string().trim().min(5).max(256),
+  reasonCode: z.enum(PROVIDER_PAUSE_REASON_CODES),
+  pauseReason: z.string().trim().min(5).max(1000),
 });
+
+export type PauseProviderInput = z.infer<typeof PauseProviderSchema>;
 
 export const ResumeProviderSchema = z.object({
   expectedVersion: z.number().int().positive(),
 });
 
+export const ActivateBranchSchema = z.object({
+  expectedVersion: z.number().int().positive(),
+  legalIdentityChecked: z.literal(true, {
+    message: "Legal identity check must be confirmed before branch activation",
+  }),
+  physicalLocationChecked: z.literal(true, {
+    message: "Physical location check must be confirmed before branch activation",
+  }),
+  contactAndHoursChecked: z.literal(true, {
+    message: "Contact details and operating hours check must be confirmed before branch activation",
+  }),
+  evidenceDocumentRef: z
+    .string()
+    .trim()
+    .min(3)
+    .max(128)
+    .regex(/^[A-Za-z0-9_./:-]+$/, {
+      message: "Evidence reference must be an opaque alphanumeric document or ticket identifier",
+    }),
+});
+
+export type ActivateBranchInput = z.infer<typeof ActivateBranchSchema>;
+
+export const RejectBranchSchema = z.object({
+  expectedVersion: z.number().int().positive(),
+  remediable: z.boolean().default(true),
+  reasonCode: z.enum(PROVIDER_REJECTION_REASON_CODES),
+  rejectionReason: z.string().trim().min(5).max(1000),
+});
+
+export type RejectBranchInput = z.infer<typeof RejectBranchSchema>;
+
 export const PauseBranchSchema = z.object({
   expectedVersion: z.number().int().positive(),
-  pauseReason: z.string().trim().min(5).max(256),
+  reasonCode: z.enum(PROVIDER_PAUSE_REASON_CODES),
+  pauseReason: z.string().trim().min(5).max(1000),
 });
+
+export type PauseBranchInput = z.infer<typeof PauseBranchSchema>;
 
 export const ResumeBranchSchema = z.object({
   expectedVersion: z.number().int().positive(),
