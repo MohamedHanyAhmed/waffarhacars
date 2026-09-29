@@ -234,7 +234,6 @@ test.describe("Real PostgreSQL Staff Provider Onboarding & Operations Vetting E2
     };
   }
 
-
   test("executes non-skippable real PostgreSQL Sales onboarding, organization editing, Operations vetting/activation, and bilingual RTL/LTR verification", async ({
     browser,
   }) => {
