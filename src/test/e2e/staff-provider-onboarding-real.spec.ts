@@ -420,9 +420,10 @@ test.describe("Real PostgreSQL Staff Provider Onboarding & Operations Vetting E2
       await salesPage.goto("/staff/providers/new");
       await salesPage.waitForSelector("div[dir='rtl']");
       await salesPage.click("button[type='submit']");
-      const arabicAlert = salesPage.locator("[role='alert']").first();
+      const arabicAlert = salesPage
+        .locator("[role='alert']")
+        .filter({ hasText: "يرجى مراجعة أخطاء التحقق الموضحة." });
       await expect(arabicAlert).toBeVisible();
-      await expect(arabicAlert).toContainText("يرجى مراجعة أخطاء التحقق الموضحة.");
 
       // 13. Audit trail verification in persistent PostgreSQL database
       const auditEvents = await prisma.securityAuditEvent.findMany({
