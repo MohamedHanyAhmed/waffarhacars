@@ -81,7 +81,7 @@ export default function NewProviderPage() {
     if (isSubmitting) return;
 
     if (!validate()) {
-      setGeneralError("Please review the highlighted validation errors.");
+      setGeneralError(t("onboarding.feedback.validationErrors"));
       return;
     }
 
@@ -115,7 +115,7 @@ export default function NewProviderPage() {
       }
 
       if (res.status === 403) {
-        setGeneralError("Access Denied: Only Sales agents can create provider drafts.");
+        setGeneralError(t("onboarding.feedback.accessDeniedSalesCreate"));
         setIsSubmitting(false);
         return;
       }
@@ -123,7 +123,7 @@ export default function NewProviderPage() {
       const json = await res.json().catch(() => ({}));
 
       if (res.status === 409) {
-        setGeneralError(json.message || "A provider with this Tax ID or CR already exists.");
+        setGeneralError(json.message || t("onboarding.feedback.duplicateTaxOrCr"));
         setIsSubmitting(false);
         return;
       }
@@ -140,7 +140,7 @@ export default function NewProviderPage() {
         } else if (json.details && typeof json.details === "object") {
           setFieldErrors(json.details);
         }
-        setGeneralError(json.message || "Failed to create provider draft.");
+        setGeneralError(json.message || t("onboarding.feedback.createProviderFailed"));
         setIsSubmitting(false);
         return;
       }
@@ -151,7 +151,7 @@ export default function NewProviderPage() {
       router.push(`/staff/providers/${targetId}`);
     } catch {
       // Invariant: Treat lost mutation responses as unknown, not failed.
-      // A single read-back that fails or sees an old version cannot authorize "safe retry".
+      // A single read-back that fails or sees an absent record cannot authorize "safe retry".
       setIsSubmitting(false);
       setUncertainOutcome(true);
       setCanDeliberateRetry(false);
@@ -180,9 +180,10 @@ export default function NewProviderPage() {
           router.push(`/staff/providers/${existing.id}`);
           return;
         } else {
-          // Confirmed NOT committed by fresh authoritative server read-back.
-          setCanDeliberateRetry(true);
-          setUncertainMessage(t("onboarding.uncertainty.confirmedNotCommitted"));
+          // Invariant: Absent record is not proof of non-commitment.
+          // An in-flight creation may commit later. Do NOT enable retry or say "confirmed not applied".
+          setCanDeliberateRetry(false);
+          setUncertainMessage(t("onboarding.uncertainty.stillUnconfirmed"));
         }
       } else {
         setCanDeliberateRetry(false);

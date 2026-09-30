@@ -394,7 +394,7 @@ test.describe("Real PostgreSQL Staff Provider Onboarding & Operations Vetting E2
       await expect(salesPage.locator("text=Active (Vetted)").first()).toBeVisible();
       await expect(salesPage.locator(`text=Real Auto Care ${uid} Updated`).first()).toBeVisible();
 
-      // 12. Bilingual Arabic Pass: switch to Arabic and verify RTL layout & LTR data fields
+      // 12. Bilingual Arabic Pass: switch to Arabic and verify RTL layout, LTR data fields, and Arabic error state
       await opsPage.evaluate(() => {
         localStorage.setItem("waffarha_demo_locale", "ar");
       });
@@ -411,6 +411,18 @@ test.describe("Real PostgreSQL Staff Provider Onboarding & Operations Vetting E2
 
       const ltrPhone = opsPage.locator("p[dir='ltr']").filter({ hasText: "+201012345678" });
       await expect(ltrPhone).toBeVisible();
+
+      // Arabic Browser Error State Assertion:
+      // Verify that Arabic error notifications display localized copy within RTL context
+      await salesPage.evaluate(() => {
+        localStorage.setItem("waffarha_demo_locale", "ar");
+      });
+      await salesPage.goto("/staff/providers/new");
+      await salesPage.waitForSelector("div[dir='rtl']");
+      await salesPage.click("button[type='submit']");
+      const arabicAlert = salesPage.locator("[role='alert']").first();
+      await expect(arabicAlert).toBeVisible();
+      await expect(arabicAlert).toContainText("يرجى مراجعة أخطاء التحقق الموضحة.");
 
       // 13. Audit trail verification in persistent PostgreSQL database
       const auditEvents = await prisma.securityAuditEvent.findMany({

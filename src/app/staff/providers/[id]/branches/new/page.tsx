@@ -77,7 +77,7 @@ export default function NewBranchPage({ params }: { params: Promise<{ id: string
     if (isSubmitting) return;
 
     if (!validate()) {
-      setGeneralError("Please review the highlighted validation errors.");
+      setGeneralError(t("onboarding.feedback.validationErrors"));
       return;
     }
 
@@ -111,7 +111,7 @@ export default function NewBranchPage({ params }: { params: Promise<{ id: string
       }
 
       if (res.status === 403) {
-        setGeneralError("Access Denied: Only Sales agents can add branch drafts.");
+        setGeneralError(t("onboarding.feedback.accessDeniedSalesBranch"));
         setIsSubmitting(false);
         return;
       }
@@ -130,7 +130,7 @@ export default function NewBranchPage({ params }: { params: Promise<{ id: string
         } else if (json.details && typeof json.details === "object") {
           setFieldErrors(json.details);
         }
-        setGeneralError(json.message || "Failed to create branch draft.");
+        setGeneralError(json.message || t("onboarding.feedback.createBranchFailed"));
         setIsSubmitting(false);
         return;
       }
@@ -140,7 +140,7 @@ export default function NewBranchPage({ params }: { params: Promise<{ id: string
       router.push(`/staff/providers/${providerId}`);
     } catch {
       // Invariant: Treat lost mutation responses as unknown, not failed.
-      // A single read-back that fails or sees an old version cannot authorize "safe retry".
+      // A single read-back that fails or sees an absent record cannot authorize "safe retry".
       setIsSubmitting(false);
       setUncertainOutcome(true);
       setCanDeliberateRetry(false);
@@ -167,9 +167,10 @@ export default function NewBranchPage({ params }: { params: Promise<{ id: string
           router.push(`/staff/providers/${providerId}`);
           return;
         } else {
-          // Confirmed NOT committed by fresh authoritative server read-back.
-          setCanDeliberateRetry(true);
-          setUncertainMessage(t("onboarding.uncertainty.confirmedNotCommitted"));
+          // Invariant: Absent record is not proof of non-commitment.
+          // An in-flight creation may commit later. Do NOT enable retry or say "confirmed not applied".
+          setCanDeliberateRetry(false);
+          setUncertainMessage(t("onboarding.uncertainty.stillUnconfirmed"));
         }
       } else {
         setCanDeliberateRetry(false);

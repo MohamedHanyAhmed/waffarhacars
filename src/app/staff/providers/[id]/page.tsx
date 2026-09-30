@@ -123,7 +123,7 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
 
         if (!provRes.ok) {
           if (isMounted) {
-            setGeneralError("Provider organization not found or access denied.");
+            setGeneralError(t("onboarding.feedback.providerNotFound"));
             setLoading(false);
           }
           return;
@@ -137,7 +137,7 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
         }
       } catch {
         if (isMounted) {
-          setGeneralError("Network connection interrupted. Failed to load provider.");
+          setGeneralError(t("onboarding.feedback.networkError"));
           setLoading(false);
         }
       }
@@ -161,26 +161,27 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
         const raw = await checkRes.json();
         const latest: Provider = (raw.provider ? raw.provider : raw) as Provider;
 
-        let committed = false;
+        let targetStateAchieved = false;
         if (uncertainAction?.type === "submit") {
-          committed = latest.status === "PENDING_REVIEW" || latest.version > provider.version;
+          targetStateAchieved = latest.status === "PENDING_REVIEW";
         } else if (uncertainAction?.type === "activate_provider") {
-          committed = latest.status === "ACTIVE" || latest.version > provider.version;
+          targetStateAchieved = latest.status === "ACTIVE";
         } else if (uncertainAction?.type === "activate_branch") {
           const targetBranch = latest.branches.find(
             (b) => b.id === uncertainAction.payload?.branchId
           );
-          committed = targetBranch?.status === "ACTIVE";
+          targetStateAchieved = targetBranch?.status === "ACTIVE";
         } else if (uncertainAction?.type === "reject_branch") {
           const targetBranch = latest.branches.find(
             (b) => b.id === uncertainAction.payload?.branchId
           );
-          committed = targetBranch?.status === "DECOMMISSIONED" || targetBranch?.status === "DRAFT";
+          targetStateAchieved =
+            targetBranch?.status === "DECOMMISSIONED" || targetBranch?.status === "DRAFT";
         } else if (uncertainAction?.type === "reject_provider") {
-          committed = latest.status === "REJECTED" || latest.version > provider.version;
+          targetStateAchieved = latest.status === "REJECTED";
         } else if (uncertainAction?.type === "pause_resume") {
           if (uncertainAction.payload?.isProv) {
-            committed =
+            targetStateAchieved =
               uncertainAction.payload.action === "pause"
                 ? latest.status === "PAUSED"
                 : latest.status === "ACTIVE";
@@ -188,28 +189,49 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
             const targetBranch = latest.branches.find(
               (b) => b.id === uncertainAction.payload?.branchId
             );
-            committed =
+            targetStateAchieved =
               uncertainAction.payload?.action === "pause"
                 ? targetBranch?.status === "PAUSED"
                 : targetBranch?.status === "ACTIVE";
           }
         }
 
-        if (committed) {
+        if (targetStateAchieved) {
           setProvider(latest);
           setUncertainOutcome(false);
           setUncertainAction(null);
           setCanDeliberateRetry(false);
           setUncertainMessage(null);
-          setSuccessNotice("Action verified and successfully committed on the server.");
+          setSuccessNotice(
+            t("onboarding.uncertainty.reconciledStateNotice", {
+              status: latest.status,
+              version: latest.version,
+            })
+          );
+          setCheckAnswersOpen(false);
+          setVettingBranch(null);
+          setRejectingBranch(null);
+          setRejectingProviderOpen(false);
+          setPauseResumeTarget(null);
+        } else if (latest.version > provider.version) {
+          // Version changed but desired target state was not achieved: concurrent different update!
+          // Reconcile client state, but do not claim this user's action succeeded.
+          setProvider(latest);
+          setUncertainOutcome(false);
+          setUncertainAction(null);
+          setCanDeliberateRetry(false);
+          setUncertainMessage(null);
+          setSuccessNotice(t("onboarding.uncertainty.reconciledDifferentNotice"));
           setCheckAnswersOpen(false);
           setVettingBranch(null);
           setRejectingBranch(null);
           setRejectingProviderOpen(false);
           setPauseResumeTarget(null);
         } else {
-          setCanDeliberateRetry(true);
-          setUncertainMessage(t("onboarding.uncertainty.confirmedNotCommitted"));
+          // Invariant: Read-back seeing unchanged version is NOT proof of non-commitment.
+          // An in-flight request may commit later. Do NOT enable retry or say "confirmed not applied".
+          setCanDeliberateRetry(false);
+          setUncertainMessage(t("onboarding.uncertainty.stillUnconfirmed"));
         }
       } else {
         setCanDeliberateRetry(false);
@@ -320,12 +342,12 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
       const json = await res.json().catch(() => ({}));
 
       if (!res.ok) {
-        setGeneralError(json.message || "Failed to submit provider for review.");
+        setGeneralError(json.message || t("onboarding.feedback.submitFailed"));
         setIsSubmitting(false);
         return;
       }
 
-      setSuccessNotice("Provider submitted successfully for Operations review.");
+      setSuccessNotice(t("onboarding.feedback.submitSuccess"));
       setCheckAnswersOpen(false);
       await fetchProvider();
     } catch {
@@ -368,12 +390,12 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
       const json = await res.json().catch(() => ({}));
 
       if (!res.ok) {
-        setGeneralError(json.message || "Failed to activate provider organization.");
+        setGeneralError(json.message || t("onboarding.feedback.activateProviderFailed"));
         setIsActivatingProvider(false);
         return;
       }
 
-      setSuccessNotice("Provider organization activated successfully.");
+      setSuccessNotice(t("onboarding.feedback.activateProviderSuccess"));
       await fetchProvider();
     } catch {
       setIsActivatingProvider(false);
@@ -418,10 +440,10 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
       }
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        throw new Error(err.message || "Failed to activate branch.");
+        throw new Error(err.message || t("onboarding.feedback.activateProviderFailed"));
       }
       setVettingBranch(null);
-      setSuccessNotice("Branch vetted and activated.");
+      setSuccessNotice(t("onboarding.feedback.branchVettedSuccess"));
       await fetchProvider();
     } catch (err: unknown) {
       const isNetwork =
@@ -475,7 +497,7 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
         throw new Error(err.message || "Failed to reject branch.");
       }
       setRejectingBranch(null);
-      setSuccessNotice("Branch rejection processed.");
+      setSuccessNotice(t("onboarding.feedback.branchRejectSuccess"));
       await fetchProvider();
     } catch (err: unknown) {
       const isNetwork =
@@ -525,7 +547,7 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
         throw new Error(err.message || "Failed to reject provider.");
       }
       setRejectingProviderOpen(false);
-      setSuccessNotice("Provider rejection processed.");
+      setSuccessNotice(t("onboarding.feedback.providerRejectSuccess"));
       await fetchProvider();
     } catch (err: unknown) {
       const isNetwork =
@@ -582,7 +604,15 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
         throw new Error(err.message || `Failed to ${action} entity.`);
       }
       setPauseResumeTarget(null);
-      setSuccessNotice(`${isProv ? "Provider" : "Branch"} ${action}d successfully.`);
+      setSuccessNotice(
+        isProv
+          ? action === "pause"
+            ? t("onboarding.feedback.pauseProviderSuccess")
+            : t("onboarding.feedback.resumeProviderSuccess")
+          : action === "pause"
+            ? t("onboarding.feedback.pauseBranchSuccess")
+            : t("onboarding.feedback.resumeBranchSuccess")
+      );
       await fetchProvider();
     } catch (err: unknown) {
       const isNetwork =

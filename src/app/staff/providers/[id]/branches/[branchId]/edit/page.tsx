@@ -84,7 +84,7 @@ export default function EditBranchPage({
 
         if (!res.ok) {
           if (isMounted) {
-            setGeneralError("Branch not found or you lack permission to view it.");
+            setGeneralError(t("onboarding.feedback.branchNotFound"));
             setLoading(false);
           }
           return;
@@ -114,7 +114,7 @@ export default function EditBranchPage({
         }
       } catch {
         if (isMounted) {
-          setGeneralError("Failed to load branch details. Please refresh the page.");
+          setGeneralError(t("onboarding.feedback.networkError"));
           setLoading(false);
         }
       }
@@ -161,7 +161,7 @@ export default function EditBranchPage({
     if (isSubmitting) return;
 
     if (!validate()) {
-      setGeneralError("Please review the highlighted validation errors.");
+      setGeneralError(t("onboarding.feedback.validationErrors"));
       return;
     }
 
@@ -197,7 +197,7 @@ export default function EditBranchPage({
       }
 
       if (res.status === 403) {
-        setGeneralError("Access Denied: Only Sales agents can edit branch drafts.");
+        setGeneralError(t("onboarding.feedback.accessDeniedSalesBranch"));
         setIsSubmitting(false);
         return;
       }
@@ -229,7 +229,7 @@ export default function EditBranchPage({
         } else if (json.details && typeof json.details === "object") {
           setFieldErrors(json.details);
         }
-        setGeneralError(json.message || "Failed to update branch draft.");
+        setGeneralError(json.message || t("onboarding.feedback.updateBranchFailed"));
         setIsSubmitting(false);
         return;
       }
@@ -257,17 +257,31 @@ export default function EditBranchPage({
         const raw = await checkRes.json();
         const latest: BranchData = (raw.branch || raw) as BranchData;
         if (latest.version > expectedVersion) {
-          // Late commit verified! Reconcile immediately.
-          router.push(`/staff/providers/${providerId}`);
-          return;
-        } else if (latest.version === expectedVersion) {
-          // Confirmed NOT committed by fresh authoritative server read-back.
-          setCanDeliberateRetry(true);
-          setUncertainMessage(t("onboarding.uncertainty.confirmedNotCommitted"));
+          const matchesOurEdit =
+            latest.nameEn === nameEn.trim() &&
+            latest.nameAr === nameAr.trim() &&
+            latest.cluster === cluster &&
+            latest.streetAddressEn === streetAddressEn.trim() &&
+            latest.streetAddressAr === streetAddressAr.trim() &&
+            latest.contactPhone === contactPhone.trim();
+
+          if (matchesOurEdit) {
+            // Our edit was committed! Reconcile immediately.
+            router.push(`/staff/providers/${providerId}`);
+            return;
+          } else {
+            // Concurrent update by another agent! Do not claim this user's action succeeded.
+            setServerBranch(latest);
+            setConflictOpen(true);
+            setUncertainOutcome(false);
+            return;
+          }
         } else {
-          // Version conflict
-          setServerBranch(latest);
-          setConflictOpen(true);
+          // Version is still expectedVersion.
+          // Invariant: An old version is not proof of non-commitment.
+          // An in-flight request may commit later. Do NOT enable retry or say "confirmed not applied".
+          setCanDeliberateRetry(false);
+          setUncertainMessage(t("onboarding.uncertainty.stillUnconfirmed"));
         }
       } else {
         setCanDeliberateRetry(false);

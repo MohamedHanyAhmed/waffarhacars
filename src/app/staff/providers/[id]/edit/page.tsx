@@ -65,7 +65,7 @@ export default function EditProviderOrganizationPage({
 
         if (!res.ok) {
           if (isMounted) {
-            setGeneralError("Provider organization not found or access denied.");
+            setGeneralError(t("onboarding.feedback.providerNotFound"));
             setLoading(false);
           }
           return;
@@ -88,7 +88,7 @@ export default function EditProviderOrganizationPage({
         }
       } catch {
         if (isMounted) {
-          setGeneralError("Failed to load provider organization. Please refresh the page.");
+          setGeneralError(t("onboarding.feedback.networkError"));
           setLoading(false);
         }
       }
@@ -153,7 +153,7 @@ export default function EditProviderOrganizationPage({
     if (isSubmitting) return;
 
     if (!validate()) {
-      setGeneralError("Please review the highlighted validation errors.");
+      setGeneralError(t("onboarding.feedback.validationErrors"));
       return;
     }
 
@@ -188,7 +188,7 @@ export default function EditProviderOrganizationPage({
       }
 
       if (res.status === 403) {
-        setGeneralError("Access Denied: Only Sales or Admin staff can edit provider drafts.");
+        setGeneralError(t("onboarding.feedback.accessDeniedSalesEdit"));
         setIsSubmitting(false);
         return;
       }
@@ -219,7 +219,7 @@ export default function EditProviderOrganizationPage({
         } else if (json.details && typeof json.details === "object") {
           setFieldErrors(json.details);
         }
-        setGeneralError(json.message || "Failed to update provider draft.");
+        setGeneralError(json.message || t("onboarding.feedback.updateProviderFailed"));
         setIsSubmitting(false);
         return;
       }
@@ -247,19 +247,29 @@ export default function EditProviderOrganizationPage({
       if (checkRes.ok) {
         const latest: ProviderOrganizationDto = await checkRes.json();
         if (latest.version > expectedVersion) {
-          // Late commit verified! Reconcile immediately.
-          setIsDirty(false);
-          router.push(`/staff/providers/${providerId}`);
-          return;
-        } else if (latest.version === expectedVersion) {
-          // Confirmed NOT committed by fresh authoritative server read-back.
-          // Now outcome is established -> permit deliberate retry.
-          setCanDeliberateRetry(true);
-          setUncertainMessage(t("onboarding.uncertainty.confirmedNotCommitted"));
+          const matchesOurEdit =
+            latest.nameEn === nameEn.trim() &&
+            latest.nameAr === nameAr.trim() &&
+            latest.legalName === legalName.trim();
+
+          if (matchesOurEdit) {
+            // Our edit was committed! Reconcile immediately.
+            setIsDirty(false);
+            router.push(`/staff/providers/${providerId}`);
+            return;
+          } else {
+            // Concurrent update by another agent! Do not claim this user's action succeeded.
+            setServerProvider(latest);
+            setConflictOpen(true);
+            setUncertainOutcome(false);
+            return;
+          }
         } else {
-          // Version conflict
-          setServerProvider(latest);
-          setConflictOpen(true);
+          // Version is still expectedVersion.
+          // Invariant: An old version is not proof of non-commitment.
+          // An in-flight request may commit later. Do NOT enable retry or say "confirmed not applied".
+          setCanDeliberateRetry(false);
+          setUncertainMessage(t("onboarding.uncertainty.stillUnconfirmed"));
         }
       } else {
         setCanDeliberateRetry(false);

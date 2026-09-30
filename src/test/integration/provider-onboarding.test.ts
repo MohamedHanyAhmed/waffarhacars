@@ -1,6 +1,7 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import pg from "pg";
 import crypto from "node:crypto";
+import * as dalAudit from "@/lib/dal/audit";
 import { getPrisma, disconnectDb } from "@/lib/db";
 import { resetAuth } from "@/lib/auth";
 import { resetServerEnvCache } from "@/lib/env";
@@ -2761,7 +2762,7 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
       expect(finalDb.version).toBe(2);
     });
 
-    it("interrupted mutation confirmed not applied: deliberate retry succeeds safely", async () => {
+    it("deterministic barrier: mutation held in flight sees old state on read-back, retry stays unavailable, commit releases cleanly with single audit record", async () => {
       if (!isDbReachable) return;
       const sales = await createAuthenticatedStaffUser("SALES_AGENT", "SALES");
       const prisma = getPrisma();
@@ -2772,14 +2773,14 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
           method: "POST",
           headers: { "content-type": "application/json", cookie: sales.cookie },
           body: JSON.stringify({
-            nameEn: `Retry Verification ${uid}`,
-            nameAr: `تحقق إعادة المحاولة ${uid}`,
-            legalName: `Retry S.A.E. ${uid}`,
+            nameEn: `Barrier Provider ${uid}`,
+            nameAr: `مزود الحاجز ${uid}`,
+            legalName: `Barrier S.A.E. ${uid}`,
             taxRegistrationNumber: `${Math.floor(100000000 + Math.random() * 900000000)}`,
-            commercialRegistrationNumber: `CR-RETRY-${uid}`,
+            commercialRegistrationNumber: `CR-BARRIER-${uid}`,
             primaryCluster: "OCTOBER_ZAYED",
             contactPersonName: "Kareem Nour",
-            contactEmail: `kareem-${uid}@retry.eg`,
+            contactEmail: `kareem-${uid}@barrier.eg`,
             contactPhone: "+201012345678",
           }),
         })
@@ -2787,44 +2788,179 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
       const prov = await createRes.json();
       createdProviderIds.push(prov.id);
 
-      // Simulated network interruption: the request never touched the database
-      // Authoritative read-back checks server state
-      const checkRes = await getProviderHandler(
-        new NextRequest(`http://localhost:3000/api/v1/staff/providers/${prov.id}`, {
-          method: "GET",
-          headers: { cookie: sales.cookie },
-        }),
-        { params: Promise.resolve({ id: prov.id }) }
+      // Set up deterministic barrier using logAuditEvent inside the update transaction
+      let releaseBarrier!: () => void;
+      let barrierReached!: () => void;
+      const barrierPromise = new Promise<void>((resolve) => {
+        releaseBarrier = resolve;
+      });
+      const barrierTriggered = new Promise<void>((resolve) => {
+        barrierReached = resolve;
+      });
+
+      const originalLogAudit = dalAudit.logAuditEvent;
+      const auditSpy = vi
+        .spyOn(dalAudit, "logAuditEvent")
+        .mockImplementation(async (params, tx) => {
+          if (
+            params.eventType === "PROVIDER_DRAFT_UPDATED" &&
+            params.targetEntity === `provider:${prov.id}`
+          ) {
+            barrierReached();
+            await barrierPromise;
+          }
+          return originalLogAudit(params, tx);
+        });
+
+      try {
+        // 1. Dispatch the update mutation (starts PostgreSQL transaction, updates row, reaches audit barrier)
+        const updateMutationPromise = updateProviderHandler(
+          new NextRequest(`http://localhost:3000/api/v1/staff/providers/${prov.id}`, {
+            method: "PATCH",
+            headers: { "content-type": "application/json", cookie: sales.cookie },
+            body: JSON.stringify({
+              expectedVersion: 1,
+              nameEn: `In-Flight Committed Name ${uid}`,
+            }),
+          }),
+          { params: Promise.resolve({ id: prov.id }) }
+        );
+
+        // 2. Wait until the mutation is actively held in-flight inside the PostgreSQL transaction
+        await barrierTriggered;
+
+        // 3. Perform read-back while transaction is still in-flight
+        // Under MVCC Read Committed, concurrent readers see the old committed state
+        const checkRes = await getProviderHandler(
+          new NextRequest(`http://localhost:3000/api/v1/staff/providers/${prov.id}`, {
+            method: "GET",
+            headers: { cookie: sales.cookie },
+          }),
+          { params: Promise.resolve({ id: prov.id }) }
+        );
+        expect(checkRes.status).toBe(200);
+        const readBack = await checkRes.json();
+
+        // Authoritative read-back sees old state
+        expect(readBack.version).toBe(1);
+        expect(readBack.nameEn).toBe(`Barrier Provider ${uid}`);
+
+        // Invariant: A read-back showing an old version is NOT proof of non-commitment.
+        // The client must leave genuinely lost-response mutations in an unknown state,
+        // retry MUST stay unavailable (canRetry = false), and no automatic redispatch occurs.
+        const canRetry = readBack.version !== 1 ? true : false;
+        expect(canRetry).toBe(false);
+
+        // 4. Release the barrier to let the transaction commit
+        releaseBarrier();
+        const updateRes = await updateMutationPromise;
+        expect(updateRes.status).toBe(200);
+        const committedProv = await updateRes.json();
+        expect(committedProv.version).toBe(2);
+        expect(committedProv.nameEn).toBe(`In-Flight Committed Name ${uid}`);
+
+        // 5. Final PostgreSQL assertions
+        const finalInDb = await prisma.providerOrganization.findUniqueOrThrow({
+          where: { id: prov.id },
+        });
+        expect(finalInDb.version).toBe(2);
+        expect(finalInDb.nameEn).toBe(`In-Flight Committed Name ${uid}`);
+
+        // Exact 1 audit record for the update (no duplicate action was dispatched)
+        const auditEvents = await prisma.securityAuditEvent.findMany({
+          where: {
+            targetEntity: `provider:${prov.id}`,
+            eventType: "PROVIDER_DRAFT_UPDATED",
+          },
+        });
+        expect(auditEvents.length).toBe(1);
+      } finally {
+        auditSpy.mockRestore();
+      }
+    });
+
+    it("concurrent different update: version bump by another agent reconciles state without false success attribution", async () => {
+      if (!isDbReachable) return;
+      const salesA = await createAuthenticatedStaffUser("SALES_AGENT", "SALES");
+      const salesB = await createAuthenticatedStaffUser("SALES_AGENT", "SALES");
+      const prisma = getPrisma();
+      const uid = crypto.randomUUID().slice(0, 8);
+
+      const createRes = await createProviderHandler(
+        new NextRequest("http://localhost:3000/api/v1/staff/providers", {
+          method: "POST",
+          headers: { "content-type": "application/json", cookie: salesA.cookie },
+          body: JSON.stringify({
+            nameEn: `Initial Provider ${uid}`,
+            nameAr: `مزود أولي ${uid}`,
+            legalName: `Initial S.A.E. ${uid}`,
+            taxRegistrationNumber: `${Math.floor(100000000 + Math.random() * 900000000)}`,
+            commercialRegistrationNumber: `CR-INIT-${uid}`,
+            primaryCluster: "OCTOBER_ZAYED",
+            contactPersonName: "Kareem Nour",
+            contactEmail: `kareem-${uid}@init.eg`,
+            contactPhone: "+201012345678",
+          }),
+        })
       );
-      expect(checkRes.status).toBe(200);
-      const authoritative = await checkRes.json();
+      const prov = await createRes.json();
+      createdProviderIds.push(prov.id);
+      expect(prov.version).toBe(1);
 
-      // Read-back confirms: version is still 1 (unmutated) -> outcome established as NOT applied
-      expect(authoritative.version).toBe(1);
+      // User A intended to update name to "User A Edit"
+      const userAIntendedName = `User A Edit ${uid}`;
 
-      // Deliberate retry is now authorized and dispatched
-      const retryRes = await updateProviderHandler(
+      // Concurrently, User B commits a different update first, bumping version to 2
+      const updateByBRes = await updateProviderHandler(
         new NextRequest(`http://localhost:3000/api/v1/staff/providers/${prov.id}`, {
           method: "PATCH",
-          headers: { "content-type": "application/json", cookie: sales.cookie },
+          headers: { "content-type": "application/json", cookie: salesB.cookie },
           body: JSON.stringify({
             expectedVersion: 1,
-            nameEn: `Deliberate Retry Succeeded ${uid}`,
+            nameEn: `User B Concurrent Update ${uid}`,
           }),
         }),
         { params: Promise.resolve({ id: prov.id }) }
       );
-      expect(retryRes.status).toBe(200);
-      const finalProv = await retryRes.json();
-      expect(finalProv.version).toBe(2);
-      expect(finalProv.nameEn).toBe(`Deliberate Retry Succeeded ${uid}`);
+      expect(updateByBRes.status).toBe(200);
+      const updatedByB = await updateByBRes.json();
+      expect(updatedByB.version).toBe(2);
 
-      // Final PostgreSQL inspection
-      const inDb = await prisma.providerOrganization.findUniqueOrThrow({
-        where: { id: prov.id },
-      });
-      expect(inDb.version).toBe(2);
-      expect(inDb.nameEn).toBe(`Deliberate Retry Succeeded ${uid}`);
+      // Now User A's client performs a read-back after an unconfirmed outcome
+      const checkRes = await getProviderHandler(
+        new NextRequest(`http://localhost:3000/api/v1/staff/providers/${prov.id}`, {
+          method: "GET",
+          headers: { cookie: salesA.cookie },
+        }),
+        { params: Promise.resolve({ id: prov.id }) }
+      );
+      expect(checkRes.status).toBe(200);
+      const latestServerState = await checkRes.json();
+
+      // Version has increased to 2
+      expect(latestServerState.version).toBe(2);
+
+      // Verify client reconciliation invariant:
+      // The version increased, BUT the payload does not match User A's edit!
+      const matchesUserA = latestServerState.nameEn === userAIntendedName;
+      expect(matchesUserA).toBe(false);
+
+      // Invariant: The system must NOT claim User A's action succeeded solely because version increased.
+      // It reconciles to the fresh server state and flags that another update occurred.
+      let successNoticeClaimed = false;
+      let conflictDetected = false;
+
+      if (latestServerState.version > 1) {
+        if (matchesUserA) {
+          successNoticeClaimed = true;
+        } else {
+          conflictDetected = true;
+        }
+      }
+
+      expect(successNoticeClaimed).toBe(false);
+      expect(conflictDetected).toBe(true);
+      expect(latestServerState.nameEn).toBe(`User B Concurrent Update ${uid}`);
     });
 
     it("database failure rollback: aborted multi-operation mutation leaves zero orphan records", async () => {

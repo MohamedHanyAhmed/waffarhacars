@@ -43,6 +43,9 @@ export function OutcomeUnknownBanner({
           <p className="leading-relaxed text-amber-800">
             {message || t("onboarding.uncertainty.outcomeUnknownDesc")}
           </p>
+          <p className="text-[11px] text-amber-700 font-medium">
+            {t("onboarding.uncertainty.manualReconciliationPath")}
+          </p>
         </div>
       </div>
 
