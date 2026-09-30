@@ -3,6 +3,7 @@ import { assertStaffPermission, AuthorizationError } from "@/lib/dal";
 import { getPrisma } from "@/lib/db";
 import { UpdateProviderDraftSchema } from "@/lib/provider/validation";
 import { updateProviderDraft, ProviderError } from "@/lib/provider/service";
+import { normalizeProviderDto } from "@/lib/provider/dto";
 
 export async function GET(
   req: NextRequest,
@@ -25,7 +26,9 @@ export async function GET(
       );
     }
 
-    return Response.json(provider, {
+    const dto = normalizeProviderDto(provider);
+
+    return Response.json(dto, {
       status: 200,
       headers: { "Cache-Control": "no-store" },
     });
@@ -64,8 +67,9 @@ export async function PATCH(
       req.headers.get("x-real-ip") ||
       undefined;
     const updated = await updateProviderDraft(actor, id, parsed.data, clientIp);
+    const dto = normalizeProviderDto(updated);
 
-    return Response.json(updated, {
+    return Response.json(dto, {
       status: 200,
       headers: { "Cache-Control": "no-store" },
     });

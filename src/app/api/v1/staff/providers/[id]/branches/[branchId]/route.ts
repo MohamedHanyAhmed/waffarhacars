@@ -7,6 +7,7 @@ import {
   isBranchOperationallyAvailable,
   ProviderError,
 } from "@/lib/provider/service";
+import { normalizeBranchDto } from "@/lib/provider/dto";
 
 export async function GET(
   req: NextRequest,
@@ -49,10 +50,12 @@ export async function GET(
       branch.providerOrganization.status
     );
 
-    return Response.json(
-      { ...branch, isOperationallyAvailable: isAvailable },
-      { status: 200, headers: { "Cache-Control": "no-store" } }
-    );
+    const dto = normalizeBranchDto({ ...branch, isOperationallyAvailable: isAvailable });
+
+    return Response.json(dto, {
+      status: 200,
+      headers: { "Cache-Control": "no-store" },
+    });
   } catch (err) {
     if (err instanceof AuthorizationError) return err.toResponse();
     if (err instanceof ProviderError) return err.toResponse();
@@ -89,8 +92,9 @@ export async function PATCH(
       req.headers.get("x-real-ip") ||
       undefined;
     const updated = await updateBranchDraft(actor, id, branchId, parsed.data, clientIp);
+    const dto = normalizeBranchDto(updated);
 
-    return Response.json(updated, {
+    return Response.json(dto, {
       status: 200,
       headers: { "Cache-Control": "no-store" },
     });

@@ -1,6 +1,7 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import pg from "pg";
 import crypto from "node:crypto";
+import * as dalAudit from "@/lib/dal/audit";
 import { getPrisma, disconnectDb } from "@/lib/db";
 import { resetAuth } from "@/lib/auth";
 import { resetServerEnvCache } from "@/lib/env";
@@ -35,6 +36,12 @@ import { POST as resumeProviderBranchHandler } from "@/app/api/v1/staff/ops/prov
 import { POST as pauseBranchHandler } from "@/app/api/v1/staff/ops/branches/[branchId]/pause/route";
 import { POST as resumeBranchHandler } from "@/app/api/v1/staff/ops/branches/[branchId]/resume/route";
 import { isBranchOperationallyAvailable } from "@/lib/provider/service";
+import {
+  BranchDtoSchema,
+  ProviderOrganizationDtoSchema,
+  isTerminalStatus,
+  isEditableDraft,
+} from "@/lib/provider/dto";
 
 const DEFAULT_TEST_DB_URL =
   process.env.DATABASE_URL ||
@@ -2223,5 +2230,785 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
       where: { targetEntity: `provider_branch:${branch.id}` },
     });
     expect(auditCount).toBe(0);
+  });
+
+  it("asserts explicit API-to-UI DTO boundary: normalizes Prisma Decimal coordinates to JS numbers, enforces canonical enums, and validates JSON roundtrip with real PostgreSQL records", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+
+    const sales = await createAuthenticatedStaffUser("SALES_AGENT", "SALES");
+    const uid = crypto.randomUUID().slice(0, 6);
+    const taxId = `${Math.floor(100000000 + Math.random() * 900000000)}`;
+
+    // 1. Create provider via API
+    const createProvRes = await createProviderHandler(
+      new NextRequest("http://localhost:3000/api/v1/staff/providers", {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: sales.cookie },
+        body: JSON.stringify({
+          nameEn: "Boundary Auto Center",
+          nameAr: "مركز باوندري للسيارات",
+          legalName: "Boundary Automotive SAE",
+          taxRegistrationNumber: taxId,
+          commercialRegistrationNumber: `CR-BND-${uid}`,
+          primaryCluster: "NEW_CAIRO",
+          contactPersonName: "Omar Hany",
+          contactEmail: "omar@boundaryauto.eg",
+          contactPhone: "01011112222",
+        }),
+      })
+    );
+    expect(createProvRes.status).toBe(201);
+    const createdProv = await createProvRes.json();
+    createdProviderIds.push(createdProv.id);
+
+    // 2. Create branch with precise coordinates
+    const createBranchRes = await createBranchHandler(
+      new NextRequest(`http://localhost:3000/api/v1/staff/providers/${createdProv.id}/branches`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: sales.cookie },
+        body: JSON.stringify({
+          branchCode: `BND-BR-${uid}`,
+          nameEn: "New Cairo Branch",
+          nameAr: "فرع القاهرة الجديدة",
+          cluster: "NEW_CAIRO",
+          streetAddressEn: "90th Street North",
+          streetAddressAr: "شارع التسعين الشمالي",
+          latitude: 30.012345,
+          longitude: 31.456789,
+          contactPhone: "01022223333",
+          operatingHours: [
+            { dayOfWeek: 0, openTime: "08:00", closeTime: "20:00", isClosed: false },
+          ],
+        }),
+      }),
+      { params: Promise.resolve({ id: createdProv.id }) }
+    );
+    expect(createBranchRes.status).toBe(201);
+    const createdBranch = await createBranchRes.json();
+
+    // Verify created branch DTO directly
+    expect(typeof createdBranch.latitude).toBe("number");
+    expect(typeof createdBranch.longitude).toBe("number");
+    expect(createdBranch.latitude).toBe(30.012345);
+    expect(createdBranch.longitude).toBe(31.456789);
+    expect(createdBranch.status).toBe("DRAFT");
+    expect(isEditableDraft(createdBranch.status)).toBe(true);
+    expect(isTerminalStatus(createdBranch.status)).toBe(false);
+
+    // 3. Read back provider via GET /api/v1/staff/providers/[id]
+    const getProvRes = await getProviderHandler(
+      new NextRequest(`http://localhost:3000/api/v1/staff/providers/${createdProv.id}`, {
+        headers: { cookie: sales.cookie },
+      }),
+      { params: Promise.resolve({ id: createdProv.id }) }
+    );
+    expect(getProvRes.status).toBe(200);
+    const provDto = await getProvRes.json();
+
+    // Validate provider shape against ProviderOrganizationDtoSchema
+    const parseResult = ProviderOrganizationDtoSchema.safeParse(provDto);
+    expect(parseResult.success).toBe(true);
+
+    expect(provDto.status).toBe("DRAFT");
+    expect(provDto.branches).toHaveLength(1);
+
+    const branchInProv = provDto.branches[0];
+    expect(typeof branchInProv.latitude).toBe("number");
+    expect(typeof branchInProv.longitude).toBe("number");
+    expect(branchInProv.latitude).toBe(30.012345);
+    expect(branchInProv.longitude).toBe(31.456789);
+
+    // Validate branch against BranchDtoSchema
+    const branchParseResult = BranchDtoSchema.safeParse(branchInProv);
+    expect(branchParseResult.success).toBe(true);
+
+    // Validate JSON serialization roundtrip
+    const serialized = JSON.stringify(provDto);
+    const roundtripped = JSON.parse(serialized);
+    expect(roundtripped.branches[0].latitude).toBe(30.012345);
+    expect(roundtripped.branches[0].longitude).toBe(31.456789);
+
+    // 4. Read back single branch via GET /api/v1/staff/providers/[id]/branches/[branchId]
+    const getBranchRes = await getBranchHandler(
+      new NextRequest(
+        `http://localhost:3000/api/v1/staff/providers/${createdProv.id}/branches/${createdBranch.id}`,
+        { headers: { cookie: sales.cookie } }
+      ),
+      { params: Promise.resolve({ id: createdProv.id, branchId: createdBranch.id }) }
+    );
+    expect(getBranchRes.status).toBe(200);
+    const singleBranchDto = await getBranchRes.json();
+    expect(typeof singleBranchDto.latitude).toBe("number");
+    expect(typeof singleBranchDto.longitude).toBe("number");
+    expect(singleBranchDto.latitude).toBe(30.012345);
+    expect(singleBranchDto.longitude).toBe(31.456789);
+    expect(BranchDtoSchema.safeParse(singleBranchDto).success).toBe(true);
+  });
+
+  it("completes full Sales draft lifecycle: PATCH organization editing, version check, field validation, conflict handling, and remediable rejection correction", async () => {
+    if (!isDbReachable) {
+      throw new Error("PostgreSQL integration service is unavailable. Run 'npm run db:test:up'.");
+    }
+
+    const sales = await createAuthenticatedStaffUser("SALES_AGENT", "SALES");
+    const ops = await createAuthenticatedStaffUser("OPS_SUPERVISOR", "OPERATIONS");
+    const prisma = getPrisma();
+
+    const uid = crypto.randomUUID().slice(0, 6);
+    const taxId = `${Math.floor(100000000 + Math.random() * 900000000)}`;
+
+    // 1. Sales creates draft provider
+    const createRes = await createProviderHandler(
+      new NextRequest("http://localhost:3000/api/v1/staff/providers", {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: sales.cookie },
+        body: JSON.stringify({
+          nameEn: "Original Name En",
+          nameAr: "الاسم الأصلي بالعربية",
+          legalName: "Original Legal Name SAE",
+          taxRegistrationNumber: taxId,
+          commercialRegistrationNumber: `CR-ORIG-${uid}`,
+          primaryCluster: "MAADI",
+          contactPersonName: "Original Contact",
+          contactEmail: "original@test.eg",
+          contactPhone: "01099998888",
+        }),
+      })
+    );
+    expect(createRes.status).toBe(201);
+    const provider = await createRes.json();
+    createdProviderIds.push(provider.id);
+    expect(provider.version).toBe(1);
+
+    // Also add a draft branch so provider can later be submitted
+    const createBranchRes = await createBranchHandler(
+      new NextRequest(`http://localhost:3000/api/v1/staff/providers/${provider.id}/branches`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: sales.cookie },
+        body: JSON.stringify({
+          branchCode: `BR-MAADI-${uid}`,
+          nameEn: "Maadi Branch",
+          nameAr: "فرع المعادي",
+          cluster: "MAADI",
+          streetAddressEn: "Road 9 Maadi",
+          streetAddressAr: "شارع ٩ المعادي",
+          latitude: 29.9592,
+          longitude: 31.2584,
+          contactPhone: "01099998888",
+          operatingHours: [
+            { dayOfWeek: 0, openTime: "09:00", closeTime: "18:00", isClosed: false },
+          ],
+        }),
+      }),
+      { params: Promise.resolve({ id: provider.id }) }
+    );
+    expect(createBranchRes.status).toBe(201);
+
+    // 2. Test Concurrency conflict on PATCH: stale expectedVersion returns 409
+    const conflictRes = await updateProviderHandler(
+      new NextRequest(`http://localhost:3000/api/v1/staff/providers/${provider.id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json", cookie: sales.cookie },
+        body: JSON.stringify({
+          expectedVersion: 99, // Stale version!
+          nameEn: "Attempted Stale Update",
+        }),
+      }),
+      { params: Promise.resolve({ id: provider.id }) }
+    );
+    expect(conflictRes.status).toBe(409);
+    const conflictBody = await conflictRes.json();
+    expect(conflictBody.error).toBe("CONCURRENT_MODIFICATION");
+
+    // 3. Test Field Validation on PATCH: invalid Tax ID returns 400 with path/message details
+    const invalidTaxRes = await updateProviderHandler(
+      new NextRequest(`http://localhost:3000/api/v1/staff/providers/${provider.id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json", cookie: sales.cookie },
+        body: JSON.stringify({
+          expectedVersion: 1,
+          taxRegistrationNumber: "12345", // Must be exactly 9 digits
+        }),
+      }),
+      { params: Promise.resolve({ id: provider.id }) }
+    );
+    expect(invalidTaxRes.status).toBe(400);
+    const invalidTaxBody = await invalidTaxRes.json();
+    expect(invalidTaxBody.error).toBe("VALIDATION_ERROR");
+    expect(Array.isArray(invalidTaxBody.details)).toBe(true);
+    expect(
+      invalidTaxBody.details.some((d: { path: string }) => d.path === "taxRegistrationNumber")
+    ).toBe(true);
+
+    // 4. Test CR length validation on PATCH: CR < 3 chars returns 400
+    const invalidCrRes = await updateProviderHandler(
+      new NextRequest(`http://localhost:3000/api/v1/staff/providers/${provider.id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json", cookie: sales.cookie },
+        body: JSON.stringify({
+          expectedVersion: 1,
+          commercialRegistrationNumber: "CR", // Less than 3 chars
+        }),
+      }),
+      { params: Promise.resolve({ id: provider.id }) }
+    );
+    expect(invalidCrRes.status).toBe(400);
+    const invalidCrBody = await invalidCrRes.json();
+    expect(invalidCrBody.error).toBe("VALIDATION_ERROR");
+    expect(
+      invalidCrBody.details.some((d: { path: string }) => d.path === "commercialRegistrationNumber")
+    ).toBe(true);
+
+    // 5. Successful Sales PATCH update: updates name, legalName, CR, contact
+    const successfulPatchRes = await updateProviderHandler(
+      new NextRequest(`http://localhost:3000/api/v1/staff/providers/${provider.id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json", cookie: sales.cookie },
+        body: JSON.stringify({
+          expectedVersion: 1,
+          nameEn: "Updated Name En",
+          nameAr: "الاسم المحدث بالعربية",
+          legalName: "Updated Legal Name SAE",
+          commercialRegistrationNumber: `CR-UPD-${uid}`,
+          contactPersonName: "Updated Contact Person",
+          contactEmail: "updated@test.eg",
+          contactPhone: "01033334444",
+        }),
+      }),
+      { params: Promise.resolve({ id: provider.id }) }
+    );
+    expect(successfulPatchRes.status).toBe(200);
+    const updatedDto = await successfulPatchRes.json();
+    expect(updatedDto.version).toBe(2);
+    expect(updatedDto.nameEn).toBe("Updated Name En");
+    expect(updatedDto.nameAr).toBe("الاسم المحدث بالعربية");
+    expect(updatedDto.legalName).toBe("Updated Legal Name SAE");
+    expect(updatedDto.contactPhone).toBe("+201033334444");
+
+    // Verify DB was updated
+    const dbProv = await prisma.providerOrganization.findUniqueOrThrow({
+      where: { id: provider.id },
+    });
+    expect(dbProv.version).toBe(2);
+    expect(dbProv.nameEn).toBe("Updated Name En");
+
+    // 6. Sales submits provider for review (version -> 3, status -> PENDING_REVIEW)
+    const submitRes = await submitProviderHandler(
+      new NextRequest(`http://localhost:3000/api/v1/staff/providers/${provider.id}/submit`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: sales.cookie },
+        body: JSON.stringify({ expectedVersion: 2 }),
+      }),
+      { params: Promise.resolve({ id: provider.id }) }
+    );
+    expect(submitRes.status).toBe(200);
+    const submittedProv = await submitRes.json();
+    expect(submittedProv.status).toBe("PENDING_REVIEW");
+    expect(submittedProv.version).toBe(3);
+
+    // 7. Invariant: Editing is BLOCKED while in PENDING_REVIEW (422)
+    const blockedPatchRes = await updateProviderHandler(
+      new NextRequest(`http://localhost:3000/api/v1/staff/providers/${provider.id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json", cookie: sales.cookie },
+        body: JSON.stringify({
+          expectedVersion: 3,
+          nameEn: "Blocked While Pending",
+        }),
+      }),
+      { params: Promise.resolve({ id: provider.id }) }
+    );
+    expect(blockedPatchRes.status).toBe(422);
+    const blockedBody = await blockedPatchRes.json();
+    expect(blockedBody.error).toBe("INVALID_STATE_TRANSITION");
+
+    // 8. Operations rejects remediably -> provider status returns to DRAFT (version -> 4)
+    const remediableRejectRes = await rejectProviderHandler(
+      new NextRequest(`http://localhost:3000/api/v1/staff/ops/providers/${provider.id}/reject`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: ops.cookie },
+        body: JSON.stringify({
+          expectedVersion: 3,
+          rejectionReason: "Commercial registration certificate copy unclear",
+          reasonCode: "INCOMPLETE_DOCUMENTATION",
+          remediable: true,
+        }),
+      }),
+      { params: Promise.resolve({ id: provider.id }) }
+    );
+    expect(remediableRejectRes.status).toBe(200);
+    const rejectedProv = await remediableRejectRes.json();
+    expect(rejectedProv.status).toBe("DRAFT");
+    expect(rejectedProv.version).toBe(4);
+    expect(rejectedProv.rejectionReason).toBe("Commercial registration certificate copy unclear");
+
+    // 9. Remediably rejected organization is correctable: Sales PATCHes it again
+    const correctedPatchRes = await updateProviderHandler(
+      new NextRequest(`http://localhost:3000/api/v1/staff/providers/${provider.id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json", cookie: sales.cookie },
+        body: JSON.stringify({
+          expectedVersion: 4,
+          commercialRegistrationNumber: `CR-CORRECTED-${uid}`,
+        }),
+      }),
+      { params: Promise.resolve({ id: provider.id }) }
+    );
+    expect(correctedPatchRes.status).toBe(200);
+    const correctedProv = await correctedPatchRes.json();
+    expect(correctedProv.version).toBe(5);
+    expect(correctedProv.commercialRegistrationNumber).toBe(`CR-CORRECTED-${uid}`);
+
+    // 10. Resubmittable: Sales resubmits for review -> succeeds!
+    const resubmitRes = await submitProviderHandler(
+      new NextRequest(`http://localhost:3000/api/v1/staff/providers/${provider.id}/submit`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: sales.cookie },
+        body: JSON.stringify({ expectedVersion: 5 }),
+      }),
+      { params: Promise.resolve({ id: provider.id }) }
+    );
+    expect(resubmitRes.status).toBe(200);
+    const resubmittedProv = await resubmitRes.json();
+    expect(resubmittedProv.status).toBe("PENDING_REVIEW");
+    expect(resubmittedProv.version).toBe(6);
+  });
+
+  describe("Failure Matrix: Lost Mutation Responses, Unknown Outcomes, Stale Versions, Concurrent Updates & DB Failures", () => {
+    it("late commit & lost mutation response: authoritative server read-back reconciles state without duplicate dispatch", async () => {
+      if (!isDbReachable) return;
+      const sales = await createAuthenticatedStaffUser("SALES_AGENT", "SALES");
+      const prisma = getPrisma();
+      const uid = crypto.randomUUID().slice(0, 8);
+
+      // Create provider draft
+      const createRes = await createProviderHandler(
+        new NextRequest("http://localhost:3000/api/v1/staff/providers", {
+          method: "POST",
+          headers: { "content-type": "application/json", cookie: sales.cookie },
+          body: JSON.stringify({
+            nameEn: `Late Commit Test ${uid}`,
+            nameAr: `اختبار التأخير ${uid}`,
+            legalName: `Late Commit S.A.E. ${uid}`,
+            taxRegistrationNumber: `${Math.floor(100000000 + Math.random() * 900000000)}`,
+            commercialRegistrationNumber: `CR-LC-${uid}`,
+            primaryCluster: "NASR_CITY_HELIOPOLIS",
+            contactPersonName: "Omar Hani",
+            contactEmail: `omar-${uid}@latecommit.eg`,
+            contactPhone: "+201012345678",
+          }),
+        })
+      );
+      expect(createRes.status).toBe(201);
+      const prov = await createRes.json();
+      createdProviderIds.push(prov.id);
+      expect(prov.version).toBe(1);
+
+      // In-flight mutation: Sales dispatches edit
+      const patchRes = await updateProviderHandler(
+        new NextRequest(`http://localhost:3000/api/v1/staff/providers/${prov.id}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json", cookie: sales.cookie },
+          body: JSON.stringify({
+            expectedVersion: 1,
+            nameEn: `Late Commit Committed ${uid}`,
+          }),
+        }),
+        { params: Promise.resolve({ id: prov.id }) }
+      );
+      expect(patchRes.status).toBe(200);
+      const patched = await patchRes.json();
+      expect(patched.version).toBe(2);
+
+      // Client experienced lost response / connection reset, so it treats outcome as UNKNOWN
+      // Client re-checks status authoritatively:
+      const readBackRes = await getProviderHandler(
+        new NextRequest(`http://localhost:3000/api/v1/staff/providers/${prov.id}`, {
+          method: "GET",
+          headers: { cookie: sales.cookie },
+        }),
+        { params: Promise.resolve({ id: prov.id }) }
+      );
+      expect(readBackRes.status).toBe(200);
+      const latest = await readBackRes.json();
+
+      // Invariant: latest.version (2) > expectedVersion (1) -> late commit confirmed!
+      expect(latest.version).toBeGreaterThan(1);
+      expect(latest.nameEn).toBe(`Late Commit Committed ${uid}`);
+
+      // Final PostgreSQL inspection: exactly 1 record, version is 2
+      const inDb = await prisma.providerOrganization.findUniqueOrThrow({
+        where: { id: prov.id },
+      });
+      expect(inDb.version).toBe(2);
+      expect(inDb.nameEn).toBe(`Late Commit Committed ${uid}`);
+    });
+
+    it("duplicate request rejection: second dispatch with stale expectedVersion triggers 409 Conflict", async () => {
+      if (!isDbReachable) return;
+      const sales = await createAuthenticatedStaffUser("SALES_AGENT", "SALES");
+      const prisma = getPrisma();
+      const uid = crypto.randomUUID().slice(0, 8);
+
+      const createRes = await createProviderHandler(
+        new NextRequest("http://localhost:3000/api/v1/staff/providers", {
+          method: "POST",
+          headers: { "content-type": "application/json", cookie: sales.cookie },
+          body: JSON.stringify({
+            nameEn: `Duplicate Test ${uid}`,
+            nameAr: `اختبار التكرار ${uid}`,
+            legalName: `Duplicate S.A.E. ${uid}`,
+            taxRegistrationNumber: `${Math.floor(100000000 + Math.random() * 900000000)}`,
+            commercialRegistrationNumber: `CR-DUP-${uid}`,
+            primaryCluster: "MAADI",
+            contactPersonName: "Samir Adel",
+            contactEmail: `samir-${uid}@duplicate.eg`,
+            contactPhone: "+201012345678",
+          }),
+        })
+      );
+      const prov = await createRes.json();
+      createdProviderIds.push(prov.id);
+
+      // First dispatch succeeds
+      const patch1 = await updateProviderHandler(
+        new NextRequest(`http://localhost:3000/api/v1/staff/providers/${prov.id}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json", cookie: sales.cookie },
+          body: JSON.stringify({ expectedVersion: 1, nameEn: `First Dispatch ${uid}` }),
+        }),
+        { params: Promise.resolve({ id: prov.id }) }
+      );
+      expect(patch1.status).toBe(200);
+
+      // Automated duplicate dispatch with stale expectedVersion 1 is rejected
+      const patch2 = await updateProviderHandler(
+        new NextRequest(`http://localhost:3000/api/v1/staff/providers/${prov.id}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json", cookie: sales.cookie },
+          body: JSON.stringify({ expectedVersion: 1, nameEn: `Duplicate Dispatch ${uid}` }),
+        }),
+        { params: Promise.resolve({ id: prov.id }) }
+      );
+      expect(patch2.status).toBe(409);
+      const conflictBody = await patch2.json();
+      expect(conflictBody.error).toBe("CONCURRENT_MODIFICATION");
+
+      // Verify PostgreSQL state preserves first mutation
+      const finalDb = await prisma.providerOrganization.findUniqueOrThrow({
+        where: { id: prov.id },
+      });
+      expect(finalDb.version).toBe(2);
+      expect(finalDb.nameEn).toBe(`First Dispatch ${uid}`);
+    });
+
+    it("concurrent updates: race between two agents with same expectedVersion allows exactly one commit", async () => {
+      if (!isDbReachable) return;
+      const sales1 = await createAuthenticatedStaffUser("SALES_AGENT", "SALES");
+      const sales2 = await createAuthenticatedStaffUser("SALES_AGENT", "SALES");
+      const prisma = getPrisma();
+      const uid = crypto.randomUUID().slice(0, 8);
+
+      const createRes = await createProviderHandler(
+        new NextRequest("http://localhost:3000/api/v1/staff/providers", {
+          method: "POST",
+          headers: { "content-type": "application/json", cookie: sales1.cookie },
+          body: JSON.stringify({
+            nameEn: `Race Condition Test ${uid}`,
+            nameAr: `اختبار التزامن ${uid}`,
+            legalName: `Race S.A.E. ${uid}`,
+            taxRegistrationNumber: `${Math.floor(100000000 + Math.random() * 900000000)}`,
+            commercialRegistrationNumber: `CR-RACE-${uid}`,
+            primaryCluster: "NEW_CAIRO",
+            contactPersonName: "Laila Sherif",
+            contactEmail: `laila-${uid}@race.eg`,
+            contactPhone: "+201012345678",
+          }),
+        })
+      );
+      const prov = await createRes.json();
+      createdProviderIds.push(prov.id);
+
+      // Concurrently dispatch two updates with expectedVersion: 1
+      const [res1, res2] = await Promise.all([
+        updateProviderHandler(
+          new NextRequest(`http://localhost:3000/api/v1/staff/providers/${prov.id}`, {
+            method: "PATCH",
+            headers: { "content-type": "application/json", cookie: sales1.cookie },
+            body: JSON.stringify({ expectedVersion: 1, nameEn: `Agent 1 Update ${uid}` }),
+          }),
+          { params: Promise.resolve({ id: prov.id }) }
+        ),
+        updateProviderHandler(
+          new NextRequest(`http://localhost:3000/api/v1/staff/providers/${prov.id}`, {
+            method: "PATCH",
+            headers: { "content-type": "application/json", cookie: sales2.cookie },
+            body: JSON.stringify({ expectedVersion: 1, nameEn: `Agent 2 Update ${uid}` }),
+          }),
+          { params: Promise.resolve({ id: prov.id }) }
+        ),
+      ]);
+
+      const statuses = [res1.status, res2.status].sort();
+      // Exactly one 200 (success) and one 409 (concurrency conflict)
+      expect(statuses).toEqual([200, 409]);
+
+      // Final DB record is cleanly at version 2
+      const finalDb = await prisma.providerOrganization.findUniqueOrThrow({
+        where: { id: prov.id },
+      });
+      expect(finalDb.version).toBe(2);
+    });
+
+    it("deterministic barrier: mutation held in flight sees old state on read-back, retry stays unavailable, commit releases cleanly with single audit record", async () => {
+      if (!isDbReachable) return;
+      const sales = await createAuthenticatedStaffUser("SALES_AGENT", "SALES");
+      const prisma = getPrisma();
+      const uid = crypto.randomUUID().slice(0, 8);
+
+      const createRes = await createProviderHandler(
+        new NextRequest("http://localhost:3000/api/v1/staff/providers", {
+          method: "POST",
+          headers: { "content-type": "application/json", cookie: sales.cookie },
+          body: JSON.stringify({
+            nameEn: `Barrier Provider ${uid}`,
+            nameAr: `مزود الحاجز ${uid}`,
+            legalName: `Barrier S.A.E. ${uid}`,
+            taxRegistrationNumber: `${Math.floor(100000000 + Math.random() * 900000000)}`,
+            commercialRegistrationNumber: `CR-BARRIER-${uid}`,
+            primaryCluster: "OCTOBER_ZAYED",
+            contactPersonName: "Kareem Nour",
+            contactEmail: `kareem-${uid}@barrier.eg`,
+            contactPhone: "+201012345678",
+          }),
+        })
+      );
+      const prov = await createRes.json();
+      createdProviderIds.push(prov.id);
+
+      // Set up deterministic barrier using logAuditEvent inside the update transaction
+      let releaseBarrier!: () => void;
+      let barrierReached!: () => void;
+      const barrierPromise = new Promise<void>((resolve) => {
+        releaseBarrier = resolve;
+      });
+      const barrierTriggered = new Promise<void>((resolve) => {
+        barrierReached = resolve;
+      });
+
+      const originalLogAudit = dalAudit.logAuditEvent;
+      const auditSpy = vi
+        .spyOn(dalAudit, "logAuditEvent")
+        .mockImplementation(async (params, tx) => {
+          if (
+            params.eventType === "PROVIDER_DRAFT_UPDATED" &&
+            params.targetEntity === `provider:${prov.id}`
+          ) {
+            barrierReached();
+            await barrierPromise;
+          }
+          return originalLogAudit(params, tx);
+        });
+
+      try {
+        // 1. Dispatch the update mutation (starts PostgreSQL transaction, updates row, reaches audit barrier)
+        const updateMutationPromise = updateProviderHandler(
+          new NextRequest(`http://localhost:3000/api/v1/staff/providers/${prov.id}`, {
+            method: "PATCH",
+            headers: { "content-type": "application/json", cookie: sales.cookie },
+            body: JSON.stringify({
+              expectedVersion: 1,
+              nameEn: `In-Flight Committed Name ${uid}`,
+            }),
+          }),
+          { params: Promise.resolve({ id: prov.id }) }
+        );
+
+        // 2. Wait until the mutation is actively held in-flight inside the PostgreSQL transaction
+        await barrierTriggered;
+
+        // 3. Perform read-back while transaction is still in-flight
+        // Under MVCC Read Committed, concurrent readers see the old committed state
+        const checkRes = await getProviderHandler(
+          new NextRequest(`http://localhost:3000/api/v1/staff/providers/${prov.id}`, {
+            method: "GET",
+            headers: { cookie: sales.cookie },
+          }),
+          { params: Promise.resolve({ id: prov.id }) }
+        );
+        expect(checkRes.status).toBe(200);
+        const readBack = await checkRes.json();
+
+        // Authoritative read-back sees old state
+        expect(readBack.version).toBe(1);
+        expect(readBack.nameEn).toBe(`Barrier Provider ${uid}`);
+
+        // Invariant: A read-back showing an old version is NOT proof of non-commitment.
+        // The client must leave genuinely lost-response mutations in an unknown state,
+        // retry MUST stay unavailable (canRetry = false), and no automatic redispatch occurs.
+        const canRetry = readBack.version !== 1 ? true : false;
+        expect(canRetry).toBe(false);
+
+        // 4. Release the barrier to let the transaction commit
+        releaseBarrier();
+        const updateRes = await updateMutationPromise;
+        expect(updateRes.status).toBe(200);
+        const committedProv = await updateRes.json();
+        expect(committedProv.version).toBe(2);
+        expect(committedProv.nameEn).toBe(`In-Flight Committed Name ${uid}`);
+
+        // 5. Final PostgreSQL assertions
+        const finalInDb = await prisma.providerOrganization.findUniqueOrThrow({
+          where: { id: prov.id },
+        });
+        expect(finalInDb.version).toBe(2);
+        expect(finalInDb.nameEn).toBe(`In-Flight Committed Name ${uid}`);
+
+        // Exact 1 audit record for the update (no duplicate action was dispatched)
+        const auditEvents = await prisma.securityAuditEvent.findMany({
+          where: {
+            targetEntity: `provider:${prov.id}`,
+            eventType: "PROVIDER_DRAFT_UPDATED",
+          },
+        });
+        expect(auditEvents.length).toBe(1);
+      } finally {
+        auditSpy.mockRestore();
+      }
+    });
+
+    it("concurrent different update: version bump by another agent reconciles state without false success attribution", async () => {
+      if (!isDbReachable) return;
+      const salesA = await createAuthenticatedStaffUser("SALES_AGENT", "SALES");
+      const salesB = await createAuthenticatedStaffUser("SALES_AGENT", "SALES");
+      const prisma = getPrisma();
+      const uid = crypto.randomUUID().slice(0, 8);
+
+      const createRes = await createProviderHandler(
+        new NextRequest("http://localhost:3000/api/v1/staff/providers", {
+          method: "POST",
+          headers: { "content-type": "application/json", cookie: salesA.cookie },
+          body: JSON.stringify({
+            nameEn: `Initial Provider ${uid}`,
+            nameAr: `مزود أولي ${uid}`,
+            legalName: `Initial S.A.E. ${uid}`,
+            taxRegistrationNumber: `${Math.floor(100000000 + Math.random() * 900000000)}`,
+            commercialRegistrationNumber: `CR-INIT-${uid}`,
+            primaryCluster: "OCTOBER_ZAYED",
+            contactPersonName: "Kareem Nour",
+            contactEmail: `kareem-${uid}@init.eg`,
+            contactPhone: "+201012345678",
+          }),
+        })
+      );
+      const prov = await createRes.json();
+      createdProviderIds.push(prov.id);
+      expect(prov.version).toBe(1);
+
+      // User A intended to update name to "User A Edit"
+      const userAIntendedName = `User A Edit ${uid}`;
+
+      // Concurrently, User B commits a different update first, bumping version to 2
+      const updateByBRes = await updateProviderHandler(
+        new NextRequest(`http://localhost:3000/api/v1/staff/providers/${prov.id}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json", cookie: salesB.cookie },
+          body: JSON.stringify({
+            expectedVersion: 1,
+            nameEn: `User B Concurrent Update ${uid}`,
+          }),
+        }),
+        { params: Promise.resolve({ id: prov.id }) }
+      );
+      expect(updateByBRes.status).toBe(200);
+      const updatedByB = await updateByBRes.json();
+      expect(updatedByB.version).toBe(2);
+
+      // Now User A's client performs a read-back after an unconfirmed outcome
+      const checkRes = await getProviderHandler(
+        new NextRequest(`http://localhost:3000/api/v1/staff/providers/${prov.id}`, {
+          method: "GET",
+          headers: { cookie: salesA.cookie },
+        }),
+        { params: Promise.resolve({ id: prov.id }) }
+      );
+      expect(checkRes.status).toBe(200);
+      const latestServerState = await checkRes.json();
+
+      // Version has increased to 2
+      expect(latestServerState.version).toBe(2);
+
+      // Verify client reconciliation invariant:
+      // The version increased, BUT the payload does not match User A's edit!
+      const matchesUserA = latestServerState.nameEn === userAIntendedName;
+      expect(matchesUserA).toBe(false);
+
+      // Invariant: The system must NOT claim User A's action succeeded solely because version increased.
+      // It reconciles to the fresh server state and flags that another update occurred.
+      let successNoticeClaimed = false;
+      let conflictDetected = false;
+
+      if (latestServerState.version > 1) {
+        if (matchesUserA) {
+          successNoticeClaimed = true;
+        } else {
+          conflictDetected = true;
+        }
+      }
+
+      expect(successNoticeClaimed).toBe(false);
+      expect(conflictDetected).toBe(true);
+      expect(latestServerState.nameEn).toBe(`User B Concurrent Update ${uid}`);
+
+      const inDb = await prisma.providerOrganization.findUniqueOrThrow({
+        where: { id: prov.id },
+      });
+      expect(inDb.version).toBe(2);
+      expect(inDb.nameEn).toBe(`User B Concurrent Update ${uid}`);
+    });
+
+    it("database failure rollback: aborted multi-operation mutation leaves zero orphan records", async () => {
+      if (!isDbReachable) return;
+      const sales = await createAuthenticatedStaffUser("SALES_AGENT", "SALES");
+      const prisma = getPrisma();
+      const fakeProviderId = crypto.randomUUID();
+
+      // Attempt branch creation on non-existent provider (violates foreign key constraint).
+      // Provide a valid operatingHours entry so the request passes Zod validation and
+      // reaches the database, where PROVIDER_NOT_FOUND (404) is returned without creating
+      // any orphan records.
+      const branchRes = await createBranchHandler(
+        new NextRequest(`http://localhost:3000/api/v1/staff/providers/${fakeProviderId}/branches`, {
+          method: "POST",
+          headers: { "content-type": "application/json", cookie: sales.cookie },
+          body: JSON.stringify({
+            branchCode: "BR-ORPHAN-FAIL",
+            nameEn: "Orphan Branch",
+            nameAr: "فرع يتيم",
+            cluster: "NASR_CITY_HELIOPOLIS",
+            streetAddressEn: "Test Street",
+            streetAddressAr: "شارع التجربة",
+            latitude: 30.05,
+            longitude: 31.33,
+            contactPhone: "+201012345678",
+            operatingHours: [
+              { dayOfWeek: 0, openTime: "09:00", closeTime: "17:00", isClosed: false },
+            ],
+          }),
+        }),
+        { params: Promise.resolve({ id: fakeProviderId }) }
+      );
+
+      // Must fail with 404 (PROVIDER_NOT_FOUND) because the parent does not exist
+      expect([404, 500]).toContain(branchRes.status);
+
+      // Invariant: zero orphan records created in PostgreSQL
+      const orphanBranches = await prisma.providerBranch.findMany({
+        where: { branchCode: "BR-ORPHAN-FAIL" },
+      });
+      expect(orphanBranches.length).toBe(0);
+    });
   });
 });

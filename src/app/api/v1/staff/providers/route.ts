@@ -3,6 +3,7 @@ import { assertStaffPermission, AuthorizationError } from "@/lib/dal";
 import { getPrisma } from "@/lib/db";
 import { CreateProviderDraftSchema } from "@/lib/provider/validation";
 import { createProviderDraft, ProviderError } from "@/lib/provider/service";
+import { normalizeProviderDto } from "@/lib/provider/dto";
 
 export async function POST(req: NextRequest): Promise<Response> {
   try {
@@ -26,8 +27,9 @@ export async function POST(req: NextRequest): Promise<Response> {
       req.headers.get("x-real-ip") ||
       undefined;
     const provider = await createProviderDraft(actor, parsed.data, clientIp);
+    const dto = normalizeProviderDto(provider);
 
-    return Response.json(provider, {
+    return Response.json(dto, {
       status: 201,
       headers: { "Cache-Control": "no-store" },
     });
@@ -62,7 +64,9 @@ export async function GET(req: NextRequest): Promise<Response> {
       orderBy: { createdAt: "desc" },
     });
 
-    return Response.json(providers, {
+    const dtoList = providers.map(normalizeProviderDto);
+
+    return Response.json(dtoList, {
       status: 200,
       headers: { "Cache-Control": "no-store" },
     });

@@ -3,6 +3,8 @@ import { assertStaffPermission, AuthorizationError } from "@/lib/dal";
 import { ActivateBranchSchema } from "@/lib/provider/validation";
 import { activateBranch, ProviderError } from "@/lib/provider/service";
 
+import { normalizeBranchDto } from "@/lib/provider/dto";
+
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string; branchId: string }> }
@@ -30,7 +32,7 @@ export async function POST(
       undefined;
     const branch = await activateBranch(actor, id, branchId, parsed.data, clientIp);
 
-    return Response.json(branch, {
+    return Response.json(normalizeBranchDto(branch), {
       status: 200,
       headers: { "Cache-Control": "no-store" },
     });

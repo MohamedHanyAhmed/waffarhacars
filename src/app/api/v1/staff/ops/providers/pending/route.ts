@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { assertStaffPermission, AuthorizationError } from "@/lib/dal";
 import { getPrisma } from "@/lib/db";
+import { normalizeProviderDto } from "@/lib/provider/dto";
 
 export async function GET(req: NextRequest): Promise<Response> {
   try {
@@ -18,7 +19,9 @@ export async function GET(req: NextRequest): Promise<Response> {
       orderBy: { submittedAt: "asc" },
     });
 
-    return Response.json(pending, {
+    const dtoList = pending.map(normalizeProviderDto);
+
+    return Response.json(dtoList, {
       status: 200,
       headers: { "Cache-Control": "no-store" },
     });

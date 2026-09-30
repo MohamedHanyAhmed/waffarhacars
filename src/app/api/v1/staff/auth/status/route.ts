@@ -30,6 +30,7 @@ export async function GET(req: NextRequest): Promise<Response> {
 
   const payload: StaffAuthStatusResponse = {
     state: staffSession.state,
+    userId: staffSession.user?.id,
     email: staffSession.user?.email,
     name: staffSession.user?.name,
     department: staffSession.membership?.department,

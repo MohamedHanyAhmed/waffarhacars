@@ -174,10 +174,10 @@ test.describe("Internal Staff Authentication UI Journey (Mocked Endpoints)", () 
     await expect(
       page.getByRole("heading", { name: "WaffarhaCars Internal Staff Portal" })
     ).toBeVisible();
-    await expect(page.getByText("Tarek Mostafa")).toBeVisible();
-    await expect(page.getByText("engineer@waffarhacars.com")).toBeVisible();
-    await expect(page.getByText("OPERATIONS", { exact: true })).toBeVisible();
-    await expect(page.getByText("EMP-100200")).toBeVisible();
+    await expect(page.getByRole("main").getByText("Tarek Mostafa")).toBeVisible();
+    await expect(page.getByRole("main").getByText("engineer@waffarhacars.com")).toBeVisible();
+    await expect(page.getByRole("main").getByText("OPERATIONS", { exact: true })).toBeVisible();
+    await expect(page.getByRole("main").getByText("EMP-100200")).toBeVisible();
     await expect(page.getByText("Mandatory TOTP Enforced")).toBeVisible();
     await expect(
       page.getByText("Zero-Bypass Policy: Re-verification required on every session")
@@ -260,10 +260,10 @@ test.describe("Internal Staff Authentication UI Journey (Mocked Endpoints)", () 
     await expect(
       page.getByRole("heading", { name: "WaffarhaCars Internal Staff Portal" })
     ).toBeVisible();
-    await expect(page.getByText("Staff Specialist")).toBeVisible();
-    await expect(page.getByText("admin@waffarhacars.com")).toBeVisible();
-    await expect(page.getByText("ADMIN", { exact: true })).toBeVisible();
-    await expect(page.getByText("EMP-999888")).toBeVisible();
+    await expect(page.getByRole("main").getByText("Staff Specialist")).toBeVisible();
+    await expect(page.getByRole("main").getByText("admin@waffarhacars.com")).toBeVisible();
+    await expect(page.getByRole("main").getByText("ADMIN", { exact: true })).toBeVisible();
+    await expect(page.getByRole("main").getByText("EMP-999888")).toBeVisible();
     await expect(page.getByText("Mandatory TOTP Enforced")).toBeVisible();
     await expect(
       page.getByText("Zero-Bypass Policy: Re-verification required on every session")

@@ -146,6 +146,7 @@ export async function createProviderDraft(
           status: "DRAFT",
           version: 1,
         },
+        include: { branches: true },
       });
 
       const ipFingerprint = clientIp ? createAuditFingerprint(clientIp) : null;
@@ -234,6 +235,7 @@ export async function updateProviderDraft(
           contactPhone: input.contactPhone,
           version: { increment: 1 },
         },
+        include: { branches: true },
       });
 
       const ipFingerprint = clientIp ? createAuditFingerprint(clientIp) : null;
@@ -541,6 +543,7 @@ export async function submitProviderForReview(
         rejectionReason: null,
         version: { increment: 1 },
       },
+      include: { branches: true },
     });
 
     const ipFingerprint = clientIp ? createAuditFingerprint(clientIp) : null;
@@ -985,6 +988,7 @@ export async function activateProvider(
         rejectionReason: null,
         version: { increment: 1 },
       },
+      include: { branches: true },
     });
 
     const ipFingerprint = clientIp ? createAuditFingerprint(clientIp) : null;
@@ -1074,6 +1078,7 @@ export async function rejectProvider(
         rejectionReason: input.rejectionReason,
         version: { increment: 1 },
       },
+      include: { branches: true },
     });
 
     if (input.remediable) {
@@ -1183,6 +1188,7 @@ export async function pauseProvider(
         pausedAt: new Date(),
         version: { increment: 1 },
       },
+      include: { branches: true },
     });
 
     const ipFingerprint = clientIp ? createAuditFingerprint(clientIp) : null;
@@ -1258,6 +1264,7 @@ export async function resumeProvider(
         pausedAt: null,
         version: { increment: 1 },
       },
+      include: { branches: true },
     });
 
     const ipFingerprint = clientIp ? createAuditFingerprint(clientIp) : null;
