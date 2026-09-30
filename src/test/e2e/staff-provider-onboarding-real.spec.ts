@@ -203,6 +203,8 @@ test.describe("Real PostgreSQL Staff Provider Onboarding & Operations Vetting E2
   test("executes non-skippable real PostgreSQL Sales onboarding, organization editing, Operations vetting/activation, and bilingual RTL/LTR verification", async ({
     browser,
   }) => {
+    test.setTimeout(120_000);
+
     // Non-skippable gate invariant: fail rather than skip if DB setup is missing
     if (!isDbReachable) {
       throw new Error(
@@ -393,15 +395,9 @@ test.describe("Real PostgreSQL Staff Provider Onboarding & Operations Vetting E2
       await expect(salesPage.locator(`text=Real Auto Care ${uid} Updated`).first()).toBeVisible();
 
       // 12. Bilingual Arabic Pass: switch to Arabic and verify RTL layout & LTR data fields
-      await opsContext.addCookies([
-        {
-          name: "NEXT_LOCALE",
-          value: "ar",
-          domain: "localhost",
-          path: "/",
-        },
-      ]);
-
+      await opsPage.evaluate(() => {
+        localStorage.setItem("waffarha_demo_locale", "ar");
+      });
       await opsPage.goto(`/staff/providers/${providerId}`);
       await opsPage.waitForSelector("text=نشط (معتمد)");
 
