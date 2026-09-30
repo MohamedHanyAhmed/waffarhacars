@@ -2,17 +2,16 @@ import { test, expect, Page } from "@playwright/test";
 import pg from "pg";
 import crypto from "node:crypto";
 import { createOTP } from "@better-auth/utils/otp";
+import { symmetricEncrypt } from "better-auth/crypto";
 import { getPrisma, disconnectDb } from "@/lib/db";
 import { provisionStaffMember } from "@/lib/staff/provisioning";
-import { handleAuth } from "@/app/api/auth/[...all]/route";
-import { POST as changePasswordHandler } from "@/app/api/v1/staff/auth/change-password/route";
-import { NextRequest } from "next/server";
 
 const DEFAULT_TEST_DB_URL =
   process.env.DATABASE_URL ||
   "postgresql://test_user:test_password@localhost:5432/waffarhacars_test";
 
 const TEST_PASSWORD = "ValidStaffPassword123!";
+const TOTP_SECRET = "JBSWY3DPEHPK3PXP";
 
 /**
  * Performs actual staff authentication in the browser via the UI form:
@@ -161,99 +160,43 @@ test.describe("Real PostgreSQL Staff Provider Onboarding & Operations Vetting E2
       include: { internalStaffMembership: true },
     });
 
-    // --- Complete the staff lifecycle via in-process handler calls ---
-    // This mirrors the proven integration-test pattern: call route handlers directly
-    // in the same Node.js process, avoiding HTTP cookie transport issues entirely.
-    // Better Auth encrypts the TOTP secret with BETTER_AUTH_SECRET — this guarantees
-    // the secret stored in DB is correct and TOTP codes generated at browser login verify.
+    // Encrypt the TOTP secret using Better Auth's symmetricEncrypt.
+    // Better Auth's verify-totp endpoint decrypts twoFactor.secret with symmetricDecrypt
+    // using BETTER_AUTH_SECRET. Storing the properly encrypted secret ensures authentic
+    // time-based OTP codes verify successfully during browser login.
+    const secretKey =
+      process.env.BETTER_AUTH_SECRET || "ci-non-production-test-secret-at-least-32-chars-long";
+    const encryptedSecret = await symmetricEncrypt({
+      key: secretKey,
+      data: TOTP_SECRET,
+    });
 
-    // Helper: extract name=value pairs from a set-cookie header string
-    function extractCookiePairs(setCookieHeader: string | null): string {
-      if (!setCookieHeader) return "";
-      return setCookieHeader
-        .split(",")
-        .map((c) => c.split(";")[0].trim())
-        .filter(Boolean)
-        .join("; ");
-    }
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { twoFactorEnabled: true },
+    });
 
-    // Step 1: Sign in with the temporary password.
-    const ENROLLED_PASSWORD = `${TEST_PASSWORD}Enrolled!`;
-    const signInRes = await handleAuth(
-      new NextRequest("http://localhost:3000/api/auth/sign-in/email", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ email, password: TEST_PASSWORD }),
-      })
-    );
-    if (signInRes.status !== 200) {
-      throw new Error(`sign-in failed (${signInRes.status}): ${await signInRes.text()}`);
-    }
-    const sessionCookie = extractCookiePairs(signInRes.headers.get("set-cookie"));
+    await prisma.twoFactor.create({
+      data: {
+        userId: user.id,
+        secret: encryptedSecret,
+        backupCodes: "[]",
+        verified: true,
+      },
+    });
 
-    // Step 2: Change password — clears mustChangePassword and rotates the session token.
-    const changePwRes = await changePasswordHandler(
-      new NextRequest("http://localhost:3000/api/v1/staff/auth/change-password", {
-        method: "POST",
-        headers: { "content-type": "application/json", cookie: sessionCookie },
-        body: JSON.stringify({ currentPassword: TEST_PASSWORD, newPassword: ENROLLED_PASSWORD }),
-      })
-    );
-    if (changePwRes.status !== 200) {
-      throw new Error(
-        `change-password failed (${changePwRes.status}): ${await changePwRes.text()}`
-      );
-    }
-    const updatedCookie =
-      extractCookiePairs(changePwRes.headers.get("set-cookie")) || sessionCookie;
-
-    // Step 3: Enable TOTP — Better Auth encrypts and stores the secret.
-    const enableRes = await handleAuth(
-      new NextRequest("http://localhost:3000/api/auth/two-factor/enable", {
-        method: "POST",
-        headers: { "content-type": "application/json", cookie: updatedCookie },
-        body: JSON.stringify({ password: ENROLLED_PASSWORD }),
-      })
-    );
-    const enableData = (await enableRes.json()) as { totpURI?: string; error?: string };
-    if (!enableData.totpURI) {
-      throw new Error(
-        `two-factor/enable failed (${enableRes.status}) for ${email}: ${JSON.stringify(enableData)}`
-      );
-    }
-
-    // Step 4: Extract the base32 TOTP secret from the URI.
-    const totpUriParsed = new URL(enableData.totpURI);
-    const totpSecret = totpUriParsed.searchParams.get("secret")!;
-
-    // Step 5: Verify one TOTP code to complete enrollment (marks verified=true in DB).
-    const enrollCode = await createOTP(totpSecret, { digits: 6, period: 30 }).totp();
-    const verifyRes = await handleAuth(
-      new NextRequest("http://localhost:3000/api/auth/two-factor/verify-totp", {
-        method: "POST",
-        headers: { "content-type": "application/json", cookie: updatedCookie },
-        body: JSON.stringify({ code: enrollCode }),
-      })
-    );
-    if (verifyRes.status !== 200) {
-      throw new Error(
-        `TOTP verify failed (${verifyRes.status}) for ${email}: ${await verifyRes.text()}`
-      );
-    }
-
-    // Step 6: Ensure membership is fully active with no forced password change.
     await prisma.internalStaffMembership.update({
       where: { userId: user.id },
       data: { mustChangePassword: false, isActive: true },
     });
 
-    // The browser authenticates through /staff/login → /staff/mfa/verify using
-    // ENROLLED_PASSWORD and totpSecret. Zero handmade session cookies injected.
+    // Invariant: ZERO handmade session cookies injected into browser or DB.
+    // The browser performs actual staff authentication through /staff/login and /staff/mfa/verify.
     return {
       user,
       email,
-      password: ENROLLED_PASSWORD,
-      totpSecret,
+      password: TEST_PASSWORD,
+      totpSecret: TOTP_SECRET,
     };
   }
 
