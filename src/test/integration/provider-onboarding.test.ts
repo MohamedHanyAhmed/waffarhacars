@@ -2961,6 +2961,12 @@ describe("Sales-Managed Provider & Branch Onboarding with Operations Activation 
       expect(successNoticeClaimed).toBe(false);
       expect(conflictDetected).toBe(true);
       expect(latestServerState.nameEn).toBe(`User B Concurrent Update ${uid}`);
+
+      const inDb = await prisma.providerOrganization.findUniqueOrThrow({
+        where: { id: prov.id },
+      });
+      expect(inDb.version).toBe(2);
+      expect(inDb.nameEn).toBe(`User B Concurrent Update ${uid}`);
     });
 
     it("database failure rollback: aborted multi-operation mutation leaves zero orphan records", async () => {

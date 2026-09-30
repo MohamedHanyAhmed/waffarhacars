@@ -147,7 +147,7 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
     return () => {
       isMounted = false;
     };
-  }, [providerId, router, reloadTrigger]);
+  }, [providerId, router, reloadTrigger, t]);
 
   const handleRecheckStatus = async () => {
     if (!provider) return;

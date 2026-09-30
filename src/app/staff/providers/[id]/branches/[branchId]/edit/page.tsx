@@ -124,7 +124,7 @@ export default function EditBranchPage({
     return () => {
       isMounted = false;
     };
-  }, [providerId, branchId, router, reloadTrigger]);
+  }, [providerId, branchId, router, reloadTrigger, t]);
 
   const validate = (): boolean => {
     const errors: Record<string, string> = {};

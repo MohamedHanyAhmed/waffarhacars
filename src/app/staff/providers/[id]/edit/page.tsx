@@ -98,7 +98,7 @@ export default function EditProviderOrganizationPage({
     return () => {
       isMounted = false;
     };
-  }, [providerId, router]);
+  }, [providerId, router, t]);
 
   const validate = (): boolean => {
     const errors: Record<string, string> = {};
