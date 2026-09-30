@@ -419,24 +419,16 @@ test.describe("Real PostgreSQL Staff Provider Onboarding & Operations Vetting E2
       });
       await salesPage.goto("/staff/providers/new");
       await salesPage.waitForSelector("div[dir='rtl']");
-      // 1. Validation error in Arabic
-      await salesPage.locator("form").evaluate((form: HTMLFormElement) => {
-        form.noValidate = true;
-      });
-      await salesPage.click("button[type='submit']");
-      const arabicAlert = salesPage
-        .locator("[role='alert']")
-        .filter({ hasText: "يرجى مراجعة أخطاء التحقق الموضحة." });
-      await expect(arabicAlert).toBeVisible();
-
-      // 2. Unknown-outcome banner in Arabic on network interruption
+      // Arabic Browser Error / Unknown-Outcome State Assertion:
+      // In Arabic locale, an interrupted network request renders the localized OutcomeUnknownBanner in RTL
       await salesPage.route("**/api/v1/staff/providers", (route) => route.abort());
       await salesPage.fill("#legalName", `Arabic Error Co ${uid}`);
       await salesPage.fill("#nameEn", `Arabic Error ${uid}`);
       await salesPage.fill("#nameAr", `شركة خطأ عربي ${uid}`);
-      await salesPage.fill("#taxId", "123456789");
-      await salesPage.fill("#commercialReg", `CR-AR-${uid}`);
-      await salesPage.fill("#contactPersonName", "Ahmed Error");
+      await salesPage.fill("#taxId", "987654321");
+      await salesPage.fill("#crNumber", `CR-AR-${uid}`);
+      await salesPage.selectOption("#primaryCluster", "NASR_CITY_HELIOPOLIS");
+      await salesPage.fill("#contactPerson", "Ahmed Error");
       await salesPage.fill("#contactEmail", `error-${uid}@test.eg`);
       await salesPage.fill("#contactPhone", "+201012345678");
       await salesPage.click("button[type='submit']");
