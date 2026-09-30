@@ -286,7 +286,10 @@ test.describe("Real PostgreSQL Staff Provider Onboarding & Operations Vetting E2
       expect(dbProviderAfterEdit.version).toBe(2);
 
       // 5. Sales creates physical branch draft with explicit coordinates & confirmed operating hours
-      await salesPage.locator(`a[href='/staff/providers/${providerId}/branches/new']`).click();
+      await salesPage
+        .locator(`a[href='/staff/providers/${providerId}/branches/new']`)
+        .first()
+        .click();
       await salesPage.waitForURL(`**/staff/providers/${providerId}/branches/new`);
 
       await salesPage.fill("#branchCode", `BR-REAL-${uid}`);
@@ -314,11 +317,11 @@ test.describe("Real PostgreSQL Staff Provider Onboarding & Operations Vetting E2
       expect(Number(dbBranch.longitude)).toBeCloseTo(31.3321, 4);
 
       // 6. Sales submits provider for review
-      await salesPage.click("button:has-text('Submit for Review')");
+      await salesPage.locator("button:has-text('Submit for Review')").first().click();
       await salesPage.waitForSelector("text=Submission Summary & Review");
-      await salesPage.click("button:has-text('Submit for Operations Review')");
+      await salesPage.locator("button:has-text('Submit for Operations Review')").first().click();
       await salesPage.waitForSelector("text=Confirm Submission for Operations Review");
-      await salesPage.click("button:has-text('Yes, Submit for Review')");
+      await salesPage.locator("button:has-text('Yes, Submit for Review')").first().click();
 
       await expect(salesPage.locator("text=Pending Review").first()).toBeVisible();
 
@@ -343,7 +346,7 @@ test.describe("Real PostgreSQL Staff Provider Onboarding & Operations Vetting E2
       await expect(opsPage.locator("text=Pending Review").first()).toBeVisible();
 
       // 9. Operations vets and activates branch
-      await opsPage.click("button:has-text('Vet & Activate')");
+      await opsPage.locator("button:has-text('Vet & Activate')").first().click();
       await opsPage.waitForSelector("text=Confirm Branch Activation");
 
       await opsPage.check("#check-legal-identity");
@@ -351,7 +354,10 @@ test.describe("Real PostgreSQL Staff Provider Onboarding & Operations Vetting E2
       await opsPage.check("#check-contact-hours");
       await opsPage.fill("#evidence-document-ref", `DOC-REAL-OPS-${uid}`);
 
-      await opsPage.locator("div[role='dialog'] button:has-text('Activate Branch')").click();
+      await opsPage
+        .locator("div[role='dialog'] button:has-text('Activate Branch')")
+        .first()
+        .click();
       await opsPage.waitForTimeout(500);
 
       // Verify branch in DB is ACTIVE with complete vetting attestation
