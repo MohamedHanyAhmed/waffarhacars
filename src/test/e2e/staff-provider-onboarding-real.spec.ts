@@ -435,7 +435,7 @@ test.describe("Real PostgreSQL Staff Provider Onboarding & Operations Vetting E2
 
       const unknownBanner = salesPage.locator('[data-testid="outcome-unknown-banner"]');
       await expect(unknownBanner).toBeVisible();
-      await expect(unknownBanner).toContainText("نتيجة الطلب غير مؤكدة");
+      await expect(unknownBanner).toContainText("حالة الطلب غير مؤكدة");
       await expect(salesPage.locator('[data-testid="deliberate-retry-btn"]')).not.toBeVisible();
 
       // 13. Audit trail verification in persistent PostgreSQL database
