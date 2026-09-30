@@ -211,7 +211,7 @@ test.describe("Real PostgreSQL Staff Provider Onboarding & Operations Vetting E2
     }
 
     const prisma = getPrisma();
-    const uid = crypto.randomUUID().slice(0, 6);
+    const uid = crypto.randomUUID().slice(0, 6).toUpperCase();
     const taxId = `${Math.floor(100000000 + Math.random() * 900000000)}`;
 
     // Create real staff members in PostgreSQL
