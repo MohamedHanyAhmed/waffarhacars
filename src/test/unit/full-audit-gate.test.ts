@@ -168,6 +168,20 @@ describe("expiring full npm audit gate", () => {
     expect(() => evaluateAuditReport(report, lock, reviewTime)).toThrow(/dependency path/);
   });
 
+  it("accepts the exact clean-Linux fast-glob effect variant observed in CI", () => {
+    const report = expectedReport();
+    report.vulnerabilities["fast-glob"].effects = ["@next/eslint-plugin-next", "tailwindcss"];
+    expect(evaluateAuditReport(report, lock, reviewTime).allowed).toContain("fast-glob");
+  });
+
+  it("rejects any third fast-glob effect variant", () => {
+    const report = expectedReport();
+    report.vulnerabilities["fast-glob"].effects = ["@next/eslint-plugin-next", "new-package"];
+    expect(() => evaluateAuditReport(report, lock, reviewTime)).toThrow(
+      /dependency path or directness/
+    );
+  });
+
   it("rejects missing and malformed audit JSON", () => {
     expect(() => parseAuditJson("")).toThrow(/no JSON/);
     expect(() => parseAuditJson("{not json")).toThrow(/malformed JSON/);

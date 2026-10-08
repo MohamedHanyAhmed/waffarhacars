@@ -30,6 +30,8 @@ const ALLOWED_HIGH = Object.freeze({
     direct: false,
     via: ["micromatch"],
     effects: ["@next/eslint-plugin-next"],
+    // Clean Linux npm 11 also reports the already-known Tailwind propagation.
+    alternateEffects: ["@next/eslint-plugin-next", "tailwindcss"],
     nodes: ["node_modules/fast-glob", "node_modules/tailwindcss/node_modules/fast-glob"],
   },
   "@next/eslint-plugin-next": {
@@ -141,10 +143,13 @@ export function evaluateAuditReport(report, lock, now = new Date()) {
     if (
       finding.isDirect !== expected.direct ||
       !sameMembers(finding.nodes, expected.nodes) ||
-      !sameMembers(finding.effects, expected.effects)
+      !(
+        sameMembers(finding.effects, expected.effects) ||
+        (expected.alternateEffects && sameMembers(finding.effects, expected.alternateEffects))
+      )
     ) {
       fail(
-        `dependency path or directness changed for ${name}: direct=${finding.isDirect}, nodes=${JSON.stringify(finding.nodes)}, effects=${JSON.stringify(finding.effects)}; expected direct=${expected.direct}, nodes=${JSON.stringify(expected.nodes)}, effects=${JSON.stringify(expected.effects)}`
+        `dependency path or directness changed for ${name}: direct=${finding.isDirect}, nodes=${JSON.stringify(finding.nodes)}, effects=${JSON.stringify(finding.effects)}; expected direct=${expected.direct}, nodes=${JSON.stringify(expected.nodes)}, effects=${JSON.stringify(expected.effects)}${expected.alternateEffects ? ` or ${JSON.stringify(expected.alternateEffects)}` : ""}`
       );
     }
 
