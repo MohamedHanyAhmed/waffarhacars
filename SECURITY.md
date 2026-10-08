@@ -66,5 +66,6 @@ _Note_: Timelines are operational guidance targets and do not constitute legally
 ## 5. Security Controls in Development
 
 - **Automated CI Security Gate**: GitHub Actions runs `npm audit --omit=dev --audit-level=high` and blocks high/critical dependencies.
+- **Temporary full-audit exception**: The full dependency audit remains blocking for every other high/critical finding. Its checker permits only the verified dev-only transitive propagation of [GHSA-vfj7-8cjw-p6xm](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm) in `braces` through the exact pinned lockfile paths; all findings, including moderate ones, remain visible in CI. The exception expires **2026-11-08 23:59:59 UTC** and then fails closed until removed or explicitly re-reviewed. **Review owner: @MohamedHanyAhmed.** Review sooner if a patched version becomes available or a dependency path changes. Production audit is never excepted.
 - **Dependency Scanning**: Dependabot performs weekly automated dependency reviews.
 - **Least Privilege**: Workflows run with explicit minimal token permissions (`contents: read`).

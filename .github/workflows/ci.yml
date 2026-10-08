@@ -62,8 +62,8 @@ jobs:
       - name: Production Security Audit Gate (Fail on High or Critical)
         run: npm audit --omit=dev --audit-level=high
 
-      - name: Full Security Audit Report (Fail on High or Critical)
-        run: npm audit --audit-level=high
+      - name: Full Security Audit Gate (Exact Expiring Dev-Only Exception)
+        run: npm run audit:full:gate
 
       - name: Formatting Check
         run: npm run format:check
