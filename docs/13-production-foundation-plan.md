@@ -309,7 +309,7 @@ Standard UUIDv4 primary keys exclusively for all entities in the MVP, integer mi
 15. `customer_vehicles`: Customer garage entries (Make, Model, Year, Fuel — **no license plate numbers**).
 16. `offers`: Merchant offers linking services to branches.
 17. `offer_revisions`: Maker-checker pricing versions (`draft`, `pending_approval`, `active`, `rejected`).
-18. `offer_evidences`: Mandatory photos/documents verifying street price.
+18. Price/commercial evidence packet IDs, evidence type/date, and reviewer attestations are stored on immutable offer revisions. This is a reference and human-attestation workflow only; PR 3C-A has no file upload, evidence storage, or programmatic file verification.
 19. `reservations`: The core transactional aggregate.
 20. `reservation_snapshots`: Immutable snapshot of price, inclusions, exclusions at booking.
 21. `discount_check_in_passes`: Opaque arrival check-in token hashes and appointment window constraints.
@@ -406,14 +406,17 @@ A runtime environment variable alone does not prove demo code is excluded from a
 
 ## 12. PR-by-PR Implementation Sequence
 
-The transition from the clickable showcase to the production backend will proceed through seven small, independently reviewable Pull Requests:
+The transition from the clickable showcase to the production backend is split into reviewable slices. Provider onboarding backend (PR 3A) and its internal UI (PR 3B) are complete. PR 3C-A adds the controlled service catalogue and non-publishing offer approval API; PR 3C-B will connect the staff UI. Approval is not customer publication.
 
 ```mermaid
 graph TD
     PR0["PR 0: Runtime, CI & Repository Hardening (Gate 0)"] --> PR1["PR 1: Database Foundation & Health Infrastructure"]
     PR1 --> PR2["PR 2: Identity, Sessions, MFA & RBAC"]
-    PR2 --> PR3["PR 3: Provider, Branch, Catalog & Offer Maker-Checker"]
-    PR3 --> PR4["PR 4: Customer Vehicles, Discovery, Reservation & Pass"]
+    PR2 --> PR3A["PR 3A: Provider/Branch Onboarding API"]
+    PR3A --> PR3B["PR 3B: Staff Onboarding UI"]
+    PR3B --> PR3CA["PR 3C-A: Controlled Catalog + Offer Approval API"]
+    PR3CA --> PR3CB["PR 3C-B: Bilingual Staff Offer UI"]
+    PR3CB --> PR4["PR 4: Vehicles, Discovery, Reservation & Pass"]
     PR4 --> PR5["PR 5: Check-in, Mutual PIN Settlement & Outbox"]
     PR5 --> PR6["PR 6: Commission Statements, Reconciliation & Support Console"]
 ```
@@ -438,12 +441,23 @@ graph TD
 - **API Contracts:** `/api/v1/auth/otp/request`, `/api/v1/auth/otp/verify`, `/api/v1/auth/session`, `/api/v1/auth/logout`.
 - **Test Strategy:** Unit tests for OTP rate-limiting and E.164 phone normalization; integration tests for session rotation and cookie security flags.
 
-### PR 3: Provider Onboarding, Catalog & Offer Maker-Checker
+### PR 3A / PR 3B: Provider Onboarding Backend and Staff UI
 
-- **Business Outcome:** Workshop branch registration, standard service definitions, and sales offer draft wizard with mandatory price evidence and ops approval workflow.
-- **Schema Changes:** `provider_branches`, `service_categories`, `service_definitions`, `offers`, `offer_revisions`, `offer_evidences`.
-- **API Contracts:** `/api/v1/provider/branches`, `/api/v1/catalog/services`, `/api/v1/sales/offers`, `/api/v1/ops/offers/pending`, `/api/v1/ops/offers/:id/approve`.
-- **Test Strategy:** Automated tests enforcing maker-checker segregation (creator cannot approve their own draft); presigned upload validation.
+- **Business Outcome:** Sales-managed provider and branch onboarding with individual Operations vetting; an internal UI for that workflow.
+- **Status:** Implemented in earlier slices. `ACTIVE` means provider/branch vetting passed; it does not mean customer publication.
+
+### PR 3C-A: Controlled Catalog and Offer Approval API
+
+- **Business Outcome:** Operations-managed bilingual service definitions and Sales-entered fixed-scope offer revisions, submitted to Operations for approval.
+- **Scope:** Four seeded broad categories only; no provider-specific services, prices, or offers are seeded. General-repair definitions are quote-only. Accessories require an SKU. Offer approval sets an internal approved-revision pointer only and never makes the offer public.
+- **Schema:** `service_categories`, `service_definitions`, `offers`, `offer_revisions`; evidence references and attestations live on the revision. EGP values are integer piastres; the commission basis/rate is stored from explicit provider agreement, with no accrual or automatic 10% change.
+- **API Contracts:** `GET /api/v1/staff/catalog/services`; `POST/PATCH /api/v1/staff/ops/catalog/services`; `POST/GET /api/v1/staff/offers`; `PATCH /api/v1/staff/offers/:offerId/revisions/:revisionId`; submit, pending-review, approve and reject routes under `/api/v1/staff`.
+- **Evidence Limit:** Sales records an opaque internal packet ID, type, date and price basis. Operations attests to personally inspecting the packet and verifying price, scope and provider consent. The app does not store or fetch underlying files. A company-controlled packet repository, Operations access and named retrieval/retention owner are mandatory launch prerequisites and remain unresolved until designated.
+- **Test Strategy:** Authenticated API tests with real session resolution and PostgreSQL 17; maker-checker, immutable revisions, row locking, duplicate request retries, audit rollback, branch deactivation races, and final persistent-state assertions.
+
+### PR 3C-B: Bilingual Staff Offer UI
+
+- **Business Outcome:** Sales and Operations use the PR 3C-A APIs through a bilingual internal workflow. No customer discovery or publication.
 
 ### PR 4: Customer Vehicles, Discovery, Reservation & Pass
 

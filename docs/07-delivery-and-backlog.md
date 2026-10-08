@@ -4,6 +4,10 @@
 
 Use shaped, time-boxed bets rather than an undifferentiated backlog. Basecamp's Shape Up describes appetite-based shaping, six-week cycles and a circuit breaker for work that cannot ship inside its bet.^1 This plan adapts that discipline to AI-assisted engineering: smaller reviewable vertical slices inside each bet, with human acceptance at the end of every PR.
 
+## Current implementation boundary
+
+Provider/branch onboarding backend (PR 3A) and its staff UI (PR 3B) are complete. PR 3C-A is the production controlled-catalog and non-publishing offer-approval API slice; PR 3C-B still needs the bilingual staff UI. Customer discovery, vehicle compatibility, reservation, center check-in, customer-confirmed completion and commission collection remain unimplemented production MVP work. The clickable showcase uses synthetic/demo state and is not evidence that these production capabilities exist.
+
 ## Gate 0 — two-week evidence sprint, before product code
 
 Deliverables:
@@ -27,7 +31,7 @@ Outcome: one customer can reserve, attend, pay a center, mutually confirm comple
 
 - repository rules, architecture tests, environments, CI, secrets, logging;
 - identity/OTP abstraction, roles and audit;
-- provider, branch, service template and offer admin skeleton;
+- provider and branch onboarding (implemented in PR 3A/3B); controlled service templates and non-publishing offer approval (PR 3C-A); bilingual offer UI (PR 3C-B still required);
 - money/time/localization primitives.
 
 ### Slice 2: discover

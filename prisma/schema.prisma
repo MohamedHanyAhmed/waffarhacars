@@ -33,6 +33,12 @@ model User {
   submittedProviders      ProviderOrganization[]   @relation("ProviderSubmittedBy")
   activatedProviders      ProviderOrganization[]   @relation("ProviderActivatedBy")
   vettedBranches          ProviderBranch[]         @relation("BranchVettedBy")
+  createdServiceDefinitions ServiceDefinition[]    @relation("ServiceDefinitionCreatedBy")
+  updatedServiceDefinitions ServiceDefinition[]    @relation("ServiceDefinitionUpdatedBy")
+  createdOffers             Offer[]                  @relation("OfferCreatedBy")
+  createdOfferRevisions     OfferRevision[]          @relation("OfferRevisionCreatedBy")
+  submittedOfferRevisions   OfferRevision[]          @relation("OfferRevisionSubmittedBy")
+  decidedOfferRevisions     OfferRevision[]          @relation("OfferRevisionDecidedBy")
 
   @@unique([email])
   @@unique([phoneNumber])
@@ -249,6 +255,35 @@ enum CairoCluster {
   OCTOBER_ZAYED
 }
 
+enum ServicePricingMode {
+  FIXED_SCOPE
+  QUOTE_REQUIRED
+}
+
+enum OfferRevisionStatus {
+  DRAFT
+  PENDING_REVIEW
+  APPROVED
+  REJECTED
+}
+
+enum OfferBookingRule {
+  APPOINTMENT_REQUIRED
+  WALK_IN_ALLOWED
+  CONTACT_TO_BOOK
+}
+
+enum OfferEvidenceType {
+  PROVIDER_PRICE_LIST
+  WRITTEN_QUOTE
+  PROVIDER_WRITTEN_CONFIRMATION
+  OTHER
+}
+
+enum OfferCommissionBasis {
+  DISCOUNTED_CUSTOMER_PRICE
+}
+
 model ProviderOrganization {
   id                           String         @id @default(dbgenerated("pg_catalog.gen_random_uuid()")) @db.Uuid
   nameEn                       String         @db.VarChar(128)
@@ -283,6 +318,7 @@ model ProviderOrganization {
   updatedAt                    DateTime       @updatedAt
 
   branches                     ProviderBranch[]
+  offers                       Offer[]
 
   @@index([status, primaryCluster])
   @@index([createdByUserId])
@@ -329,7 +365,138 @@ model ProviderBranch {
   updatedAt              DateTime             @updatedAt
 
   @@unique([providerOrganizationId, branchCode])
+  @@unique([id, providerOrganizationId])
   @@index([cluster, status])
+  offers Offer[]
   @@map("provider_branches")
 }
 
+model ServiceCategory {
+  id          String              @id @default(dbgenerated("pg_catalog.gen_random_uuid()")) @db.Uuid
+  code        String              @unique @db.VarChar(48)
+  nameEn      String              @db.VarChar(100)
+  nameAr      String              @db.VarChar(100)
+  sortOrder   Int                 @default(0)
+  isActive    Boolean             @default(true)
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+  definitions ServiceDefinition[]
+
+  @@index([isActive, sortOrder])
+  @@map("service_categories")
+}
+
+model ServiceDefinition {
+  id              String            @id @default(dbgenerated("pg_catalog.gen_random_uuid()")) @db.Uuid
+  code            String            @unique @db.VarChar(64)
+  categoryId      String            @db.Uuid
+  category        ServiceCategory   @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  nameEn          String            @db.VarChar(160)
+  nameAr          String            @db.VarChar(160)
+  scopeEn         String            @db.VarChar(1000)
+  scopeAr         String            @db.VarChar(1000)
+  pricingMode     ServicePricingMode
+  itemSku         String?           @db.VarChar(80)
+  isActive        Boolean           @default(true)
+  version         Int               @default(1)
+  createdByUserId String            @db.Uuid
+  createdByUser   User              @relation("ServiceDefinitionCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  updatedByUserId String            @db.Uuid
+  updatedByUser   User              @relation("ServiceDefinitionUpdatedBy", fields: [updatedByUserId], references: [id], onDelete: Restrict)
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  offers          Offer[]
+  revisions       OfferRevision[]
+
+  @@index([categoryId, isActive, nameEn])
+  @@map("service_definitions")
+}
+
+model Offer {
+  id                        String               @id @default(dbgenerated("pg_catalog.gen_random_uuid()")) @db.Uuid
+  providerOrganizationId    String               @db.Uuid
+  providerOrganization      ProviderOrganization @relation(fields: [providerOrganizationId], references: [id], onDelete: Restrict)
+  branchId                  String               @db.Uuid
+  branch                    ProviderBranch       @relation(fields: [branchId, providerOrganizationId], references: [id, providerOrganizationId], onDelete: Restrict)
+  serviceDefinitionId       String               @db.Uuid
+  serviceDefinition         ServiceDefinition    @relation(fields: [serviceDefinitionId], references: [id], onDelete: Restrict)
+  createdByUserId           String               @db.Uuid
+  createdByUser             User                 @relation("OfferCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  currentApprovedRevisionId String?              @db.Uuid
+  currentApprovedRevision   OfferRevision?       @relation("CurrentApprovedOfferRevision", fields: [currentApprovedRevisionId, id], references: [id, offerId], onDelete: Restrict)
+  revisions                 OfferRevision[]      @relation("OfferRevisions")
+  nextRevisionNumber        Int                  @default(2)
+  creationRequestId          String               @unique @db.Uuid
+  createdAt                 DateTime             @default(now())
+  updatedAt                 DateTime             @updatedAt
+
+  @@unique([id, providerOrganizationId])
+  @@index([providerOrganizationId, branchId, createdAt])
+  @@map("offers")
+}
+
+model OfferRevision {
+  id                      String                 @id @default(dbgenerated("pg_catalog.gen_random_uuid()")) @db.Uuid
+  offerId                 String                 @db.Uuid
+  offer                   Offer                  @relation("OfferRevisions", fields: [offerId], references: [id], onDelete: Restrict)
+  revisionNumber          Int
+  status                  OfferRevisionStatus    @default(DRAFT)
+  version                 Int                    @default(1)
+  requestId               String                 @unique @db.Uuid
+  serviceDefinitionId     String                 @db.Uuid
+  serviceDefinition       ServiceDefinition      @relation(fields: [serviceDefinitionId], references: [id], onDelete: Restrict)
+  categoryCode            String                 @db.VarChar(48)
+  categoryNameEn          String                 @db.VarChar(100)
+  categoryNameAr          String                 @db.VarChar(100)
+  serviceCode             String                 @db.VarChar(64)
+  serviceNameEn           String                 @db.VarChar(160)
+  serviceNameAr           String                 @db.VarChar(160)
+  serviceScopeEn          String                 @db.VarChar(1000)
+  serviceScopeAr          String                 @db.VarChar(1000)
+  titleEn                 String                 @db.VarChar(160)
+  titleAr                 String                 @db.VarChar(160)
+  includedLaborEn         String                 @db.VarChar(1000)
+  includedLaborAr         String                 @db.VarChar(1000)
+  includedPartsEn         String                 @db.VarChar(1000)
+  includedPartsAr         String                 @db.VarChar(1000)
+  excludedLaborEn         String                 @db.VarChar(1000)
+  excludedLaborAr         String                 @db.VarChar(1000)
+  excludedPartsEn         String                 @db.VarChar(1000)
+  excludedPartsAr         String                 @db.VarChar(1000)
+  bookingRule             OfferBookingRule
+  durationMinutes         Int
+  validFrom               DateTime
+  validUntil              DateTime
+  normalPriceMinor        BigInt
+  customerPriceMinor      BigInt
+  evidencePacketId        String                 @db.VarChar(64)
+  evidenceType            OfferEvidenceType
+  evidenceDate            DateTime
+  priceBasisNotes         String                 @db.VarChar(1000)
+  commercialTermsPacketId String                 @db.VarChar(64)
+  commercialTermsAgreedAt DateTime
+  commissionBasis         OfferCommissionBasis
+  commissionRateBps       Int
+  createdByUserId         String                 @db.Uuid
+  createdByUser           User                   @relation("OfferRevisionCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  submittedByUserId       String?                @db.Uuid
+  submittedByUser         User?                  @relation("OfferRevisionSubmittedBy", fields: [submittedByUserId], references: [id], onDelete: Restrict)
+  submittedAt             DateTime?
+  decidedByUserId         String?                @db.Uuid
+  decidedByUser           User?                  @relation("OfferRevisionDecidedBy", fields: [decidedByUserId], references: [id], onDelete: Restrict)
+  decidedAt               DateTime?
+  rejectionReason         String?                @db.VarChar(1000)
+  evidenceInspected       Boolean                @default(false)
+  priceVerified           Boolean                @default(false)
+  scopeVerified           Boolean                @default(false)
+  providerConsentVerified Boolean                @default(false)
+  currentForOffers        Offer[]                @relation("CurrentApprovedOfferRevision")
+  createdAt               DateTime               @default(now())
+  updatedAt               DateTime               @updatedAt
+
+  @@unique([offerId, revisionNumber])
+  @@unique([id, offerId])
+  @@index([status, createdAt])
+  @@index([offerId, status])
+  @@map("offer_revisions")
+}

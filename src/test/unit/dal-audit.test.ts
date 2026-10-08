@@ -47,6 +47,9 @@ describe("DAL Security Audit Unit Tests", () => {
       expect(validateTargetIdentifier("permission:offer_draft:create")).toBe(
         "permission:offer_draft:create"
       );
+      expect(validateTargetIdentifier("offer_revision:b2c3d4e5-f6a1-4b2c-9d3e-4f5a6b7c8d9e")).toBe(
+        "offer_revision:b2c3d4e5-f6a1-4b2c-9d3e-4f5a6b7c8d9e"
+      );
     });
 
     it("rejects arbitrary strings, malformed UUIDs, URLs, and injection attempts", () => {
@@ -180,6 +183,31 @@ describe("DAL Security Audit Unit Tests", () => {
       expect(sanitized).not.toHaveProperty("evidenceDocumentRef");
       expect(sanitized).not.toHaveProperty("contactPhone");
       expect(sanitized).not.toHaveProperty("notes");
+    });
+
+    it("records approval attestations but never stores evidence packet IDs in audit metadata", () => {
+      const sanitized = sanitizeAuditMetadata("OFFER_APPROVED", {
+        action: "APPROVE_OFFER",
+        offerId: "a1b2c3d4-e5f6-4a1b-8c2d-3e4f5a6b7c8d",
+        revisionId: "b1b2c3d4-e5f6-4a1b-8c2d-3e4f5a6b7c8d",
+        revisionNumber: 2,
+        evidenceInspected: true,
+        priceVerified: true,
+        scopeVerified: true,
+        providerConsentVerified: true,
+        evidencePacketId: "PRIVATE-PACKET-123",
+      });
+
+      expect(sanitized).toEqual({
+        action: "APPROVE_OFFER",
+        offerId: "a1b2c3d4-e5f6-4a1b-8c2d-3e4f5a6b7c8d",
+        revisionId: "b1b2c3d4-e5f6-4a1b-8c2d-3e4f5a6b7c8d",
+        revisionNumber: 2,
+        evidenceInspected: true,
+        priceVerified: true,
+        scopeVerified: true,
+        providerConsentVerified: true,
+      });
     });
   });
 

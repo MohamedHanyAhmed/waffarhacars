@@ -24,6 +24,25 @@ describe("Server Auth Environment Validation", () => {
     expect(env.APP_DATA_BACKEND).toBe("demo");
     expect(env.BETTER_AUTH_SECRET).toBeUndefined();
     expect(env.BETTER_AUTH_URL).toBeUndefined();
+    expect(env.OFFER_EVIDENCE_PACKET_REPOSITORY_READY).toBe(false);
+  });
+
+  it("enables offer approval only for the exact true repository-ready setting", () => {
+    const base = {
+      APP_RUNTIME_PROFILE: "showcase",
+      APP_DATA_BACKEND: "demo",
+    };
+    expect(
+      validateServerEnv({ ...base, OFFER_EVIDENCE_PACKET_REPOSITORY_READY: "true" })
+        .OFFER_EVIDENCE_PACKET_REPOSITORY_READY
+    ).toBe(true);
+    expect(
+      validateServerEnv({ ...base, OFFER_EVIDENCE_PACKET_REPOSITORY_READY: "false" })
+        .OFFER_EVIDENCE_PACKET_REPOSITORY_READY
+    ).toBe(false);
+    expect(() =>
+      validateServerEnv({ ...base, OFFER_EVIDENCE_PACKET_REPOSITORY_READY: "yes" })
+    ).toThrow("Configuration error: Invalid server environment configuration.");
   });
 
   it("succeeds in showcase postgres mode with valid localhost HTTP url, secret, and independent keys", () => {

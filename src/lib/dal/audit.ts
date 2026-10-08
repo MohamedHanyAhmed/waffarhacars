@@ -34,6 +34,16 @@ export const SECURITY_AUDIT_EVENT_TYPES = [
   "BRANCH_REJECTED",
   "BRANCH_PAUSED",
   "BRANCH_RESUMED",
+
+  // Controlled service catalogue and Sales/Operations offer lifecycle
+  "SERVICE_DEFINITION_CREATED",
+  "SERVICE_DEFINITION_UPDATED",
+  "OFFER_DRAFT_CREATED",
+  "OFFER_DRAFT_UPDATED",
+  "OFFER_REVISION_CREATED",
+  "OFFER_SUBMITTED_FOR_REVIEW",
+  "OFFER_APPROVED",
+  "OFFER_REJECTED",
 ] as const;
 
 export type SecurityAuditEventType = (typeof SECURITY_AUDIT_EVENT_TYPES)[number];
@@ -100,7 +110,10 @@ export function validateTargetIdentifier(target: unknown): string | null {
     prefix === "user" ||
     prefix === "role_assignment" ||
     prefix === "provider" ||
-    prefix === "provider_branch"
+    prefix === "provider_branch" ||
+    prefix === "service_definition" ||
+    prefix === "offer" ||
+    prefix === "offer_revision"
   ) {
     if (UUID_REGEX.test(identifier)) {
       return `${prefix}:${identifier.toLowerCase()}`;
@@ -284,6 +297,69 @@ const BranchResumedMetadataSchema = z.object({
   branchId: z.string().uuid(),
 });
 
+const ServiceDefinitionCreatedMetadataSchema = z.object({
+  action: z.literal("CREATE_SERVICE_DEFINITION"),
+  serviceDefinitionId: z.string().uuid(),
+  categoryId: z.string().uuid(),
+  pricingMode: z.enum(["FIXED_SCOPE", "QUOTE_REQUIRED"]),
+});
+
+const ServiceDefinitionUpdatedMetadataSchema = z.object({
+  action: z.literal("UPDATE_SERVICE_DEFINITION"),
+  serviceDefinitionId: z.string().uuid(),
+  version: z.number().int().positive(),
+  isActive: z.boolean(),
+});
+
+const OfferDraftMetadataSchema = z.object({
+  action: z.enum(["CREATE_OFFER_DRAFT", "UPDATE_OFFER_DRAFT"]),
+  offerId: z.string().uuid(),
+  revisionId: z.string().uuid(),
+  revisionNumber: z.number().int().positive(),
+  version: z.number().int().positive(),
+});
+
+const OfferRevisionCreatedMetadataSchema = z.object({
+  action: z.literal("CREATE_OFFER_REVISION"),
+  offerId: z.string().uuid(),
+  revisionId: z.string().uuid(),
+  revisionNumber: z.number().int().positive(),
+});
+
+const OfferSubmittedMetadataSchema = z.object({
+  action: z.literal("SUBMIT_OFFER_FOR_REVIEW"),
+  offerId: z.string().uuid(),
+  revisionId: z.string().uuid(),
+  revisionNumber: z.number().int().positive(),
+  version: z.number().int().positive(),
+});
+
+const OfferApprovedMetadataSchema = z.object({
+  action: z.literal("APPROVE_OFFER"),
+  offerId: z.string().uuid(),
+  revisionId: z.string().uuid(),
+  revisionNumber: z.number().int().positive(),
+  evidenceInspected: z.literal(true),
+  priceVerified: z.literal(true),
+  scopeVerified: z.literal(true),
+  providerConsentVerified: z.literal(true),
+});
+
+const OfferRejectedMetadataSchema = z.object({
+  action: z.literal("REJECT_OFFER"),
+  offerId: z.string().uuid(),
+  revisionId: z.string().uuid(),
+  revisionNumber: z.number().int().positive(),
+  reasonCode: z.enum([
+    "PRICE_EVIDENCE_UNAVAILABLE",
+    "PRICE_NOT_VERIFIED",
+    "SCOPE_INCOMPLETE",
+    "PROVIDER_CONSENT_UNVERIFIED",
+    "COMMERCIAL_TERMS_INCOMPLETE",
+    "OTHER",
+  ]),
+});
+
 export const AUDIT_METADATA_SCHEMAS: Record<SecurityAuditEventType, z.ZodTypeAny> = {
   STAFF_PROVISIONED: StaffProvisionedMetadataSchema,
   STAFF_ROLE_ASSIGNED: StaffRoleAssignedMetadataSchema,
@@ -310,6 +386,15 @@ export const AUDIT_METADATA_SCHEMAS: Record<SecurityAuditEventType, z.ZodTypeAny
   BRANCH_REJECTED: BranchRejectedMetadataSchema,
   BRANCH_PAUSED: BranchPausedMetadataSchema,
   BRANCH_RESUMED: BranchResumedMetadataSchema,
+
+  SERVICE_DEFINITION_CREATED: ServiceDefinitionCreatedMetadataSchema,
+  SERVICE_DEFINITION_UPDATED: ServiceDefinitionUpdatedMetadataSchema,
+  OFFER_DRAFT_CREATED: OfferDraftMetadataSchema,
+  OFFER_DRAFT_UPDATED: OfferDraftMetadataSchema,
+  OFFER_REVISION_CREATED: OfferRevisionCreatedMetadataSchema,
+  OFFER_SUBMITTED_FOR_REVIEW: OfferSubmittedMetadataSchema,
+  OFFER_APPROVED: OfferApprovedMetadataSchema,
+  OFFER_REJECTED: OfferRejectedMetadataSchema,
 };
 
 /**

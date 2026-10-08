@@ -117,21 +117,24 @@ Access to staff capabilities is controlled exclusively by the server-only Data A
 
 Capabilities are strictly enumerated with **zero wildcard `*` permissions**:
 
-| Permission            | `PLATFORM_ADMIN` | `SALES_AGENT` | `OPS_SUPERVISOR` | `FINANCE_OFFICER` |
-| :-------------------- | :--------------: | :-----------: | :--------------: | :---------------: |
-| `staff:read`          |       Yes        |      Yes      |       Yes        |        Yes        |
-| `staff:provision`     |       Yes        |      No       |        No        |        No         |
-| `staff:manage_roles`  |       Yes        |      No       |        No        |        No         |
-| `audit:read`          |       Yes        |      No       |        No        |        No         |
-| `offer_draft:create`  |        No        |      Yes      |        No        |        No         |
-| `offer_draft:edit`    |        No        |      Yes      |        No        |        No         |
-| `offer_draft:submit`  |        No        |      Yes      |        No        |        No         |
-| `offer_draft:review`  |        No        |      No       |       Yes        |        No         |
-| `offer_draft:approve` |        No        |      No       |       Yes        |        No         |
-| `offer_draft:reject`  |        No        |      No       |       Yes        |        No         |
-| `payout:view`         |        No        |      No       |        No        |        Yes        |
-| `payout:export`       |        No        |      No       |        No        |        Yes        |
-| `ledger:read`         |        No        |      No       |        No        |        Yes        |
+| Permission               | `PLATFORM_ADMIN` | `SALES_AGENT` | `OPS_SUPERVISOR` | `FINANCE_OFFICER` |
+| :----------------------- | :--------------: | :-----------: | :--------------: | :---------------: |
+| `staff:read`             |       Yes        |      Yes      |       Yes        |        Yes        |
+| `staff:provision`        |       Yes        |      No       |        No        |        No         |
+| `staff:manage_roles`     |       Yes        |      No       |        No        |        No         |
+| `audit:read`             |       Yes        |      No       |        No        |        No         |
+| `offer_draft:create`     |        No        |      Yes      |        No        |        No         |
+| `offer_draft:read`       |        No        |      Yes      |       Yes        |        No         |
+| `offer_draft:edit`       |        No        |      Yes      |        No        |        No         |
+| `offer_draft:submit`     |        No        |      Yes      |        No        |        No         |
+| `offer_draft:review`     |        No        |      No       |       Yes        |        No         |
+| `offer_draft:approve`    |        No        |      No       |       Yes        |        No         |
+| `offer_draft:reject`     |        No        |      No       |       Yes        |        No         |
+| `service_catalog:read`   |        No        |      Yes      |       Yes        |        No         |
+| `service_catalog:manage` |        No        |      No       |       Yes        |        No         |
+| `payout:view`            |        No        |      No       |        No        |        Yes        |
+| `payout:export`          |        No        |      No       |        No        |        Yes        |
+| `ledger:read`            |        No        |      No       |        No        |        Yes        |
 
 > [!IMPORTANT]
 > **Separation of Duties:** `PLATFORM_ADMIN` manages platform infrastructure and staff directory governance, but is strictly prohibited from approving offers or triggering financial payouts. Maker (`SALES_AGENT`) and Checker (`OPS_SUPERVISOR`) duties remain completely separated.
@@ -375,7 +378,7 @@ All five HMAC/secret keys must be **mutually distinct**. Validation fails closed
 ### 13.1 Product Scope and Operational Meaning
 
 - **Backend Foundation Only**: PR 3A establishes the multi-tenant backend onboarding and compliance foundation, not a completed Sales UI. A thin bilingual (Arabic / English) Sales and Operations UI slice is the immediate follow-up required before field sales agents onboard merchant workshops.
-- **Vetted vs. Customer-Published**: In PR 3A, `ACTIVE` status means Operations has successfully vetted and approved the entity's compliance and physical readiness. It does **not** mean the workshop is published to consumers. Customer discovery and offer activation occur in PR 3B and PR 4.
+- **Vetted vs. Customer-Published**: In PR 3A, `ACTIVE` status means Operations has successfully vetted and approved the entity's compliance and physical readiness. It does **not** mean the workshop is published to consumers. PR 3B is the onboarding UI; PR 3C-A records non-publishing offer approvals; customer discovery and reservations remain PR 4 work.
 - **Cairo Cluster Selection**: Greater Cairo clusters (`NASR_CITY_HELIOPOLIS`, `NEW_CAIRO`, `MAADI`, `OCTOBER_ZAYED`) are captured as structured merchant data. Provider activation requires at least one individually approved branch in any valid Cairo cluster; launch-zone prioritization follows aggregate workshop density evidence.
 
 ### 13.2 Ownership, Roles, and Maker-Checker Dual Custody
@@ -495,3 +498,24 @@ Every endpoint operating on a branch verifies `branch.providerOrganizationId ===
    - Verified in test suites by installing a real PostgreSQL engine trigger (`BEFORE INSERT ON security_audit_events ... RAISE EXCEPTION`) with zero simulation hooks in production code, asserting full rollback of entity status and metadata.
 5. **No External-Provider Side Effects in PR 3A**:
    - PR 3A operates strictly within internal PostgreSQL data boundaries. No external third-party side-effects (such as SMS dispatch, external payment capture, or webhook delivery) exist in this PR. All operational and security guarantees are database-transactional.
+
+## 14. Production Catalog and Offer Approval (PR 3C-A)
+
+The production endpoints below are separate from the clickable demo routes. They use the server-side Better Auth session and staff DAL on every request.
+
+- `GET /api/v1/staff/catalog/services`: Sales and Operations read active bilingual categories/service definitions.
+- `POST/PATCH /api/v1/staff/ops/catalog/services`: Operations manages service definitions; Sales cannot create categories or definitions.
+- `POST/GET /api/v1/staff/offers` and revision routes: Sales creates and edits only its own draft revisions, submits them, and starts a new revision after a terminal decision.
+- `GET /api/v1/staff/ops/offers/pending` and review routes: Operations reviews, approves or rejects; maker or submitter cannot decide, even if that user later receives an Operations role.
+
+The revision lifecycle is `DRAFT → PENDING_REVIEW → APPROVED | REJECTED`. Pending, approved and rejected content cannot be edited. Rejected revisions are terminal. Approving a later revision updates the offer's single current-approved pointer without rewriting the previous approved revision. “Approved” is an internal commercial-review state only; it does not publish, sell, reserve or redeem the offer.
+
+Offer normal/customer prices are EGP piastres (`BIGINT`) and customer price must be positive and below normal price; free offers are not supported. Savings are derived by the server. A revision stores the explicitly agreed commission basis/rate, including 0 bps where the provider agreed. No commission accrual is created, and there is no automatic six-month move to 10%.
+
+General Repairs catalog entries are quote-only and cannot be offered as fixed prices in this slice. Accessories need an identifiable SKU. No offers, providers, prices or discounts are seeded. Vehicle compatibility, availability/capacity, public discovery and booking are not implemented here.
+
+### Evidence packet controls and launch gate
+
+Sales records an opaque internal packet ID, evidence type/date and price-basis note; a separate packet ID/date records agreed commercial terms. URLs, paths, access tokens and customer personal data are prohibited. At approval, Operations explicitly attests to personally inspecting the packet and verifying ordinary price, exact scope and provider consent. The API records the authenticated approver and timestamp but does not store, fetch or verify the underlying file.
+
+Before any real offer can be approved or published, the business owner must designate a company-controlled packet repository, give Operations access, and name who owns packet retrieval and retention. This organization-level control is intentionally unresolved by the application and is a launch-blocking checklist item.

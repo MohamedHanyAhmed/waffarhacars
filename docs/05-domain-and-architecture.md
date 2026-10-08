@@ -36,6 +36,8 @@ React Native/Expo can be added later against the same API. Starting with three n
 | Notifications   | templates, preferences, delivery attempts                                                         | business-state authority                   |
 | Audit           | privileged and security events                                                                    | editable operational data                  |
 
+PR 3C-A's approved offer revision is a non-publishing commercial approval. It is not customer-visible or reservable. The implementation stores opaque evidence packet references and explicit Operations attestations only; it does not store or retrieve evidence files. A company-controlled evidence repository with Operations access and named retention/retrieval owners is a launch gate. Vehicle compatibility, availability, public discovery and reservations remain separate later capabilities.
+
 ## Core entities
 
 ```mermaid
