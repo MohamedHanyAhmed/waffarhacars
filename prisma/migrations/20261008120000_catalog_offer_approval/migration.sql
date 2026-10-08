@@ -51,10 +51,12 @@ CREATE TABLE "offers" (
     "currentApprovedRevisionId" UUID,
     "nextRevisionNumber" INTEGER NOT NULL DEFAULT 2,
     "creationRequestId" UUID NOT NULL,
+    "creationRequestFingerprint" VARCHAR(64) NOT NULL,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
     CONSTRAINT "offers_pkey" PRIMARY KEY ("id"),
-    CONSTRAINT "offers_revision_counter_check" CHECK ("nextRevisionNumber" > 1)
+    CONSTRAINT "offers_revision_counter_check" CHECK ("nextRevisionNumber" > 1),
+    CONSTRAINT "offers_creation_fingerprint_check" CHECK ("creationRequestFingerprint" ~ '^[0-9a-f]{64}$')
 );
 
 CREATE TABLE "offer_revisions" (
@@ -230,6 +232,22 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER "offer_revisions_immutable_after_submission"
 BEFORE UPDATE ON "offer_revisions"
 FOR EACH ROW EXECUTE FUNCTION prevent_offer_revision_mutation_after_submission();
+
+CREATE OR REPLACE FUNCTION prevent_offer_creation_identity_mutation()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF NEW."creationRequestId" IS DISTINCT FROM OLD."creationRequestId" OR
+     NEW."creationRequestFingerprint" IS DISTINCT FROM OLD."creationRequestFingerprint" OR
+     NEW."createdByUserId" IS DISTINCT FROM OLD."createdByUserId" THEN
+    RAISE EXCEPTION 'offer creation identity is immutable' USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER "offers_creation_identity_immutable"
+BEFORE UPDATE OF "creationRequestId", "creationRequestFingerprint", "createdByUserId" ON "offers"
+FOR EACH ROW EXECUTE FUNCTION prevent_offer_creation_identity_mutation();
 
 CREATE OR REPLACE FUNCTION validate_current_offer_revision()
 RETURNS TRIGGER AS $$

@@ -40,7 +40,9 @@ function serialize<T>(value: T): T {
   if (Array.isArray(value)) return value.map(serialize) as T;
   if (value && typeof value === "object") {
     return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [key, serialize(item)])
+      Object.entries(value)
+        .filter(([key]) => key !== "creationRequestFingerprint")
+        .map(([key, item]) => [key, serialize(item)])
     ) as T;
   }
   return value;
@@ -226,6 +228,35 @@ function offerFieldsToData(fields: OfferDraftFields) {
   };
 }
 
+function creationRequestFingerprint(input: {
+  providerOrganizationId: string;
+  branchId: string;
+  serviceDefinitionId: string;
+  revisionRequestId: string;
+  fields: OfferDraftFields;
+}) {
+  // Hash the validated, normalized request rather than the editable first revision.
+  // Sorted field names make the result independent of JSON property order.
+  const canonicalFields = Object.entries(input.fields)
+    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+    .map(([key, value]) => [
+      key,
+      value instanceof Date
+        ? value.toISOString()
+        : typeof value === "bigint"
+          ? value.toString()
+          : value,
+    ]);
+  const canonical = JSON.stringify([
+    input.providerOrganizationId.toLowerCase(),
+    input.branchId.toLowerCase(),
+    input.serviceDefinitionId.toLowerCase(),
+    input.revisionRequestId.toLowerCase(),
+    canonicalFields,
+  ]);
+  return crypto.createHash("sha256").update("offer-create-v1\0").update(canonical).digest("hex");
+}
+
 async function readOffer(offerId: string, revisionId?: string) {
   const prisma = getPrisma();
   return prisma.offer.findUnique({
@@ -298,14 +329,25 @@ export async function createServiceDefinition(
         "Accessory definitions require an identifiable SKU."
       );
     }
-    const definition = await tx.serviceDefinition.create({
-      data: {
-        ...input,
-        createdByUserId: actor.userId,
-        updatedByUserId: actor.userId,
-      },
-      include: { category: true },
-    });
+    const definition = await tx.serviceDefinition
+      .create({
+        data: {
+          ...input,
+          createdByUserId: actor.userId,
+          updatedByUserId: actor.userId,
+        },
+        include: { category: true },
+      })
+      .catch((error: unknown) => {
+        if (isUniqueConflict(error)) {
+          throw new OfferError(
+            409,
+            "SERVICE_CODE_ALREADY_EXISTS",
+            "Service code is already in use."
+          );
+        }
+        throw error;
+      });
     await logAuditEvent(
       {
         actorUserId: actor.userId,
@@ -388,15 +430,26 @@ export async function updateServiceDefinition(
       );
     }
     const { expectedVersion: _expectedVersion, ...changes } = input;
-    const updated = await tx.serviceDefinition.update({
-      where: { id: serviceDefinitionId },
-      data: {
-        ...changes,
-        updatedByUserId: actor.userId,
-        version: { increment: 1 },
-      },
-      include: { category: true },
-    });
+    const updated = await tx.serviceDefinition
+      .update({
+        where: { id: serviceDefinitionId },
+        data: {
+          ...changes,
+          updatedByUserId: actor.userId,
+          version: { increment: 1 },
+        },
+        include: { category: true },
+      })
+      .catch((error: unknown) => {
+        if (isUniqueConflict(error)) {
+          throw new OfferError(
+            409,
+            "SERVICE_CODE_ALREADY_EXISTS",
+            "Service code is already in use."
+          );
+        }
+        throw error;
+      });
     await logAuditEvent(
       {
         actorUserId: actor.userId,
@@ -429,6 +482,24 @@ export async function createOfferDraft(
   clientIp?: string
 ) {
   const prisma = getPrisma();
+  const fingerprint = creationRequestFingerprint(input);
+  const readRetry = async () => {
+    const existing = await prisma.offer.findUnique({
+      where: { creationRequestId: input.creationRequestId },
+      include: { revisions: { orderBy: { revisionNumber: "asc" }, take: 1 } },
+    });
+    if (!existing) return null;
+    if (
+      existing.createdByUserId !== actor.userId ||
+      existing.creationRequestFingerprint !== fingerprint ||
+      !existing.revisions[0]
+    ) {
+      throw new OfferError(409, "DUPLICATE_REQUEST", "Request ID has already been used.");
+    }
+    return serialize({ offer: existing, revision: withDerivedPricing(existing.revisions[0]) });
+  };
+  const prior = await readRetry();
+  if (prior) return prior;
   try {
     return await prisma.$transaction(async (tx) => {
       await lockActiveProviderAndBranch(tx, input.providerOrganizationId, input.branchId);
@@ -440,6 +511,7 @@ export async function createOfferDraft(
           serviceDefinitionId: input.serviceDefinitionId,
           createdByUserId: actor.userId,
           creationRequestId: input.creationRequestId,
+          creationRequestFingerprint: fingerprint,
           revisions: {
             create: {
               revisionNumber: 1,
@@ -473,13 +545,8 @@ export async function createOfferDraft(
     });
   } catch (error) {
     if (!isUniqueConflict(error)) throw error;
-    const existing = await prisma.offer.findUnique({
-      where: { creationRequestId: input.creationRequestId },
-      include: { revisions: { orderBy: { revisionNumber: "asc" }, take: 1 } },
-    });
-    if (existing?.createdByUserId === actor.userId && existing.revisions[0]) {
-      return serialize({ offer: existing, revision: withDerivedPricing(existing.revisions[0]) });
-    }
+    const existing = await readRetry();
+    if (existing) return existing;
     throw new OfferError(409, "DUPLICATE_REQUEST", "Request ID has already been used.");
   }
 }
@@ -816,14 +883,22 @@ export async function approveOfferRevision(
       );
     }
     await getFixedServiceDefinition(tx, revision.serviceDefinitionId, true);
-    if (revision.validUntil <= new Date())
+    const approvalTime = new Date();
+    if (revision.validUntil <= approvalTime)
       throw new OfferError(422, "OFFER_EXPIRED", "Expired offer revisions cannot be approved.");
+    if (revision.evidenceDate > approvalTime || revision.commercialTermsAgreedAt > approvalTime) {
+      throw new OfferError(
+        422,
+        "FUTURE_DATED_EVIDENCE",
+        "Price evidence and commercial agreement dates cannot be in the future."
+      );
+    }
     const updated = await tx.offerRevision.updateMany({
       where: { id: revisionId, offerId, version: input.expectedVersion, status: "PENDING_REVIEW" },
       data: {
         status: "APPROVED",
         decidedByUserId: actor.userId,
-        decidedAt: new Date(),
+        decidedAt: approvalTime,
         evidenceInspected: true,
         priceVerified: true,
         scopeVerified: true,

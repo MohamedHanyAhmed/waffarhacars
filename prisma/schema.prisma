@@ -427,6 +427,7 @@ model Offer {
   revisions                 OfferRevision[]      @relation("OfferRevisions")
   nextRevisionNumber        Int                  @default(2)
   creationRequestId          String               @unique @db.Uuid
+  creationRequestFingerprint String               @db.VarChar(64)
   createdAt                 DateTime             @default(now())
   updatedAt                 DateTime             @updatedAt
 

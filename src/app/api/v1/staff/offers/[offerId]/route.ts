@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { withOfferApi } from "@/lib/offer/http";
+import { withOfferApi, assertUuidParam } from "@/lib/offer/http";
 import { getOfferForStaff } from "@/lib/offer/service";
 
 export async function GET(
@@ -8,7 +8,7 @@ export async function GET(
 ): Promise<Response> {
   return withOfferApi(req, "offer_draft:read", async (actor) => {
     const { offerId } = await context.params;
-    return Response.json(await getOfferForStaff(actor, offerId), {
+    return Response.json(await getOfferForStaff(actor, assertUuidParam(offerId)), {
       headers: { "Cache-Control": "no-store" },
     });
   });

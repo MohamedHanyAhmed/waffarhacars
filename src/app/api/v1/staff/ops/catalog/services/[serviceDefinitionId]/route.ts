@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { withOfferApi, parseJson, clientIp } from "@/lib/offer/http";
+import { withOfferApi, parseJson, clientIp, assertUuidParam } from "@/lib/offer/http";
 import { UpdateServiceDefinitionSchema } from "@/lib/offer/validation";
 import { updateServiceDefinition } from "@/lib/offer/service";
 
@@ -13,7 +13,7 @@ export async function PATCH(
     if (parsed.response) return parsed.response;
     const definition = await updateServiceDefinition(
       actor,
-      serviceDefinitionId,
+      assertUuidParam(serviceDefinitionId),
       parsed.data,
       clientIp(req)
     );

@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { withOfferApi, parseJson, clientIp } from "@/lib/offer/http";
+import { withOfferApi, parseJson, clientIp, assertUuidParam } from "@/lib/offer/http";
 import { UpdateOfferDraftSchema } from "@/lib/offer/validation";
 import { updateOfferDraft } from "@/lib/offer/service";
 
@@ -11,7 +11,13 @@ export async function PATCH(
     const { offerId, revisionId } = await context.params;
     const parsed = await parseJson(req, UpdateOfferDraftSchema);
     if (parsed.response) return parsed.response;
-    const revision = await updateOfferDraft(actor, offerId, revisionId, parsed.data, clientIp(req));
+    const revision = await updateOfferDraft(
+      actor,
+      assertUuidParam(offerId),
+      assertUuidParam(revisionId),
+      parsed.data,
+      clientIp(req)
+    );
     return Response.json(revision, { headers: { "Cache-Control": "no-store" } });
   });
 }

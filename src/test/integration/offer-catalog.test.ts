@@ -8,6 +8,7 @@ import { resetServerEnvCache } from "@/lib/env";
 import { provisionStaffMember } from "@/lib/staff/provisioning";
 import { POST as createServiceHandler } from "@/app/api/v1/staff/ops/catalog/services/route";
 import { POST as createOfferHandler } from "@/app/api/v1/staff/offers/route";
+import { GET as getOfferHandler } from "@/app/api/v1/staff/offers/[offerId]/route";
 import { POST as submitOfferHandler } from "@/app/api/v1/staff/offers/[offerId]/revisions/[revisionId]/submit/route";
 import { POST as approveOfferHandler } from "@/app/api/v1/staff/ops/offers/[offerId]/revisions/[revisionId]/approve/route";
 import { POST as rejectOfferHandler } from "@/app/api/v1/staff/ops/offers/[offerId]/revisions/[revisionId]/reject/route";
@@ -402,6 +403,248 @@ describe("Production service catalog and offer approval PostgreSQL integration",
     expect(transitionAuditCount).toBe(3);
     expect(submitted.status).toBe("PENDING_REVIEW");
   });
+
+  it("accepts an identical creation retry after draft edits but rejects the same key with changed commercial terms", async () => {
+    if (!databaseAvailable)
+      throw new Error("PostgreSQL integration service unavailable; start npm run db:test:up.");
+    const sales = await createStaff("SALES_AGENT");
+    const ops = await createStaff("OPS_SUPERVISOR");
+    const { provider, branch } = await createProviderAndBranch(sales.userId, ops.userId);
+    const service = await createServiceDefinition(ops.cookie);
+    expect(service.response.status).toBe(201);
+    const payload = validOffer(provider.id, branch.id, service.data.id);
+    const first = await createOfferHandler(
+      makeRequest("/api/v1/staff/offers", "POST", sales.cookie, payload)
+    );
+    expect(first.status).toBe(201);
+    const original = await first.json();
+    createdOfferIds.push(original.offer.id);
+    expect(original.offer.creationRequestFingerprint).toBeUndefined();
+
+    const changedFields = { ...payload.fields, customerPriceMinor: "75000" };
+    const edit = await updateDraftHandler(
+      makeRequest("/api/v1/staff/offers/edit", "PATCH", sales.cookie, {
+        expectedVersion: 1,
+        fields: changedFields,
+      }),
+      { params: Promise.resolve({ offerId: original.offer.id, revisionId: original.revision.id }) }
+    );
+    expect(edit.status).toBe(200);
+    const identicalRetry = await createOfferHandler(
+      makeRequest("/api/v1/staff/offers", "POST", sales.cookie, payload)
+    );
+    expect(identicalRetry.status).toBe(201);
+    expect((await identicalRetry.json()).offer.id).toBe(original.offer.id);
+
+    const changedRetry = await createOfferHandler(
+      makeRequest("/api/v1/staff/offers", "POST", sales.cookie, {
+        ...payload,
+        fields: changedFields,
+      })
+    );
+    expect(changedRetry.status).toBe(409);
+    expect((await changedRetry.json()).error).toBe("DUPLICATE_REQUEST");
+    const changedServiceRetry = await createOfferHandler(
+      makeRequest("/api/v1/staff/offers", "POST", sales.cookie, {
+        ...payload,
+        serviceDefinitionId: crypto.randomUUID(),
+      })
+    );
+    expect(changedServiceRetry.status).toBe(409);
+    expect((await changedServiceRetry.json()).error).toBe("DUPLICATE_REQUEST");
+    const changedCommissionRetry = await createOfferHandler(
+      makeRequest("/api/v1/staff/offers", "POST", sales.cookie, {
+        ...payload,
+        fields: { ...payload.fields, commissionRateBps: 1000 },
+      })
+    );
+    expect(changedCommissionRetry.status).toBe(409);
+    expect((await changedCommissionRetry.json()).error).toBe("DUPLICATE_REQUEST");
+
+    const prisma = getPrisma();
+    await expect(
+      prisma.offer.update({
+        where: { id: original.offer.id },
+        data: { creationRequestFingerprint: "a".repeat(64) },
+      })
+    ).rejects.toThrow();
+    expect(
+      await prisma.offer.count({ where: { creationRequestId: payload.creationRequestId } })
+    ).toBe(1);
+    expect(await prisma.offerRevision.count({ where: { offerId: original.offer.id } })).toBe(1);
+    expect(
+      await prisma.securityAuditEvent.count({
+        where: {
+          eventType: "OFFER_DRAFT_CREATED",
+          targetEntity: `offer_revision:${original.revision.id}`,
+        },
+      })
+    ).toBe(1);
+    expect(
+      (await prisma.offerRevision.findUniqueOrThrow({ where: { id: original.revision.id } }))
+        .customerPriceMinor
+    ).toBe(75000n);
+  });
+
+  it("serializes simultaneous identical creation requests into one offer, one revision, and one creation audit", async () => {
+    if (!databaseAvailable)
+      throw new Error("PostgreSQL integration service unavailable; start npm run db:test:up.");
+    const sales = await createStaff("SALES_AGENT");
+    const ops = await createStaff("OPS_SUPERVISOR");
+    const { provider, branch } = await createProviderAndBranch(sales.userId, ops.userId);
+    const service = await createServiceDefinition(ops.cookie);
+    expect(service.response.status).toBe(201);
+    const payload = validOffer(provider.id, branch.id, service.data.id);
+    const blocker = new pg.Client({ connectionString: TEST_DB_URL });
+    await blocker.connect();
+    await blocker.query("BEGIN");
+    await blocker.query("SELECT id FROM provider_organizations WHERE id = $1 FOR UPDATE", [
+      provider.id,
+    ]);
+    const requestA = createOfferHandler(
+      makeRequest("/api/v1/staff/offers", "POST", sales.cookie, payload)
+    );
+    const requestB = createOfferHandler(
+      makeRequest("/api/v1/staff/offers", "POST", sales.cookie, payload)
+    );
+    try {
+      const deadline = Date.now() + 3000;
+      let waiting = 0;
+      while (Date.now() < deadline && waiting < 2) {
+        const result = await blocker.query(
+          "SELECT count(*)::int AS count FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query ILIKE '%provider_organizations%' AND query ILIKE '%FOR UPDATE%'"
+        );
+        waiting = result.rows[0]?.count ?? 0;
+        if (waiting < 2) await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(waiting).toBe(2);
+    } finally {
+      await blocker.query("COMMIT");
+      await blocker.end();
+    }
+    const responses = await Promise.all([requestA, requestB]);
+    expect(responses.map((response) => response.status)).toEqual([201, 201]);
+    const resultA = await responses[0].json();
+    const resultB = await responses[1].json();
+    expect(resultA.offer.id).toBe(resultB.offer.id);
+    createdOfferIds.push(resultA.offer.id);
+    const prisma = getPrisma();
+    expect(
+      await prisma.offer.count({ where: { creationRequestId: payload.creationRequestId } })
+    ).toBe(1);
+    expect(await prisma.offerRevision.count({ where: { offerId: resultA.offer.id } })).toBe(1);
+    expect(
+      await prisma.securityAuditEvent.count({
+        where: {
+          eventType: "OFFER_DRAFT_CREATED",
+          targetEntity: `offer_revision:${resultA.revision.id}`,
+        },
+      })
+    ).toBe(1);
+  });
+
+  it("returns stable validation errors for malformed offer and revision route IDs without writes", async () => {
+    if (!databaseAvailable)
+      throw new Error("PostgreSQL integration service unavailable; start npm run db:test:up.");
+    const sales = await createStaff("SALES_AGENT");
+    const beforeOffers = await getPrisma().offer.count();
+    const read = await getOfferHandler(
+      makeRequest("/api/v1/staff/offers/not-a-uuid", "GET", sales.cookie),
+      { params: Promise.resolve({ offerId: "not-a-uuid" }) }
+    );
+    const submit = await submitOfferHandler(
+      makeRequest(
+        "/api/v1/staff/offers/not-a-uuid/revisions/not-a-uuid/submit",
+        "POST",
+        sales.cookie,
+        { expectedVersion: 1 }
+      ),
+      { params: Promise.resolve({ offerId: "not-a-uuid", revisionId: "not-a-uuid" }) }
+    );
+    expect(read.status).toBe(400);
+    expect(submit.status).toBe(400);
+    expect((await read.json()).error).toBe("VALIDATION_ERROR");
+    expect((await submit.json()).error).toBe("VALIDATION_ERROR");
+    expect(await getPrisma().offer.count()).toBe(beforeOffers);
+  });
+
+  it("returns a stable conflict for a duplicate Ops service code and writes one definition and audit", async () => {
+    if (!databaseAvailable)
+      throw new Error("PostgreSQL integration service unavailable; start npm run db:test:up.");
+    const ops = await createStaff("OPS_SUPERVISOR");
+    const first = await createServiceDefinition(ops.cookie);
+    expect(first.response.status).toBe(201);
+    const duplicate = await createServiceHandler(
+      makeRequest("/api/v1/staff/ops/catalog/services", "POST", ops.cookie, {
+        code: first.data.code,
+        categoryId: first.data.categoryId,
+        nameEn: "Different service",
+        nameAr: "خدمة مختلفة",
+        scopeEn: "Different fixed scope",
+        scopeAr: "نطاق مختلف",
+        pricingMode: "FIXED_SCOPE",
+      })
+    );
+    expect(duplicate.status).toBe(409);
+    expect((await duplicate.json()).error).toBe("SERVICE_CODE_ALREADY_EXISTS");
+    expect(await getPrisma().serviceDefinition.count({ where: { code: first.data.code } })).toBe(1);
+    expect(
+      await getPrisma().securityAuditEvent.count({
+        where: {
+          eventType: "SERVICE_DEFINITION_CREATED",
+          targetEntity: `service_definition:${first.data.id}`,
+        },
+      })
+    ).toBe(1);
+  });
+
+  it.each(["evidenceDate", "commercialTermsAgreedAt"] as const)(
+    "blocks approval when %s is future-dated and preserves pending state and audit cardinality",
+    async (dateField) => {
+      if (!databaseAvailable)
+        throw new Error("PostgreSQL integration service unavailable; start npm run db:test:up.");
+      const sales = await createStaff("SALES_AGENT");
+      const ops = await createStaff("OPS_SUPERVISOR");
+      const { provider, branch } = await createProviderAndBranch(sales.userId, ops.userId);
+      const service = await createServiceDefinition(ops.cookie);
+      expect(service.response.status).toBe(201);
+      const payload = validOffer(provider.id, branch.id, service.data.id);
+      payload.fields[dateField] = new Date(Date.now() + 24 * 60 * 60_000).toISOString();
+      const create = await createOfferHandler(
+        makeRequest("/api/v1/staff/offers", "POST", sales.cookie, payload)
+      );
+      expect(create.status).toBe(201);
+      const draft = await create.json();
+      createdOfferIds.push(draft.offer.id);
+      const submit = await submitOfferHandler(
+        makeRequest("/api/v1/staff/offers/submit", "POST", sales.cookie, { expectedVersion: 1 }),
+        { params: Promise.resolve({ offerId: draft.offer.id, revisionId: draft.revision.id }) }
+      );
+      expect(submit.status).toBe(200);
+      const approve = await approveOfferHandler(
+        makeRequest("/api/v1/staff/ops/offers/approve", "POST", ops.cookie, trueAttestation),
+        { params: Promise.resolve({ offerId: draft.offer.id, revisionId: draft.revision.id }) }
+      );
+      expect(approve.status).toBe(422);
+      expect((await approve.json()).error).toBe("FUTURE_DATED_EVIDENCE");
+      const prisma = getPrisma();
+      expect(
+        (await prisma.offerRevision.findUniqueOrThrow({ where: { id: draft.revision.id } })).status
+      ).toBe("PENDING_REVIEW");
+      expect(
+        (await prisma.offer.findUniqueOrThrow({ where: { id: draft.offer.id } }))
+          .currentApprovedRevisionId
+      ).toBeNull();
+      expect(
+        await prisma.securityAuditEvent.count({
+          where: {
+            eventType: "OFFER_APPROVED",
+            targetEntity: `offer_revision:${draft.revision.id}`,
+          },
+        })
+      ).toBe(0);
+    }
+  );
 
   it("blocks approval while the controlled evidence repository launch gate is false without persistent writes", async () => {
     if (!databaseAvailable)

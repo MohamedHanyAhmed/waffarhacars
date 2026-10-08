@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { withOfferApi, parseJson, clientIp } from "@/lib/offer/http";
+import { withOfferApi, parseJson, clientIp, assertUuidParam } from "@/lib/offer/http";
 import { RejectOfferSchema } from "@/lib/offer/validation";
 import { rejectOfferRevision } from "@/lib/offer/service";
 
@@ -13,8 +13,8 @@ export async function POST(
     if (parsed.response) return parsed.response;
     const revision = await rejectOfferRevision(
       actor,
-      offerId,
-      revisionId,
+      assertUuidParam(offerId),
+      assertUuidParam(revisionId),
       parsed.data,
       clientIp(req)
     );

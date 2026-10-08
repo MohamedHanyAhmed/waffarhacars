@@ -1,8 +1,18 @@
 import "server-only";
 import type { NextRequest } from "next/server";
+import { z } from "zod";
 import { assertStaffPermission, AuthorizationError } from "@/lib/dal";
 import { getClientIp } from "@/lib/rate-limit";
 import { OfferError } from "./service";
+
+const uuidParam = z.string().uuid();
+
+export function assertUuidParam(value: string): string {
+  if (!uuidParam.safeParse(value).success) {
+    throw new OfferError(400, "VALIDATION_ERROR", "Invalid resource identifier.");
+  }
+  return value;
+}
 
 export async function withOfferApi(
   req: NextRequest,
