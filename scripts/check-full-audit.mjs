@@ -143,7 +143,9 @@ export function evaluateAuditReport(report, lock, now = new Date()) {
       !sameMembers(finding.nodes, expected.nodes) ||
       !sameMembers(finding.effects, expected.effects)
     ) {
-      fail(`dependency path or directness changed for ${name}`);
+      fail(
+        `dependency path or directness changed for ${name}: direct=${finding.isDirect}, nodes=${JSON.stringify(finding.nodes)}, effects=${JSON.stringify(finding.effects)}; expected direct=${expected.direct}, nodes=${JSON.stringify(expected.nodes)}, effects=${JSON.stringify(expected.effects)}`
+      );
     }
 
     const via = finding.via.map((item) => {
