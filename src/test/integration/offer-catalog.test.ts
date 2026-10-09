@@ -256,21 +256,29 @@ const trueAttestation = {
 async function waitForBlockedRequests(blocker: pg.Client, expected: number): Promise<number> {
   const blockerPid = (await blocker.query<{ pid: number }>("SELECT pg_backend_pid() AS pid"))
     .rows[0].pid;
-  const deadline = Date.now() + 7000;
+  // Query activity outside the blocker transaction: PostgreSQL caches activity snapshots
+  // for the lifetime of a transaction, which would otherwise hide new waiters.
+  const observer = new pg.Client({ connectionString: TEST_DB_URL });
+  await observer.connect();
+  const deadline = Date.now() + 4000;
   let waiting = 0;
-  while (Date.now() < deadline && waiting < expected) {
-    const result = await blocker.query<{ count: number }>(
-      `WITH RECURSIVE blocked(pid) AS (
+  try {
+    while (Date.now() < deadline && waiting < expected) {
+      const result = await observer.query<{ count: number }>(
+        `WITH RECURSIVE blocked(pid) AS (
          SELECT pid FROM pg_stat_activity WHERE $1::int = ANY(pg_blocking_pids(pid))
          UNION
          SELECT activity.pid FROM pg_stat_activity activity
          JOIN blocked ON blocked.pid = ANY(pg_blocking_pids(activity.pid))
        )
        SELECT count(*)::int AS count FROM blocked`,
-      [blockerPid]
-    );
-    waiting = result.rows[0]?.count ?? 0;
-    if (waiting < expected) await new Promise((resolve) => setTimeout(resolve, 20));
+        [blockerPid]
+      );
+      waiting = result.rows[0]?.count ?? 0;
+      if (waiting < expected) await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  } finally {
+    await observer.end();
   }
   return waiting;
 }
@@ -840,7 +848,7 @@ describe("Production service catalog and offer approval PostgreSQL integration",
     expect(oldAfter.rejectionReason).toBe("SCOPE_INCOMPLETE");
   });
 
-  it("database trigger rejects direct content edits to a pending revision and preserves its persisted values", async () => {
+  it("database trigger rejects content and submission metadata changes during a pending decision", async () => {
     if (!databaseAvailable)
       throw new Error("PostgreSQL integration service unavailable; start npm run db:test:up.");
     const sales = await createStaff("SALES_AGENT");
@@ -850,28 +858,42 @@ describe("Production service catalog and offer approval PostgreSQL integration",
     const before = await prisma.offerRevision.findUniqueOrThrow({
       where: { id: draft.revision.id },
     });
-    await expect(
-      prisma.offerRevision.update({
-        where: { id: draft.revision.id },
-        data: { titleEn: "Unauthorized post-submission edit", version: { increment: 1 } },
-      })
-    ).rejects.toThrow();
-    const after = await prisma.offerRevision.findUniqueOrThrow({
-      where: { id: draft.revision.id },
-    });
-    expect(after.status).toBe("PENDING_REVIEW");
-    expect(after.titleEn).toBe(before.titleEn);
-    expect(after.version).toBe(before.version);
     const client = new pg.Client({ connectionString: TEST_DB_URL });
     await client.connect();
     try {
       await expect(
         client.query(
           `UPDATE offer_revisions
-           SET "submittedAt" = "submittedAt" + INTERVAL '1 second',
-               "version" = "version" + 1
-           WHERE id = $1`,
-          [draft.revision.id]
+           SET "status" = 'APPROVED',
+               "decidedByUserId" = $1::uuid,
+               "decidedAt" = CURRENT_TIMESTAMP,
+               "evidenceInspected" = true,
+               "priceVerified" = true,
+               "scopeVerified" = true,
+               "providerConsentVerified" = true,
+               "version" = "version" + 1,
+               "titleEn" = 'Unauthorized post-submission edit'
+           WHERE id = $2::uuid`,
+          [ops.userId, draft.revision.id]
+        )
+      ).rejects.toMatchObject({
+        code: "23514",
+        message: "pending offer revision content is immutable",
+      });
+      await expect(
+        client.query(
+          `UPDATE offer_revisions
+           SET "status" = 'APPROVED',
+               "decidedByUserId" = $1::uuid,
+               "decidedAt" = CURRENT_TIMESTAMP,
+               "evidenceInspected" = true,
+               "priceVerified" = true,
+               "scopeVerified" = true,
+               "providerConsentVerified" = true,
+               "version" = "version" + 1,
+               "submittedAt" = "submittedAt" + INTERVAL '1 second'
+           WHERE id = $2::uuid`,
+          [ops.userId, draft.revision.id]
         )
       ).rejects.toMatchObject({
         code: "23514",
@@ -880,11 +902,13 @@ describe("Production service catalog and offer approval PostgreSQL integration",
     } finally {
       await client.end();
     }
-    const afterMetadataAttempt = await prisma.offerRevision.findUniqueOrThrow({
+    const after = await prisma.offerRevision.findUniqueOrThrow({
       where: { id: draft.revision.id },
     });
-    expect(afterMetadataAttempt.submittedAt?.getTime()).toBe(before.submittedAt?.getTime());
-    expect(afterMetadataAttempt.version).toBe(before.version);
+    expect(after.status).toBe("PENDING_REVIEW");
+    expect(after.titleEn).toBe(before.titleEn);
+    expect(after.submittedAt?.getTime()).toBe(before.submittedAt?.getTime());
+    expect(after.version).toBe(before.version);
   });
 
   it("database trigger rejects a direct draft submission that also changes commercial content", async () => {
