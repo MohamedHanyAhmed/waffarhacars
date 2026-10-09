@@ -29,6 +29,9 @@ const RawServerEnvSchema = z.object({
   OTP_SMS_PROVIDER: z.enum(["test", "dev_capture", "egyptian_gateway"]).optional(),
   OTP_DISPATCH_TIMEOUT_MS: z.coerce.number().int().min(100).max(30000).default(8000),
   TRUSTED_PROXY_HOPS: z.coerce.number().int().min(0).max(10).default(0),
+  OFFER_EVIDENCE_PACKET_REPOSITORY_READY: z
+    .preprocess((value) => value ?? "false", z.enum(["true", "false"]))
+    .transform((value) => value === "true"),
 });
 
 export interface ServerEnv {
@@ -50,6 +53,7 @@ export interface ServerEnv {
   OTP_SMS_PROVIDER: "test" | "dev_capture" | "egyptian_gateway";
   OTP_DISPATCH_TIMEOUT_MS: number;
   TRUSTED_PROXY_HOPS: number;
+  OFFER_EVIDENCE_PACKET_REPOSITORY_READY: boolean;
 }
 
 let cachedEnv: ServerEnv | null = null;
@@ -296,6 +300,7 @@ export function validateServerEnv(
     OTP_SMS_PROVIDER: smsProvider,
     OTP_DISPATCH_TIMEOUT_MS: data.OTP_DISPATCH_TIMEOUT_MS,
     TRUSTED_PROXY_HOPS: data.TRUSTED_PROXY_HOPS,
+    OFFER_EVIDENCE_PACKET_REPOSITORY_READY: data.OFFER_EVIDENCE_PACKET_REPOSITORY_READY,
   };
 }
 

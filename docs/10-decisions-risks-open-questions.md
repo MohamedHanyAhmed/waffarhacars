@@ -49,6 +49,9 @@
 7. Decide whether accessories are installed service SKUs or shipped ecommerce; shipped goods are not in current MVP.
 8. Clarify B2B target: employee perks, fleet maintenance, bank/telco campaign, or center counter-sales. These are different products.
 9. Approve PWA-first or accept the extra scope/cost of native apps.
+10. **Evidence repository launch gate:** designate the company-controlled repository for `INTERNAL_EVIDENCE_PACKET_ID`, grant Operations access, and name retrieval/retention owners. The app stores only opaque IDs and human approval attestations; it has no file storage or verification integration. Until this gate is closed, no real offer may be approved or published.
+11. **Service definitions:** Operations must enter bilingual controlled service definitions from provider research and scope evidence. No provider-specific services or commercial offers are seeded. General repairs remain quote-only in PR 3C-A; accessories require a SKU.
+12. **Commission agreements:** each revision stores the explicitly agreed basis/rate (including an explicit 0-bps introduction if agreed). No automatic change to approximately 10% occurs; changes require a new provider agreement/revision before reservation and accrual work.
 
 ## Questions for customer discovery
 

@@ -52,6 +52,12 @@ flowchart LR
 
 The MVP is release-ready only when a real customer can select a saved vehicle and Cairo area, understand a fixed-scope offer entered by sales and approved by operations, reserve a slot without prepayment, receive a single-use discount pass, pay the locked price directly to the center, and mutually confirm completion through authenticated provider scan plus customer PIN—while operations can support the customer, accrue and invoice commission, record provider payment, control overdue exposure, and audit the complete journey.
 
+### Implementation status boundary
+
+This repository contains both a clickable demonstration and an incrementally built production backend. Provider onboarding and staff identity foundations are implemented. PR 3C-A adds production staff APIs for controlled service definitions and internal offer approval. This approval is **not customer publication**: there is no production discovery, reservation, payment, redemption, or commission accrual flow yet. The demo screens and demo offers remain simulated and are not production records.
+
+The four broad service categories are seeded, but no service definitions, providers, prices or offers are seeded. Real offers must not be approved until the business designates a company-controlled evidence packet repository, Operations access, and named retrieval/retention owners. That remains an operational launch gate.
+
 ## How to start
 
 1. Complete the founder decisions in [10-decisions-risks-open-questions.md](docs/10-decisions-risks-open-questions.md).
@@ -61,11 +67,11 @@ The MVP is release-ready only when a real customer can select a saved vehicle an
 5. In Antigravity's Rules panel, configure `00-product-guardrails.md` and `10-engineering-quality.md` as Always On; configure `20-review-evidence.md` as Model Decision using the description inside the file.
 6. Give Antigravity one vertical slice at a time. Require a human-approved PR for every slice.
 
-For the first visible artifact, build only the showcase slice in [12-demo-slice.md](docs/12-demo-slice.md). It demonstrates the proposition end to end without pretending production operations exist.
+The [12-demo-slice.md](docs/12-demo-slice.md) documents the original showcase artifact. It demonstrates the proposition using synthetic data and simulated workflows; it must not be described as production booking, provider redemption, or commission processing.
 
 ## Clickable Demo Showcase: Installation, Verification & Execution
 
-This repository contains the interactive, responsive, bilingual showcase prototype demonstrating the end-to-end WaffarhaCars proposition (reserve free, pay center directly, mutual PIN completion, and single commission accrual).
+The clickable showcase is an interactive, responsive bilingual prototype demonstrating the end-to-end WaffarhaCars proposition (reserve free, pay center directly, mutual PIN completion, and single commission accrual) with synthetic data. It is not connected to the production offer API.
 
 ### Prerequisites
 
@@ -160,7 +166,7 @@ Portable full-page screenshots are saved under `artifacts/screenshots/`:
 - **Customer Surface:** `http://localhost:3000/` (Home), `/results` (Compatible search), `/offers/offer-oil-change-sunny` (Offer details), `/reserve/offer-oil-change-sunny` (Confirmation), `/my-reservations` (Discount pass).
 - **Provider Workshop:** `http://localhost:3000/provider/check-in` (Scanner & arrival), `/provider/complete` (Mutual PIN completion).
 - **Customer Audit & Review:** `http://localhost:3000/my-reservations/res-sunny-5688/completed` (Honored scope/price checklist).
-- **Sales & Operations:** `http://localhost:3000/sales/new-offer` (Offer draft wizard with mandatory price evidence), `http://localhost:3000/ops/approvals` (Maker-checker approvals & commission receivables ledger).
+- **Demo-only Sales & Operations:** `http://localhost:3000/sales/new-offer` (simulated offer wizard), `http://localhost:3000/ops/approvals` (simulated maker-checker approval and ledger). These routes do not call the production catalog/offer APIs.
 - **Internal Staff Portal:** `http://localhost:3000/staff/login` (Staff sign-in), `/staff/activate-password` (Forced password change), `/staff/mfa/enroll` (TOTP MFA setup), `/staff/mfa/verify` (TOTP challenge), `/staff` (Internal staff dashboard).
 - **Global Control:** Click **"Demo Scenarios"** in the top navigation banner to switch roles instantly or test all 11 preset states (clean empty, loading, incompatible vehicle, confirmed, checked in unissued, checked in valid PIN, wrong PIN, expired PIN, cancelled, no show, already completed).
 

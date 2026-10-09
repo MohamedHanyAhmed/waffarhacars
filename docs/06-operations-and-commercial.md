@@ -4,6 +4,14 @@
 
 Confirmed operating model: salespeople perform managed data entry for providers. Providers do not need a self-service catalogue portal in MVP.
 
+### Production workflow boundary (PR 3C-A)
+
+The production API supports controlled service definitions and fixed-scope offer drafts for active, individually vetted branches. Operations approval is an internal commercial review only: it does not publish an offer, expose it to customers, create a reservation, or accrue commission. Customer availability remains blocked until vehicle eligibility, service availability, provider/customer terms, and the reservation journey are implemented and verified.
+
+Sales records an opaque `INTERNAL_EVIDENCE_PACKET_ID`, evidence type/date and price-basis note; the API has no file upload or external repository integration. Operations must explicitly attest that they personally inspected the packet and verified the ordinary price, scope and provider consent. The organization must designate a company-controlled packet repository, grant Operations access, and name retrieval/retention owners before any real offer is approved or published. This operational gate is unresolved; do not approve real offers until it is closed.
+
+The four controlled top-level categories are Express Maintenance, General Repairs, Car Wash and Accessories. General Repairs are quote-only in this slice and cannot be entered as guaranteed fixed-price repair offers. Accessories require an identifiable SKU. No real services, providers, prices or discounts are seeded; Operations must enter and approve service definitions based on validated provider evidence.
+
 `lead -> qualified -> draft entered by sales -> due diligence -> commercial agreed -> contracted -> offer approved -> trained -> test redeemed -> active -> productive`
 
 Track conversion and days in stage. “Signed” is not success; **productive** means at least one legitimate redemption in 30 days.
@@ -13,11 +21,11 @@ Track conversion and days in stage. “Signed” is not success; **productive** 
 1. Sales creates the provider legal/business draft and one or more branches.
 2. Sales maps each branch to controlled service categories and service templates; free-text category creation is not allowed.
 3. Sales adds service variants, ordinary price evidence, proposed discount, discounted price, included parts/labor, duration, booking rule and expiry.
-4. Sales selects supported vehicle rules. “All cars” is explicit; specialist centers select make/model/year/engine rules from controlled data.
-5. System calculates discount and proposed commission; sales cannot override formulas.
-6. Sales uploads permitted proof and submits the record for review.
-7. Operations verifies documents, duplicate providers, scope, price evidence, compatibility, margin, availability and customer terms.
-8. Rejected drafts return with structured reasons. Approved versions are immutable and publishable; later material edits create a new review version.
+4. Vehicle make/model/year/engine eligibility is deferred to the vehicle catalogue slice. The current offer API must not claim or publish compatibility.
+5. System derives savings from evidenced normal price minus customer price using integer EGP piastres. Sales records a separately agreed commission basis/rate; 0 bps is allowed only when explicitly agreed. No future 10% rate is applied automatically and this slice creates no accrual.
+6. Sales records an opaque internal evidence packet ID, evidence type/date and price basis, plus a separate commercial-terms packet ID and agreement date. There is no upload integration; do not enter URLs, file paths, secrets or customer data.
+7. Operations verifies provider/branch readiness, fixed scope, price evidence, provider consent and commercial terms. Approval requires explicit human attestations. It is not customer publication and cannot create bookings or commission.
+8. Rejected revisions are terminal. Approved and pending revision content is immutable; later material changes require a new revision and review. Real offers remain blocked until the evidence repository/access/retention owner is designated and launch readiness gates pass.
 
 The system should optimize this workflow for sales speed: reusable service templates, branch duplication, bulk vehicle selection, draft autosave and clear missing-field validation. Speed must not remove approval separation.
 

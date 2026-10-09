@@ -43,6 +43,9 @@ describe("DAL Role-to-Permission Catalog Unit Tests", () => {
     expect(salesPerms.has("offer_draft:create")).toBe(true);
     expect(salesPerms.has("offer_draft:edit")).toBe(true);
     expect(salesPerms.has("offer_draft:submit")).toBe(true);
+    expect(salesPerms.has("offer_draft:read")).toBe(true);
+    expect(salesPerms.has("service_catalog:read")).toBe(true);
+    expect(salesPerms.has("service_catalog:manage")).toBe(false);
 
     // Excluded checker/admin
     expect(salesPerms.has("offer_draft:approve")).toBe(false);
@@ -58,6 +61,9 @@ describe("DAL Role-to-Permission Catalog Unit Tests", () => {
     expect(opsPerms.has("offer_draft:review")).toBe(true);
     expect(opsPerms.has("offer_draft:approve")).toBe(true);
     expect(opsPerms.has("offer_draft:reject")).toBe(true);
+    expect(opsPerms.has("offer_draft:read")).toBe(true);
+    expect(opsPerms.has("service_catalog:read")).toBe(true);
+    expect(opsPerms.has("service_catalog:manage")).toBe(true);
 
     // Excluded maker draft creation/edit/submission
     expect(opsPerms.has("offer_draft:create")).toBe(false);
@@ -75,6 +81,7 @@ describe("DAL Role-to-Permission Catalog Unit Tests", () => {
 
     // Excluded maker/checker/admin
     expect(financePerms.has("offer_draft:create")).toBe(false);
+    expect(financePerms.has("offer_draft:read")).toBe(false);
     expect(financePerms.has("offer_draft:approve")).toBe(false);
     expect(financePerms.has("staff:manage_roles")).toBe(false);
   });
