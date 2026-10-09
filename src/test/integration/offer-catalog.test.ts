@@ -253,6 +253,28 @@ const trueAttestation = {
   providerConsentVerified: true,
 };
 
+async function waitForBlockedRequests(blocker: pg.Client, expected: number): Promise<number> {
+  const blockerPid = (await blocker.query<{ pid: number }>("SELECT pg_backend_pid() AS pid"))
+    .rows[0].pid;
+  const deadline = Date.now() + 7000;
+  let waiting = 0;
+  while (Date.now() < deadline && waiting < expected) {
+    const result = await blocker.query<{ count: number }>(
+      `WITH RECURSIVE blocked(pid) AS (
+         SELECT pid FROM pg_stat_activity WHERE $1::int = ANY(pg_blocking_pids(pid))
+         UNION
+         SELECT activity.pid FROM pg_stat_activity activity
+         JOIN blocked ON blocked.pid = ANY(pg_blocking_pids(activity.pid))
+       )
+       SELECT count(*)::int AS count FROM blocked`,
+      [blockerPid]
+    );
+    waiting = result.rows[0]?.count ?? 0;
+    if (waiting < expected) await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return waiting;
+}
+
 describe("Production service catalog and offer approval PostgreSQL integration", () => {
   beforeAll(async () => {
     const client = new pg.Client({ connectionString: TEST_DB_URL, connectionTimeoutMillis: 3000 });
@@ -284,19 +306,26 @@ describe("Production service catalog and offer approval PostgreSQL integration",
   });
 
   afterEach(async () => {
-    if (databaseAvailable) {
+    try {
+      if (!databaseAvailable) return;
       const prisma = getPrisma();
       const offers = await prisma.offer.findMany({
-        where: { id: { in: createdOfferIds } },
+        where: {
+          OR: [
+            { id: { in: createdOfferIds } },
+            { providerOrganizationId: { in: createdProviderIds } },
+          ],
+        },
         select: { id: true },
       });
+      const offerIds = offers.map((offer) => offer.id);
       if (offers.length) {
         await prisma.offer.updateMany({
-          where: { id: { in: createdOfferIds } },
+          where: { id: { in: offerIds } },
           data: { currentApprovedRevisionId: null },
         });
-        await prisma.offerRevision.deleteMany({ where: { offerId: { in: createdOfferIds } } });
-        await prisma.offer.deleteMany({ where: { id: { in: createdOfferIds } } });
+        await prisma.offerRevision.deleteMany({ where: { offerId: { in: offerIds } } });
+        await prisma.offer.deleteMany({ where: { id: { in: offerIds } } });
       }
       if (createdServiceDefinitionIds.length) {
         await prisma.serviceDefinition.deleteMany({
@@ -327,11 +356,12 @@ describe("Production service catalog and offer approval PostgreSQL integration",
           await prisma.user.deleteMany({ where: { id: { in: ids } } });
         }
       }
+    } finally {
+      createdEmails.length = 0;
+      createdProviderIds.length = 0;
+      createdServiceDefinitionIds.length = 0;
+      createdOfferIds.length = 0;
     }
-    createdEmails.length = 0;
-    createdProviderIds.length = 0;
-    createdServiceDefinitionIds.length = 0;
-    createdOfferIds.length = 0;
   });
 
   afterAll(async () => {
@@ -402,6 +432,10 @@ describe("Production service catalog and offer approval PostgreSQL integration",
     expect(approvalAuditCount).toBe(1);
     expect(transitionAuditCount).toBe(3);
     expect(submitted.status).toBe("PENDING_REVIEW");
+    expect(submitted.submittedByUserId).toBe(sales.userId);
+    expect(submitted.submittedAt).not.toBeNull();
+    expect(approved.submittedByUserId).toBe(sales.userId);
+    expect(new Date(approved.submittedAt).getTime()).toBe(submitted.submittedAt?.getTime());
   });
 
   it("accepts an identical creation retry after draft edits but rejects the same key with changed commercial terms", async () => {
@@ -507,22 +541,19 @@ describe("Production service catalog and offer approval PostgreSQL integration",
     const requestB = createOfferHandler(
       makeRequest("/api/v1/staff/offers", "POST", sales.cookie, payload)
     );
+    let waiting = 0;
+    let settled: PromiseSettledResult<Response>[] = [];
     try {
-      const deadline = Date.now() + 3000;
-      let waiting = 0;
-      while (Date.now() < deadline && waiting < 2) {
-        const result = await blocker.query(
-          "SELECT count(*)::int AS count FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query ILIKE '%provider_organizations%' AND query ILIKE '%FOR UPDATE%'"
-        );
-        waiting = result.rows[0]?.count ?? 0;
-        if (waiting < 2) await new Promise((resolve) => setTimeout(resolve, 20));
-      }
-      expect(waiting).toBe(2);
+      waiting = await waitForBlockedRequests(blocker, 2);
     } finally {
-      await blocker.query("COMMIT");
-      await blocker.end();
+      await blocker.query("COMMIT").finally(() => blocker.end());
+      settled = await Promise.allSettled([requestA, requestB]);
     }
-    const responses = await Promise.all([requestA, requestB]);
+    expect(waiting).toBe(2);
+    const responses = settled.map((result) => {
+      if (result.status === "rejected") throw result.reason;
+      return result.value;
+    });
     expect(responses.map((response) => response.status)).toEqual([201, 201]);
     const resultA = await responses[0].json();
     const resultB = await responses[1].json();
@@ -831,6 +862,90 @@ describe("Production service catalog and offer approval PostgreSQL integration",
     expect(after.status).toBe("PENDING_REVIEW");
     expect(after.titleEn).toBe(before.titleEn);
     expect(after.version).toBe(before.version);
+    const client = new pg.Client({ connectionString: TEST_DB_URL });
+    await client.connect();
+    try {
+      await expect(
+        client.query(
+          `UPDATE offer_revisions
+           SET "submittedAt" = "submittedAt" + INTERVAL '1 second',
+               "version" = "version" + 1
+           WHERE id = $1`,
+          [draft.revision.id]
+        )
+      ).rejects.toMatchObject({
+        code: "23514",
+        message: "pending offer revision submission metadata is immutable",
+      });
+    } finally {
+      await client.end();
+    }
+    const afterMetadataAttempt = await prisma.offerRevision.findUniqueOrThrow({
+      where: { id: draft.revision.id },
+    });
+    expect(afterMetadataAttempt.submittedAt?.getTime()).toBe(before.submittedAt?.getTime());
+    expect(afterMetadataAttempt.version).toBe(before.version);
+  });
+
+  it("database trigger rejects a direct draft submission that also changes commercial content", async () => {
+    if (!databaseAvailable)
+      throw new Error("PostgreSQL integration service unavailable; start npm run db:test:up.");
+    const sales = await createStaff("SALES_AGENT");
+    const ops = await createStaff("OPS_SUPERVISOR");
+    const { provider, branch } = await createProviderAndBranch(sales.userId, ops.userId);
+    const service = await createServiceDefinition(ops.cookie);
+    expect(service.response.status).toBe(201);
+    const create = await createOfferHandler(
+      makeRequest(
+        "/api/v1/staff/offers",
+        "POST",
+        sales.cookie,
+        validOffer(provider.id, branch.id, service.data.id)
+      )
+    );
+    expect(create.status).toBe(201);
+    const draft = await create.json();
+    createdOfferIds.push(draft.offer.id);
+    const prisma = getPrisma();
+    const client = new pg.Client({ connectionString: TEST_DB_URL });
+    await client.connect();
+    try {
+      await expect(
+        client.query(
+          `
+        UPDATE offer_revisions
+        SET "status" = 'PENDING_REVIEW',
+            "submittedByUserId" = $1::uuid,
+            "submittedAt" = CURRENT_TIMESTAMP,
+            "titleEn" = 'Unauthorized changed scope',
+            "version" = "version" + 1
+        WHERE id = $2::uuid
+      `,
+          [sales.userId, draft.revision.id]
+        )
+      ).rejects.toMatchObject({
+        code: "23514",
+        message: "pending offer revision content is immutable",
+      });
+    } finally {
+      await client.end();
+    }
+    const persisted = await prisma.offerRevision.findUniqueOrThrow({
+      where: { id: draft.revision.id },
+    });
+    expect(persisted.status).toBe("DRAFT");
+    expect(persisted.titleEn).toBe(draft.revision.titleEn);
+    expect(persisted.version).toBe(1);
+    expect(persisted.submittedByUserId).toBeNull();
+    expect(persisted.submittedAt).toBeNull();
+    expect(
+      await prisma.securityAuditEvent.count({
+        where: {
+          eventType: "OFFER_SUBMITTED_FOR_REVIEW",
+          targetEntity: `offer_revision:${draft.revision.id}`,
+        },
+      })
+    ).toBe(0);
   });
 
   it("serializes two genuinely competing approvers to one approval and one audit event", async () => {
@@ -854,22 +969,19 @@ describe("Production service catalog and offer approval PostgreSQL integration",
       makeRequest("/api/v1/staff/ops/offers/approve", "POST", opsB.cookie, trueAttestation),
       { params: Promise.resolve({ offerId: draft.offer.id, revisionId: draft.revision.id }) }
     );
+    let waiting = 0;
+    let settled: PromiseSettledResult<Response>[] = [];
     try {
-      const deadline = Date.now() + 5000;
-      let waiting = 0;
-      while (Date.now() < deadline && waiting < 2) {
-        const result = await blocker.query(
-          "SELECT count(*)::int AS count FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query ILIKE '%provider_organizations%' AND query ILIKE '%FOR UPDATE%'"
-        );
-        waiting = result.rows[0]?.count ?? 0;
-        if (waiting < 2) await new Promise((resolve) => setTimeout(resolve, 20));
-      }
-      expect(waiting).toBe(2);
+      waiting = await waitForBlockedRequests(blocker, 2);
     } finally {
-      await blocker.query("COMMIT");
+      await blocker.query("COMMIT").finally(() => blocker.end());
+      settled = await Promise.allSettled([attemptA, attemptB]);
     }
-    const [responseA, responseB] = await Promise.all([attemptA, attemptB]);
-    await blocker.end();
+    expect(waiting).toBe(2);
+    const [responseA, responseB] = settled.map((result) => {
+      if (result.status === "rejected") throw result.reason;
+      return result.value;
+    });
     expect([responseA.status, responseB.status].sort()).toEqual([200, 409]);
     const prisma = getPrisma();
     const persisted = await prisma.offerRevision.findUniqueOrThrow({
@@ -898,26 +1010,24 @@ describe("Production service catalog and offer approval PostgreSQL integration",
       makeRequest("/api/v1/staff/ops/offers/approve", "POST", ops.cookie, trueAttestation),
       { params: Promise.resolve({ offerId: draft.offer.id, revisionId: draft.revision.id }) }
     );
+    let waiting = 0;
+    let settled: PromiseSettledResult<Response>[] = [];
     try {
-      const deadline = Date.now() + 5000;
-      let waiting = 0;
-      while (Date.now() < deadline && waiting < 1) {
-        const result = await blocker.query(
-          "SELECT count(*)::int AS count FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query ILIKE '%provider_organizations%' AND query ILIKE '%FOR UPDATE%'"
+      waiting = await waitForBlockedRequests(blocker, 1);
+      if (waiting === 1) {
+        await blocker.query(
+          "UPDATE provider_organizations SET status = 'PAUSED', version = version + 1 WHERE id = $1",
+          [draft.provider.id]
         );
-        waiting = result.rows[0]?.count ?? 0;
-        if (waiting < 1) await new Promise((resolve) => setTimeout(resolve, 20));
       }
-      expect(waiting).toBe(1);
-      await blocker.query(
-        "UPDATE provider_organizations SET status = 'PAUSED', version = version + 1 WHERE id = $1",
-        [draft.provider.id]
-      );
     } finally {
-      await blocker.query("COMMIT");
+      await blocker.query("COMMIT").finally(() => blocker.end());
+      settled = await Promise.allSettled([approval]);
     }
-    const response = await approval;
-    await blocker.end();
+    expect(waiting).toBe(1);
+    const outcome = settled[0];
+    if (outcome.status === "rejected") throw outcome.reason;
+    const response = outcome.value;
     expect(response.status).toBe(409);
     expect(
       (await getPrisma().offerRevision.findUniqueOrThrow({ where: { id: draft.revision.id } }))

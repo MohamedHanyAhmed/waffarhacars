@@ -219,11 +219,15 @@ BEGIN
     NEW."commercialTermsAgreedAt" IS DISTINCT FROM OLD."commercialTermsAgreedAt" OR
     NEW."commissionBasis" IS DISTINCT FROM OLD."commissionBasis" OR
     NEW."commissionRateBps" IS DISTINCT FROM OLD."commissionRateBps" OR
-    NEW."createdByUserId" IS DISTINCT FROM OLD."createdByUserId" OR
+    NEW."createdByUserId" IS DISTINCT FROM OLD."createdByUserId"
+  ) THEN
+    RAISE EXCEPTION 'pending offer revision content is immutable' USING ERRCODE = '23514';
+  END IF;
+  IF OLD."status" = 'PENDING_REVIEW' AND (
     NEW."submittedByUserId" IS DISTINCT FROM OLD."submittedByUserId" OR
     NEW."submittedAt" IS DISTINCT FROM OLD."submittedAt"
   ) THEN
-    RAISE EXCEPTION 'pending offer revision content is immutable' USING ERRCODE = '23514';
+    RAISE EXCEPTION 'pending offer revision submission metadata is immutable' USING ERRCODE = '23514';
   END IF;
   RETURN NEW;
 END;
