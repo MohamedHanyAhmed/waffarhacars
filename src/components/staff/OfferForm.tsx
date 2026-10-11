@@ -573,6 +573,28 @@ export function OfferForm({
   const normal = egpToMinor(values.normalPriceMinor);
   const customer = egpToMinor(values.customerPriceMinor);
   const discount = normal && customer ? offerDiscountBps(normal, customer) : null;
+  const checkAnswerValue = (key: FieldName): string => {
+    if (key === "bookingRule") {
+      return t(
+        {
+          APPOINTMENT_REQUIRED: "staffOffers.appointment",
+          WALK_IN_ALLOWED: "staffOffers.walkIn",
+          CONTACT_TO_BOOK: "staffOffers.contact",
+        }[values.bookingRule] ?? "staffOffers.validation"
+      );
+    }
+    if (key === "evidenceType") {
+      return t(
+        {
+          PROVIDER_PRICE_LIST: "staffOffers.evidenceProviderPriceList",
+          WRITTEN_QUOTE: "staffOffers.evidenceWrittenQuote",
+          PROVIDER_WRITTEN_CONFIRMATION: "staffOffers.evidenceProviderWrittenConfirmation",
+          OTHER: "staffOffers.evidenceOther",
+        }[values.evidenceType] ?? "staffOffers.validation"
+      );
+    }
+    return values[key];
+  };
 
   return (
     <div className="space-y-6" dir={dir}>
@@ -651,7 +673,9 @@ export function OfferForm({
               <div key={key}>
                 <dt className="font-semibold">{t(`staffOffers.${key}`)}</dt>
                 <dd>
-                  <bdi dir="ltr">{values[key]}</bdi>
+                  <bdi dir={key === "bookingRule" || key === "evidenceType" ? dir : "ltr"}>
+                    {checkAnswerValue(key)}
+                  </bdi>
                 </dd>
               </div>
             ))}

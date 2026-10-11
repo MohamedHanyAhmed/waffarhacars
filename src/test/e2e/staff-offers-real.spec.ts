@@ -416,7 +416,7 @@ test("real UI and PostgreSQL: English and Arabic mobile offers, response loss, C
     await opsPage.goto("/staff/ops/offers");
     await expect(opsPage.locator(`a[href="/staff/offers/${offerId}"]`)).toBeVisible();
     await opsPage.locator(`a[href="/staff/offers/${offerId}"]`).click();
-    await expect(opsPage.getByText(fields.titleEn).first()).toBeVisible();
+    await expect(opsPage.getByText(raceWinner.titleEn).first()).toBeVisible();
     await expect(opsPage.getByRole("button", { name: "Approve internally" })).toBeDisabled();
     for (const label of [
       "I inspected the evidence packet",
