@@ -514,6 +514,7 @@ test("real UI and PostgreSQL: English and Arabic mobile offers, response loss, C
           innerWidth + 1
       )
     ).toBe(true);
+    await salesPage.evaluate(() => window.scrollTo(0, 0));
     const checkScreenshot = testInfo.outputPath("offer-mobile-arabic-check-answers.png");
     await salesPage.screenshot({ path: checkScreenshot, fullPage: true });
     await testInfo.attach("offer-mobile-arabic-check-answers", {
@@ -638,6 +639,7 @@ test("real UI and PostgreSQL: English and Arabic mobile offers, response loss, C
           innerWidth + 1
       )
     ).toBe(true);
+    await opsPage.evaluate(() => window.scrollTo(0, 0));
     await opsPage.screenshot({ path: reviewScreenshot, fullPage: true });
     await testInfo.attach("offer-mobile-arabic-ops-review", {
       path: reviewScreenshot,
@@ -678,6 +680,7 @@ test("real UI and PostgreSQL: English and Arabic mobile offers, response loss, C
           innerWidth + 1
       )
     ).toBe(true);
+    await salesPage.evaluate(() => window.scrollTo(0, 0));
     const screenshotPath = testInfo.outputPath("offer-mobile-arabic.png");
     await salesPage.screenshot({ path: screenshotPath, fullPage: true });
     await testInfo.attach("offer-mobile-arabic", {
