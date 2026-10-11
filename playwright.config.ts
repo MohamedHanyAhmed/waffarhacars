@@ -10,7 +10,8 @@ export default defineConfig({
   workers: 1,
   use: {
     baseURL: BASE_URL,
-    trace: "on-first-retry",
+    trace: "retain-on-failure",
+    screenshot: "only-on-failure",
   },
   projects: [
     {
@@ -28,6 +29,11 @@ export default defineConfig({
     {
       name: "PostgreSQL Real Staff Provider Onboarding",
       testMatch: /staff-provider-onboarding-real\.spec\.ts/,
+      use: { ...devices["Desktop Chrome"], viewport: { width: 1440, height: 900 } },
+    },
+    {
+      name: "PostgreSQL Real Staff Offers",
+      testMatch: /staff-offers-real\.spec\.ts/,
       use: { ...devices["Desktop Chrome"], viewport: { width: 1440, height: 900 } },
     },
     {

@@ -380,7 +380,9 @@ test.describe("Real PostgreSQL Staff Provider Onboarding & Operations Vetting E2
       await opsPage.waitForTimeout(500);
 
       await expect(opsPage.locator("text=Active (Vetted)").first()).toBeVisible();
-      await expect(opsPage.locator("text=Offers not configured").first()).toBeVisible();
+      await expect(
+        opsPage.locator('[role="note"]').filter({ hasText: "customer publication" }).first()
+      ).toBeVisible();
 
       // Verify DB provider is ACTIVE
       const dbProviderActive = await prisma.providerOrganization.findUniqueOrThrow({

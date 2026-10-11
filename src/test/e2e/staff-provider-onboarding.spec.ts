@@ -521,9 +521,11 @@ test.describe("Bilingual Staff Provider Onboarding UI Journey (Mocked APIs)", ()
     await activateProviderBtn.click();
     await page.waitForTimeout(300);
 
-    // 7. Verify status is Active (Vetted) and "Offers not configured" notice is displayed
+    // 7. Verify status is Active (Vetted) and customer publication is clearly not available.
     await expect(page.locator("text=Active (Vetted)").first()).toBeVisible();
-    await expect(page.locator("text=Offers not configured").first()).toBeVisible();
+    await expect(
+      page.locator('[role="note"]').filter({ hasText: "customer publication" }).first()
+    ).toBeVisible();
   });
 
   test("4. Operations remediable branch rejection returns provider and approvals to draft", async ({

@@ -77,4 +77,6 @@ declare module "lucide-react" {
   export const FileEdit: Icon;
   export const Inbox: Icon;
   export const LayoutDashboard: Icon;
+  export const Tag: Icon;
+  export const ListChecks: Icon;
 }
