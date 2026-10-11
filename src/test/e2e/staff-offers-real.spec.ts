@@ -43,7 +43,6 @@ test("real UI and PostgreSQL: Ops catalogs, Sales drafts/submits, separate Ops a
   const uid = crypto.randomUUID().replaceAll("-", "").slice(0, 12).toUpperCase();
   const emails: string[] = [];
   let providerId: string | undefined;
-  let serviceId: string | undefined;
   let offerId: string | undefined;
   const contexts = [] as Awaited<ReturnType<typeof browser.newContext>>[];
 
@@ -152,7 +151,6 @@ test("real UI and PostgreSQL: Ops catalogs, Sales drafts/submits, separate Ops a
     const definition = await prisma.serviceDefinition.findUniqueOrThrow({
       where: { code: `OFFER_E2E_${uid}` },
     });
-    serviceId = definition.id;
 
     const salesContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
     contexts.push(salesContext);
@@ -278,15 +276,22 @@ test("real UI and PostgreSQL: Ops catalogs, Sales drafts/submits, separate Ops a
   } finally {
     await Promise.all(contexts.map((context) => context.close()));
     try {
-      if (offerId) {
-        await prisma.offer.update({
-          where: { id: offerId },
+      const ownedOffers = providerId
+        ? await prisma.offer.findMany({
+            where: { providerOrganizationId: providerId },
+            select: { id: true },
+          })
+        : [];
+      const ownedOfferIds = ownedOffers.map((item) => item.id);
+      if (ownedOfferIds.length) {
+        await prisma.offer.updateMany({
+          where: { id: { in: ownedOfferIds } },
           data: { currentApprovedRevisionId: null },
         });
-        await prisma.offerRevision.deleteMany({ where: { offerId } });
-        await prisma.offer.delete({ where: { id: offerId } });
+        await prisma.offerRevision.deleteMany({ where: { offerId: { in: ownedOfferIds } } });
+        await prisma.offer.deleteMany({ where: { id: { in: ownedOfferIds } } });
       }
-      if (serviceId) await prisma.serviceDefinition.delete({ where: { id: serviceId } });
+      await prisma.serviceDefinition.deleteMany({ where: { code: `OFFER_E2E_${uid}` } });
       if (providerId) {
         await prisma.providerBranch.deleteMany({ where: { providerOrganizationId: providerId } });
         await prisma.providerOrganization.delete({ where: { id: providerId } });
