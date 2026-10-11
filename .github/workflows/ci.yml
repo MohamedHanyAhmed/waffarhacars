@@ -146,3 +146,13 @@ jobs:
             playwright-report/
             test-results/
           retention-days: 7
+
+      - name: Upload Synthetic Arabic Mobile Offer Evidence
+        # actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: success()
+        with:
+          name: staff-offer-mobile-arabic-evidence
+          path: test-results/**/offer-mobile-arabic.png
+          if-no-files-found: error
+          retention-days: 7

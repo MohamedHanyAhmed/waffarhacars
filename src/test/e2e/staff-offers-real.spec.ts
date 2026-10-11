@@ -291,10 +291,12 @@ test("real UI and PostgreSQL: Ops catalogs, Sales drafts/submits, separate Ops a
     const secondSalesContext = await browser.newContext({
       viewport: { width: 1440, height: 900 },
       extraHTTPHeaders: { "x-forwarded-for": "198.51.100.83" },
+      // Clone only the browser-obtained session from the genuine login above;
+      // no handmade auth cookie or database session is introduced.
+      storageState: await salesContext.storageState(),
     });
     contexts.push(secondSalesContext);
     const secondSalesPage = await secondSalesContext.newPage();
-    await login(secondSalesPage, sales.email);
     await secondSalesPage.goto(`/staff/offers/${offerId}`);
     await expect(secondSalesPage.locator("form #offer-titleEn")).toBeVisible();
     await salesPage.locator("form").getByRole("button", { name: "Check answers" }).click();
@@ -357,12 +359,8 @@ test("real UI and PostgreSQL: Ops catalogs, Sales drafts/submits, separate Ops a
 
     console.info("[Offer E2E] Operations approval");
     await opsPage.goto("/staff/ops/offers");
-    await expect(opsPage.getByText(fields.titleEn)).toBeVisible();
-    await opsPage
-      .locator("li")
-      .filter({ hasText: fields.titleEn })
-      .getByRole("link", { name: "Offer details" })
-      .click();
+    await expect(opsPage.locator(`a[href="/staff/offers/${offerId}"]`)).toBeVisible();
+    await opsPage.locator(`a[href="/staff/offers/${offerId}"]`).click();
     await expect(opsPage.getByText(fields.titleEn).first()).toBeVisible();
     await expect(opsPage.getByRole("button", { name: "Approve internally" })).toBeDisabled();
     for (const label of [
@@ -400,11 +398,15 @@ test("real UI and PostgreSQL: Ops catalogs, Sales drafts/submits, separate Ops a
     expect(auditCount).toBe(4);
 
     console.info("[Offer E2E] Arabic mobile evidence");
-    await salesPage.getByRole("button", { name: "العربية (RTL)" }).click();
+    await salesPage
+      .getByRole("button", { name: "Toggle language between Arabic and English" })
+      .click();
     await expect(salesPage.locator("main[dir=rtl]")).toBeVisible();
     await expect(salesPage.getByText(fields.titleAr).first()).toBeVisible();
+    const screenshotPath = testInfo.outputPath("offer-mobile-arabic.png");
+    await salesPage.screenshot({ path: screenshotPath, fullPage: true });
     await testInfo.attach("offer-mobile-arabic", {
-      body: await salesPage.screenshot({ fullPage: true }),
+      path: screenshotPath,
       contentType: "image/png",
     });
   } finally {
