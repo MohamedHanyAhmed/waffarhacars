@@ -146,7 +146,7 @@ test("real UI and PostgreSQL: Ops catalogs, Sales drafts/submits, separate Ops a
         latitude: "30.061200",
         longitude: "31.341100",
         contactPhone: "+201011112222",
-        operatingHours: [],
+        operatingHours: [{ dayOfWeek: 0, openTime: "09:00", closeTime: "18:00", isClosed: false }],
         status: "ACTIVE",
         version: 2,
         legalIdentityChecked: true,
@@ -193,8 +193,16 @@ test("real UI and PostgreSQL: Ops catalogs, Sales drafts/submits, separate Ops a
     await login(salesPage, sales.email);
     await salesPage.goto("/staff/offers/new");
     await expect(salesPage.locator("#offer-provider")).toBeVisible();
+    await expect(salesPage.locator(`#offer-provider option[value="${provider.id}"]`)).toHaveCount(
+      1,
+      { timeout: 10_000 }
+    );
     await salesPage.locator("#offer-provider").selectOption(provider.id);
+    await expect(salesPage.locator(`#offer-branch option[value="${branch.id}"]`)).toHaveCount(1);
     await salesPage.locator("#offer-branch").selectOption(branch.id);
+    await expect(salesPage.locator(`#offer-service option[value="${definition.id}"]`)).toHaveCount(
+      1
+    );
     await salesPage.locator("#offer-service").selectOption(definition.id);
     const fields: Record<string, string> = {
       titleEn: "Express oil change",
@@ -350,6 +358,7 @@ test("real UI and PostgreSQL: Ops catalogs, Sales drafts/submits, separate Ops a
       .getByRole("link", { name: "Offer details" })
       .click();
     await expect(opsPage.getByText(fields.titleEn).first()).toBeVisible();
+    await expect(opsPage.getByRole("button", { name: "Approve internally" })).toBeDisabled();
     for (const label of [
       "I inspected the evidence packet",
       "I verified the normal and customer prices",

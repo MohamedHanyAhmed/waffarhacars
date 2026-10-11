@@ -158,9 +158,11 @@ export function OfferForm({
 
   useEffect(() => {
     const journal = readPendingOfferOperation();
-    if (journal && (revision ? journal.revisionId === revision.id : journal.kind === "create")) {
+    if (journal) {
       setUnknown(true);
       setError(t("staffOffers.unknown"));
+      const belongsHere = revision ? journal.revisionId === revision.id : journal.kind === "create";
+      if (!belongsHere) setManual(true);
       if (journal.creationRequestId && journal.revisionRequestId) {
         intentIds.current = {
           creationRequestId: journal.creationRequestId,
@@ -192,7 +194,13 @@ export function OfferForm({
           return;
         }
         if (!providerResult.ok || !catalogResult.ok) {
-          setError(t("staffOffers.denied"));
+          setError(
+            !providerResult.ok
+              ? offerFailureMessage(providerResult, t)
+              : !catalogResult.ok
+                ? offerFailureMessage(catalogResult, t)
+                : t("staffOffers.genericError")
+          );
           return;
         }
         setProviders(providerResult.data);
@@ -330,6 +338,19 @@ export function OfferForm({
 
   const save = async () => {
     if (inFlight.current || unknown || stage !== "check") return;
+    const existing = readPendingOfferOperation();
+    if (
+      existing &&
+      (revision
+        ? existing.kind !== "edit" || existing.revisionId !== revision.id
+        : existing.kind !== "create" ||
+          existing.creationRequestId !== intentIds.current.creationRequestId)
+    ) {
+      setUnknown(true);
+      setManual(true);
+      setError(t("staffOffers.manual"));
+      return;
+    }
     const payload = frozen.current?.payload ?? validate();
     if (!payload) {
       setStage("edit");

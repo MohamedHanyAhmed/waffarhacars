@@ -138,6 +138,12 @@ export default function StaffOfferDetailPage() {
     successorRequestId?: string
   ) => {
     if (inFlight.current || actionDisabled) return;
+    if (readPendingOfferOperation()) {
+      setUnknown(true);
+      setManual(true);
+      setError(t("staffOffers.manual"));
+      return;
+    }
     inFlight.current = true;
     setPending(true);
     setError(null);
