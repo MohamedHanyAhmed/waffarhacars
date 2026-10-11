@@ -15,7 +15,7 @@ import {
   AlertCircle,
 } from "lucide-react";
 import { ProviderStatusBadge } from "@/components/staff/ProviderStatusBadge";
-import { OffersNotConfiguredNotice } from "@/components/staff/OffersNotConfiguredNotice";
+import { CustomerPublicationNotice } from "@/components/staff/CustomerPublicationNotice";
 import type { ProviderOrganizationWithBranches } from "@/lib/provider/validation";
 import type { StaffAuthStatusResponse } from "@/lib/staff/status-contract";
 
@@ -141,7 +141,7 @@ export default function ProviderDirectoryPage() {
       </div>
 
       {/* Truthful Notice Banner on Offers Configuration */}
-      <OffersNotConfiguredNotice />
+      <CustomerPublicationNotice />
 
       {/* Filters & Search */}
       <div className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-xs space-y-3">

@@ -23,7 +23,7 @@ import {
   Edit2,
 } from "lucide-react";
 import { ProviderStatusBadge } from "@/components/staff/ProviderStatusBadge";
-import { OffersNotConfiguredNotice } from "@/components/staff/OffersNotConfiguredNotice";
+import { CustomerPublicationNotice } from "@/components/staff/CustomerPublicationNotice";
 import { OutcomeUnknownBanner } from "@/components/staff/OutcomeUnknownBanner";
 import { BranchVettingModal } from "@/components/staff/BranchVettingModal";
 import { BranchRejectModal } from "@/components/staff/BranchRejectModal";
@@ -822,7 +822,7 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
       </div>
 
       {/* Offers Not Configured Disclaimer Banner on ACTIVE */}
-      {provider.status === "ACTIVE" && <OffersNotConfiguredNotice />}
+      {provider.status === "ACTIVE" && <CustomerPublicationNotice />}
 
       {/* Dual Custody Warning Banner for Submitter */}
       {provider.status === "PENDING_REVIEW" && isSubmitter && (

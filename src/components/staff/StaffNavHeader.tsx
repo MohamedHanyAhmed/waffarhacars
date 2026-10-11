@@ -15,6 +15,8 @@ import {
   X,
   User,
   LayoutDashboard,
+  Tag,
+  ListChecks,
 } from "lucide-react";
 import type { StaffAuthStatusResponse } from "@/lib/staff/status-contract";
 
@@ -132,6 +134,16 @@ export function StaffNavHeader() {
 
             {isSales && (
               <Link
+                href="/staff/offers"
+                className={`flex items-center gap-1.5 px-3 py-2 rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400 ${pathname.startsWith("/staff/offers") ? "bg-slate-800 text-white font-bold" : "hover:bg-slate-800/60 hover:text-white"}`}
+              >
+                <Tag className="w-4 h-4 text-emerald-400" />
+                <span>{t("staffOffers.offers")}</span>
+              </Link>
+            )}
+
+            {isSales && (
+              <Link
                 href="/staff/providers/new"
                 className={`flex items-center gap-1.5 px-3 py-2 rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400 ${
                   pathname === "/staff/providers/new"
@@ -141,6 +153,26 @@ export function StaffNavHeader() {
               >
                 <PlusCircle className="w-4 h-4 text-emerald-400" />
                 <span>{t("onboarding.nav.newProvider")}</span>
+              </Link>
+            )}
+
+            {isOps && (
+              <Link
+                href="/staff/catalog"
+                className={`flex items-center gap-1.5 px-3 py-2 rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400 ${pathname === "/staff/catalog" ? "bg-slate-800 text-white font-bold" : "hover:bg-slate-800/60 hover:text-white"}`}
+              >
+                <ListChecks className="w-4 h-4 text-sky-400" />
+                <span>{t("staffOffers.catalog")}</span>
+              </Link>
+            )}
+
+            {isOps && (
+              <Link
+                href="/staff/ops/offers"
+                className={`flex items-center gap-1.5 px-3 py-2 rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400 ${pathname === "/staff/ops/offers" ? "bg-slate-800 text-white font-bold" : "hover:bg-slate-800/60 hover:text-white"}`}
+              >
+                <Tag className="w-4 h-4 text-amber-400" />
+                <span>{t("staffOffers.pendingOffers")}</span>
               </Link>
             )}
 
@@ -240,12 +272,45 @@ export function StaffNavHeader() {
 
             {isSales && (
               <Link
+                href="/staff/offers"
+                onClick={() => setMobileMenuOpen(false)}
+                className="px-3 py-2 rounded-lg hover:bg-slate-800 hover:text-white flex items-center gap-2"
+              >
+                <Tag className="w-4 h-4 text-emerald-400" />
+                <span>{t("staffOffers.offers")}</span>
+              </Link>
+            )}
+
+            {isSales && (
+              <Link
                 href="/staff/providers/new"
                 onClick={() => setMobileMenuOpen(false)}
                 className="px-3 py-2 rounded-lg hover:bg-slate-800 hover:text-white flex items-center gap-2"
               >
                 <PlusCircle className="w-4 h-4 text-emerald-400" />
                 <span>{t("onboarding.nav.newProvider")}</span>
+              </Link>
+            )}
+
+            {isOps && (
+              <Link
+                href="/staff/catalog"
+                onClick={() => setMobileMenuOpen(false)}
+                className="px-3 py-2 rounded-lg hover:bg-slate-800 hover:text-white flex items-center gap-2"
+              >
+                <ListChecks className="w-4 h-4 text-sky-400" />
+                <span>{t("staffOffers.catalog")}</span>
+              </Link>
+            )}
+
+            {isOps && (
+              <Link
+                href="/staff/ops/offers"
+                onClick={() => setMobileMenuOpen(false)}
+                className="px-3 py-2 rounded-lg hover:bg-slate-800 hover:text-white flex items-center gap-2"
+              >
+                <Tag className="w-4 h-4 text-amber-400" />
+                <span>{t("staffOffers.pendingOffers")}</span>
               </Link>
             )}
 

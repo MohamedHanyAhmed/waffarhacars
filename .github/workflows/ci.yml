@@ -120,6 +120,7 @@ jobs:
         run: npm run test:e2e
         env:
           CI: "true"
+          OFFER_EVIDENCE_PACKET_REPOSITORY_READY: "true"
           APP_RUNTIME_PROFILE: showcase
           APP_DATA_BACKEND: postgres
           DATABASE_URL: postgresql://test_user:test_password@localhost:5432/waffarhacars_test
