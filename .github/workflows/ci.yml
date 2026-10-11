@@ -120,6 +120,9 @@ jobs:
         run: npm run test:e2e
         env:
           CI: "true"
+          # CI-only loopback ingress accepts per-context reserved test IPs so
+          # independent real-login journeys do not share one rate-limit bucket.
+          TRUSTED_PROXY_HOPS: "1"
           OFFER_EVIDENCE_PACKET_REPOSITORY_READY: "true"
           APP_RUNTIME_PROFILE: showcase
           APP_DATA_BACKEND: postgres

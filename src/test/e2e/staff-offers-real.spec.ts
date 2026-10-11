@@ -27,6 +27,33 @@ async function login(page: Page, email: string) {
   );
 }
 
+async function waitForBlockedRequests(blocker: pg.Client, expected: number): Promise<number> {
+  const blockerPid = (await blocker.query<{ pid: number }>("SELECT pg_backend_pid() AS pid"))
+    .rows[0].pid;
+  const observer = new pg.Client({ connectionString: databaseUrl });
+  await observer.connect();
+  let waiting = 0;
+  const deadline = Date.now() + 5000;
+  try {
+    while (Date.now() < deadline && waiting < expected) {
+      const result = await observer.query<{ count: number }>(
+        `WITH RECURSIVE blocked(pid) AS (
+           SELECT pid FROM pg_stat_activity WHERE $1::int = ANY(pg_blocking_pids(pid))
+           UNION
+           SELECT activity.pid FROM pg_stat_activity activity
+           JOIN blocked ON blocked.pid = ANY(pg_blocking_pids(activity.pid))
+         ) SELECT count(*)::int AS count FROM blocked`,
+        [blockerPid]
+      );
+      waiting = result.rows[0]?.count ?? 0;
+      if (waiting < expected) await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  } finally {
+    await observer.end();
+  }
+  return waiting;
+}
+
 test("real UI and PostgreSQL: Ops catalogs, Sales drafts/submits, separate Ops approves with exact persisted state", async ({
   browser,
 }, testInfo) => {
@@ -131,7 +158,10 @@ test("real UI and PostgreSQL: Ops catalogs, Sales drafts/submits, separate Ops a
       },
     });
 
-    const opsContext = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    const opsContext = await browser.newContext({
+      viewport: { width: 1440, height: 900 },
+      extraHTTPHeaders: { "x-forwarded-for": "198.51.100.81" },
+    });
     console.info("[Offer E2E] Operations catalog setup");
     contexts.push(opsContext);
     const opsPage = await opsContext.newPage();
@@ -153,7 +183,10 @@ test("real UI and PostgreSQL: Ops catalogs, Sales drafts/submits, separate Ops a
       where: { code: `OFFER_E2E_${uid}` },
     });
 
-    const salesContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
+    const salesContext = await browser.newContext({
+      viewport: { width: 390, height: 844 },
+      extraHTTPHeaders: { "x-forwarded-for": "198.51.100.82" },
+    });
     console.info("[Offer E2E] Sales offer form");
     contexts.push(salesContext);
     const salesPage = await salesContext.newPage();
@@ -240,6 +273,64 @@ test("real UI and PostgreSQL: Ops catalogs, Sales drafts/submits, separate Ops a
       })
     ).toBe(1);
 
+    console.info("[Offer E2E] Two real browser contexts compete on one draft version");
+    const secondSalesContext = await browser.newContext({
+      viewport: { width: 1440, height: 900 },
+      extraHTTPHeaders: { "x-forwarded-for": "198.51.100.83" },
+    });
+    contexts.push(secondSalesContext);
+    const secondSalesPage = await secondSalesContext.newPage();
+    await login(secondSalesPage, sales.email);
+    await secondSalesPage.goto(`/staff/offers/${offerId}`);
+    await expect(secondSalesPage.locator("form #offer-titleEn")).toBeVisible();
+    await salesPage.locator("form").getByRole("button", { name: "Check answers" }).click();
+    await secondSalesPage.locator("form").getByRole("button", { name: "Check answers" }).click();
+
+    const blocker = new pg.Client({ connectionString: databaseUrl });
+    await blocker.connect();
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT id FROM provider_organizations WHERE id = $1 FOR UPDATE", [
+        provider.id,
+      ]);
+      await Promise.all([
+        salesPage.getByRole("button", { name: "Save draft" }).click(),
+        secondSalesPage.getByRole("button", { name: "Save draft" }).click(),
+      ]);
+      expect(await waitForBlockedRequests(blocker, 2)).toBeGreaterThanOrEqual(2);
+    } finally {
+      await blocker.query("COMMIT").catch(async () => blocker.query("ROLLBACK"));
+      await blocker.end();
+    }
+    await expect
+      .poll(async () => {
+        const current = await prisma.offerRevision.findUniqueOrThrow({ where: { id: draft.id } });
+        return current.version;
+      })
+      .toBe(2);
+    await expect
+      .poll(async () => {
+        const pages = [salesPage, secondSalesPage];
+        const results = await Promise.all(
+          pages.map(async (page) => ({
+            saved: await page.getByText("Saved from the server record.").count(),
+            conflict: await page.getByText("This record changed.", { exact: false }).count(),
+          }))
+        );
+        return {
+          saved: results.reduce((sum, result) => sum + result.saved, 0),
+          conflict: results.reduce((sum, result) => sum + result.conflict, 0),
+        };
+      })
+      .toEqual({ saved: 1, conflict: 1 });
+    expect(
+      await prisma.securityAuditEvent.count({
+        where: { eventType: "OFFER_DRAFT_UPDATED", targetEntity: `offer_revision:${draft.id}` },
+      })
+    ).toBe(1);
+    await salesPage.reload();
+    await expect(salesPage.locator("form #offer-titleEn")).toBeVisible();
+
     console.info("[Offer E2E] Sales submission");
     const submitSection = salesPage
       .locator("section")
@@ -274,17 +365,24 @@ test("real UI and PostgreSQL: Ops catalogs, Sales drafts/submits, separate Ops a
     const storedOffer = await prisma.offer.findUniqueOrThrow({ where: { id: offerId } });
     const approved = await prisma.offerRevision.findUniqueOrThrow({ where: { id: draft.id } });
     expect(approved.status).toBe("APPROVED");
-    expect(approved.version).toBe(3);
+    expect(approved.version).toBe(4);
     expect(approved.submittedByUserId).toBe(sales.userId);
     expect(approved.decidedByUserId).toBe(ops.userId);
     expect(storedOffer.currentApprovedRevisionId).toBe(draft.id);
     const auditCount = await prisma.securityAuditEvent.count({
       where: {
         targetEntity: `offer_revision:${draft.id}`,
-        eventType: { in: ["OFFER_DRAFT_CREATED", "OFFER_SUBMITTED_FOR_REVIEW", "OFFER_APPROVED"] },
+        eventType: {
+          in: [
+            "OFFER_DRAFT_CREATED",
+            "OFFER_DRAFT_UPDATED",
+            "OFFER_SUBMITTED_FOR_REVIEW",
+            "OFFER_APPROVED",
+          ],
+        },
       },
     });
-    expect(auditCount).toBe(3);
+    expect(auditCount).toBe(4);
 
     console.info("[Offer E2E] Arabic mobile evidence");
     await salesPage.getByRole("button", { name: "العربية (RTL)" }).click();
