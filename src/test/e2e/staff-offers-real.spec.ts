@@ -263,9 +263,15 @@ test("real UI and PostgreSQL: Ops catalogs, Sales drafts/submits, separate Ops a
     await expect(salesPage.getByText("Outcome is unknown", { exact: false }).first()).toBeVisible();
     expect(committedButResponseLost).toBe(true);
     await salesPage.getByRole("button", { name: "Recheck server state" }).click();
-    await salesPage.waitForURL(/\/staff\/offers\/[^/]+$/);
+    await salesPage.waitForURL(
+      (url) =>
+        /^\/staff\/offers\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+          url.pathname
+        ),
+      { timeout: 15_000 }
+    );
     offerId = new URL(salesPage.url()).pathname.split("/").at(-1);
-    expect(offerId).toBeTruthy();
+    expect(offerId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
     const draft = await prisma.offerRevision.findFirstOrThrow({
       where: { offerId },
     });
