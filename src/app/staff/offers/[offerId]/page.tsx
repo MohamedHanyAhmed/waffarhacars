@@ -539,6 +539,7 @@ export default function StaffOfferDetailPage() {
                 revision={selected}
                 offer={offer}
                 onSaved={(updated) => {
+                  setError(null);
                   setOffer((previous) =>
                     previous
                       ? {
@@ -570,7 +571,13 @@ export default function StaffOfferDetailPage() {
                   setError(t("staffOffers.conflict"));
                   setReload((value) => value + 1);
                 }}
-                onDirtyChange={setUnsaved}
+                onDirtyChange={(dirty) => {
+                  setUnsaved(dirty);
+                  if (dirty) {
+                    setError(null);
+                    setMessage(null);
+                  }
+                }}
                 onConflict={() => {
                   setError(t("staffOffers.conflict"));
                   setUnsaved(false);

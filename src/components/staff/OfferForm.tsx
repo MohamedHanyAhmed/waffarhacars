@@ -436,7 +436,7 @@ export function OfferForm({
             creationRequestId: crypto.randomUUID(),
             revisionRequestId: crypto.randomUUID(),
           };
-          setError(t("staffOffers.conflict"));
+          if (!onConflict) setError(t("staffOffers.conflict"));
           setStage("edit");
           onConflict?.();
           return;

@@ -371,6 +371,14 @@ test("real UI and PostgreSQL: English and Arabic mobile offers, response loss, C
         return current.version;
       })
       .toBe(3);
+    const raceWinner = await prisma.offerRevision.findUniqueOrThrow({ where: { id: draft.id } });
+    expect([firstContenderTitle, secondContenderTitle]).toContain(raceWinner.titleEn);
+    const winnerPage = raceWinner.titleEn === firstContenderTitle ? salesPage : secondSalesPage;
+    const loserPage = raceWinner.titleEn === firstContenderTitle ? secondSalesPage : salesPage;
+    await expect(winnerPage.getByRole("status").filter({ hasText: "Saved" })).toBeVisible();
+    await expect(
+      loserPage.getByRole("alert").filter({ hasText: "This record changed." }).first()
+    ).toBeVisible();
     await expect
       .poll(async () => {
         const pages = [salesPage, secondSalesPage];
@@ -386,8 +394,6 @@ test("real UI and PostgreSQL: English and Arabic mobile offers, response loss, C
         };
       })
       .toEqual({ saved: 1, conflict: 1 });
-    const raceWinner = await prisma.offerRevision.findUniqueOrThrow({ where: { id: draft.id } });
-    expect([firstContenderTitle, secondContenderTitle]).toContain(raceWinner.titleEn);
     expect(
       await prisma.securityAuditEvent.count({
         where: { eventType: "OFFER_DRAFT_UPDATED", targetEntity: `offer_revision:${draft.id}` },
