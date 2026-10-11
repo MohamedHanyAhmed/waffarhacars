@@ -305,12 +305,13 @@ test("real UI and PostgreSQL: English and Arabic mobile offers, response loss, C
     expect(editCommittedButResponseLost).toBe(true);
     await salesPage.unroute("**/api/v1/staff/offers/*/revisions/*");
     await salesPage.reload();
-    await expect(salesPage.getByRole("button", { name: "Recheck server state" })).toBeVisible();
+    await expect(salesPage.getByRole("button", { name: "Recheck server state" })).toHaveCount(1);
     await salesPage.getByRole("button", { name: "Recheck server state" }).click();
     await expect(
       salesPage.getByText("This record changed.", { exact: false }).first()
     ).toBeVisible();
     await expect(salesPage.locator("form #offer-titleEn")).toHaveValue(editedTitle);
+    await expect(salesPage.locator("form").getByRole("button", { name: "Check answers" })).toBeEnabled();
     const afterLostEdit = await prisma.offerRevision.findUniqueOrThrow({ where: { id: draft.id } });
     expect(afterLostEdit.titleEn).toBe(editedTitle);
     expect(afterLostEdit.version).toBe(2);

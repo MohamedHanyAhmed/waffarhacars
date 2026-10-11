@@ -51,7 +51,10 @@ export default function StaffOfferDetailPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [pending, setPending] = useState(false);
-  const [unknown, setUnknown] = useState(() => Boolean(readPendingOfferOperation()));
+  const [unknown, setUnknown] = useState(() => {
+    const journal = readPendingOfferOperation();
+    return Boolean(journal && journal.kind !== "edit");
+  });
   const [manual, setManual] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -86,7 +89,7 @@ export default function StaffOfferDetailPage() {
     let active = true;
     queueMicrotask(() => {
       if (!active) return;
-      setUnknown(true);
+      if (journal.kind !== "edit") setUnknown(true);
       if (journal.offerId !== offerId) {
         setManual(true);
         setError(t("staffOffers.manual"));
@@ -162,7 +165,7 @@ export default function StaffOfferDetailPage() {
     staff?.state === "ACTIVE" &&
     staff.department === "OPERATIONS" &&
     selected?.createdByUserId !== staff.userId;
-  const actionDisabled = pending || unknown || loading;
+  const actionDisabled = pending || unknown || loading || Boolean(readPendingOfferOperation());
 
   const markUnknown = (operation: PendingOfferOperation) => {
     operationRef.current = operation;
@@ -550,6 +553,8 @@ export default function StaffOfferDetailPage() {
                   setMessage(t("staffOffers.saved"));
                 }}
                 onReconciled={(current) => {
+                  operationRef.current = null;
+                  setUnknown(false);
                   setOffer((previous) =>
                     previous
                       ? {
