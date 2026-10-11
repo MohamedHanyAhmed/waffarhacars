@@ -153,6 +153,6 @@ jobs:
         if: success()
         with:
           name: staff-offer-mobile-arabic-evidence
-          path: test-results/**/offer-mobile-arabic.png
+          path: test-results/**/offer-mobile-arabic*.png
           if-no-files-found: error
           retention-days: 7
