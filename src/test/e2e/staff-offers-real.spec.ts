@@ -67,7 +67,14 @@ test("real UI and PostgreSQL: English and Arabic mobile offers, response loss, C
   }
 
   const prisma = getPrisma();
-  const uid = crypto.randomUUID().replaceAll("-", "").slice(0, 12).toUpperCase();
+  // Keep synthetic display names alphabetic: a numeric UUID slice can look like a phone number
+  // and correctly fail the production customer-copy PII validator.
+  const uid = crypto
+    .randomUUID()
+    .replaceAll("-", "")
+    .slice(0, 12)
+    .replace(/[0-9]/g, (digit) => String.fromCharCode(65 + Number(digit)))
+    .toUpperCase();
   const emails: string[] = [];
   let providerId: string | undefined;
   let offerId: string | undefined;
