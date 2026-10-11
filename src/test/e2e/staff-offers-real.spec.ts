@@ -132,6 +132,7 @@ test("real UI and PostgreSQL: Ops catalogs, Sales drafts/submits, separate Ops a
     });
 
     const opsContext = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    console.info("[Offer E2E] Operations catalog setup");
     contexts.push(opsContext);
     const opsPage = await opsContext.newPage();
     await login(opsPage, ops.email);
@@ -153,6 +154,7 @@ test("real UI and PostgreSQL: Ops catalogs, Sales drafts/submits, separate Ops a
     });
 
     const salesContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
+    console.info("[Offer E2E] Sales offer form");
     contexts.push(salesContext);
     const salesPage = await salesContext.newPage();
     await login(salesPage, sales.email);
@@ -190,9 +192,25 @@ test("real UI and PostgreSQL: Ops catalogs, Sales drafts/submits, separate Ops a
     await salesPage.locator("#offer-validUntil").fill(later);
     await salesPage.locator("#offer-evidenceDate").fill(yesterday);
     await salesPage.locator("#offer-commercialTermsAgreedAt").fill(yesterday);
+    await salesPage.locator("#offer-evidencePacketId").fill("x");
+    await salesPage.locator("#offer-customerPriceMinor").fill("1000.00");
+    await salesPage.getByRole("button", { name: "Check answers" }).click();
+    await expect(salesPage.getByRole("alert").first()).toBeFocused();
+    await expect(salesPage.locator("#offer-customerPriceMinor")).toHaveAttribute(
+      "aria-invalid",
+      "true"
+    );
+    await expect(salesPage.locator("#offer-evidencePacketId")).toHaveAttribute(
+      "aria-invalid",
+      "true"
+    );
+    await expect(salesPage.locator("#offer-titleAr")).toHaveValue(fields.titleAr);
+    await salesPage.locator("#offer-evidencePacketId").fill(fields.evidencePacketId);
+    await salesPage.locator("#offer-customerPriceMinor").fill(fields.customerPriceMinor);
     await salesPage.getByRole("button", { name: "Check answers" }).click();
     await expect(salesPage.getByText("1000.00")).toBeVisible();
     let committedButResponseLost = false;
+    console.info("[Offer E2E] Committed creation with dropped response");
     await salesPage.route("**/api/v1/staff/offers", async (route) => {
       if (route.request().method() !== "POST") return route.continue();
       const committed = await route.fetch();
@@ -222,6 +240,7 @@ test("real UI and PostgreSQL: Ops catalogs, Sales drafts/submits, separate Ops a
       })
     ).toBe(1);
 
+    console.info("[Offer E2E] Sales submission");
     const submitSection = salesPage
       .locator("section")
       .filter({ hasText: "Submit for Operations review" });
@@ -231,6 +250,7 @@ test("real UI and PostgreSQL: Ops catalogs, Sales drafts/submits, separate Ops a
       salesPage.getByRole("status").filter({ hasText: "Submission confirmed" })
     ).toBeVisible();
 
+    console.info("[Offer E2E] Operations approval");
     await opsPage.goto("/staff/ops/offers");
     await expect(opsPage.getByText(fields.titleEn)).toBeVisible();
     await opsPage
@@ -266,6 +286,7 @@ test("real UI and PostgreSQL: Ops catalogs, Sales drafts/submits, separate Ops a
     });
     expect(auditCount).toBe(3);
 
+    console.info("[Offer E2E] Arabic mobile evidence");
     await salesPage.getByRole("button", { name: "العربية (RTL)" }).click();
     await expect(salesPage.locator("main[dir=rtl]")).toBeVisible();
     await expect(salesPage.getByText(fields.titleAr).first()).toBeVisible();
@@ -274,7 +295,7 @@ test("real UI and PostgreSQL: Ops catalogs, Sales drafts/submits, separate Ops a
       contentType: "image/png",
     });
   } finally {
-    await Promise.all(contexts.map((context) => context.close()));
+    const closeResults = await Promise.allSettled(contexts.map((context) => context.close()));
     try {
       const ownedOffers = providerId
         ? await prisma.offer.findMany({
@@ -314,6 +335,12 @@ test("real UI and PostgreSQL: Ops catalogs, Sales drafts/submits, separate Ops a
       }
     } finally {
       await disconnectDb();
+    }
+    if (
+      testInfo.status === "passed" &&
+      closeResults.some((result) => result.status === "rejected")
+    ) {
+      throw new Error("Offer E2E context cleanup failed");
     }
   }
 });

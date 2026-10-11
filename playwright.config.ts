@@ -10,7 +10,8 @@ export default defineConfig({
   workers: 1,
   use: {
     baseURL: BASE_URL,
-    trace: "on-first-retry",
+    trace: "retain-on-failure",
+    screenshot: "only-on-failure",
   },
   projects: [
     {

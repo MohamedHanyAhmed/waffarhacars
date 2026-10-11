@@ -407,6 +407,7 @@ export default function StaffOfferDetailPage() {
                       : previous
                   );
                   setReload((value) => value + 1);
+                  setMessage(t("staffOffers.saved"));
                 }}
                 onDirtyChange={setUnsaved}
                 onConflict={() => {
