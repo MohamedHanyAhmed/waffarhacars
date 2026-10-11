@@ -9,7 +9,9 @@ import {
   clearPendingOfferOperation,
   minorToEgp,
   offerStatusKey,
+  ownsPendingOfferCallback,
   readPendingOfferOperation,
+  utcToCairoInput,
   writePendingOfferOperation,
   type OfferDto,
   type OfferMutationKind,
@@ -49,7 +51,7 @@ export default function StaffOfferDetailPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [pending, setPending] = useState(false);
-  const [unknown, setUnknown] = useState(() => readPendingOfferOperation()?.offerId === offerId);
+  const [unknown, setUnknown] = useState(() => Boolean(readPendingOfferOperation()));
   const [manual, setManual] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -64,9 +66,36 @@ export default function StaffOfferDetailPage() {
   const [reason, setReason] = useState("");
   const [reload, setReload] = useState(0);
   const inFlight = useRef(false);
+  const generation = useRef(0);
+  const attestedSnapshot = useRef<string | null>(null);
   const operationRef = useRef<PendingOfferOperation | null>(
     readPendingOfferOperation()?.offerId === offerId ? readPendingOfferOperation() : null
   );
+
+  useEffect(() => {
+    const counter = generation;
+    const current = ++counter.current;
+    return () => {
+      if (counter.current === current) counter.current++;
+    };
+  }, [offerId]);
+
+  useEffect(() => {
+    const journal = readPendingOfferOperation();
+    if (!journal) return;
+    let active = true;
+    queueMicrotask(() => {
+      if (!active) return;
+      setUnknown(true);
+      if (journal.offerId !== offerId) {
+        setManual(true);
+        setError(t("staffOffers.manual"));
+      } else operationRef.current = journal;
+    });
+    return () => {
+      active = false;
+    };
+  }, [offerId, t]);
 
   const load = useCallback(
     async (signal?: AbortSignal) => {
@@ -114,6 +143,17 @@ export default function StaffOfferDetailPage() {
   const revisions = offer?.revisions ?? [];
   const selected = revisions.find((item) => item.id === selectedId) ?? null;
   const latest = revisions[0] ?? null;
+  const snapshotIdentity = selected ? `${selected.id}:${selected.version}` : null;
+  useEffect(() => {
+    if (attestedSnapshot.current === snapshotIdentity) return;
+    attestedSnapshot.current = snapshotIdentity;
+    setChecks({
+      evidenceInspected: false,
+      priceVerified: false,
+      scopeVerified: false,
+      providerConsentVerified: false,
+    });
+  }, [snapshotIdentity]);
   const isSalesOwner =
     staff?.state === "ACTIVE" &&
     staff.department === "SALES" &&
@@ -138,6 +178,13 @@ export default function StaffOfferDetailPage() {
     successorRequestId?: string
   ) => {
     if (inFlight.current || actionDisabled) return;
+    if (
+      (kind === "approve" || kind === "reject") &&
+      attestedSnapshot.current !== `${revision.id}:${revision.version}`
+    ) {
+      setError(t("staffOffers.conflict"));
+      return;
+    }
     if (readPendingOfferOperation()) {
       setUnknown(true);
       setManual(true);
@@ -149,6 +196,7 @@ export default function StaffOfferDetailPage() {
     setError(null);
     setMessage(null);
     const operation: PendingOfferOperation = {
+      operationId: crypto.randomUUID(),
       kind,
       offerId,
       revisionId: revision.id,
@@ -156,6 +204,9 @@ export default function StaffOfferDetailPage() {
       ...(successorRequestId ? { revisionRequestId: successorRequestId } : {}),
       unresolved: true,
     };
+    const currentGeneration = generation.current;
+    const ownsCurrentOperation = () =>
+      ownsPendingOfferCallback(operation.operationId, currentGeneration, generation.current);
     try {
       writePendingOfferOperation(operation);
     } catch {
@@ -170,10 +221,14 @@ export default function StaffOfferDetailPage() {
         method: "POST",
         body: JSON.stringify(body),
       });
+      if (!ownsCurrentOperation()) return;
       if (!response.ok) {
-        if (response.status === 401) return router.replace("/staff/login");
+        if (response.status === 401) {
+          clearPendingOfferOperation(operation.operationId);
+          return router.replace("/staff/login");
+        }
         if (response.code === "OFFER_APPROVAL_BLOCKED") {
-          clearPendingOfferOperation();
+          clearPendingOfferOperation(operation.operationId);
           operationRef.current = null;
           setError(t("staffOffers.repositoryUnavailable"));
           return;
@@ -182,7 +237,7 @@ export default function StaffOfferDetailPage() {
           markUnknown(operation);
           return;
         }
-        clearPendingOfferOperation();
+        clearPendingOfferOperation(operation.operationId);
         operationRef.current = null;
         if (response.status === 409) {
           setError(t("staffOffers.conflict"));
@@ -196,7 +251,7 @@ export default function StaffOfferDetailPage() {
         } else setError(offerFailureMessage(response, t));
         return;
       }
-      clearPendingOfferOperation();
+      clearPendingOfferOperation(operation.operationId);
       operationRef.current = null;
       setUnknown(false);
       setConfirmSubmit(false);
@@ -220,18 +275,26 @@ export default function StaffOfferDetailPage() {
       setSelectedId(response.data.id);
       setReload((value) => value + 1);
     } catch {
-      markUnknown(operation);
+      if (ownsCurrentOperation()) markUnknown(operation);
     } finally {
       inFlight.current = false;
-      setPending(false);
+      if (generation.current === currentGeneration) setPending(false);
     }
   };
 
   const reconcile = async () => {
-    const operation = operationRef.current;
-    if (!operation) return;
+    const operation = readPendingOfferOperation();
+    if (!operation || operation.offerId !== offerId) {
+      setManual(true);
+      setError(t("staffOffers.manual"));
+      return;
+    }
+    const currentGeneration = generation.current;
+    const stillOwned = () =>
+      ownsPendingOfferCallback(operation.operationId, currentGeneration, generation.current);
     try {
       const response = await offerApi<OfferDto>(`/api/v1/staff/offers/${offerId}`);
+      if (!stillOwned()) return;
       if (!response.ok) {
         setManual(true);
         setError(t("staffOffers.manual"));
@@ -241,28 +304,23 @@ export default function StaffOfferDetailPage() {
       const successor = response.data.revisions?.find(
         (item) => item.requestId === operation.revisionRequestId
       );
-      const confirmed =
+      const settled =
         operation.kind === "successor"
           ? Boolean(successor)
-          : operation.kind === "submit"
-            ? Boolean(
-                current && current.status !== "DRAFT" && current.submittedByUserId === staff?.userId
-              )
-            : operation.kind === "approve"
-              ? Boolean(current?.status === "APPROVED" && current.decidedByUserId === staff?.userId)
-              : operation.kind === "reject"
-                ? Boolean(
-                    current?.status === "REJECTED" && current.decidedByUserId === staff?.userId
-                  )
-                : false;
-      if (confirmed) {
-        clearPendingOfferOperation();
+          : Boolean(
+              current &&
+              operation.expectedVersion !== undefined &&
+              current.version > operation.expectedVersion
+            );
+      if (settled) {
+        clearPendingOfferOperation(operation.operationId);
         operationRef.current = null;
         setUnknown(false);
         setManual(false);
         setOffer(response.data);
         setSelectedId(successor?.id ?? current?.id ?? null);
-        setMessage(t("staffOffers.saved"));
+        setMessage(null);
+        setError(t("staffOffers.conflict"));
       } else {
         setManual(true);
         setError(t("staffOffers.manual"));
@@ -281,6 +339,32 @@ export default function StaffOfferDetailPage() {
       </dd>
     </div>
   );
+
+  const cairoDate = (value: string | null) =>
+    value ? utcToCairoInput(value).replace("T", " ") : null;
+  const percentage = (basisPoints: string | number) => {
+    const value = BigInt(basisPoints);
+    return `${value / 100n}.${(value % 100n).toString().padStart(2, "0")}%`;
+  };
+  const bookingRuleLabels: Record<OfferRevisionDto["bookingRule"], string> = {
+    APPOINTMENT_REQUIRED: "staffOffers.appointment",
+    WALK_IN_ALLOWED: "staffOffers.walkIn",
+    CONTACT_TO_BOOK: "staffOffers.contact",
+  };
+  const evidenceTypeLabels: Record<string, string> = {
+    PROVIDER_PRICE_LIST: "staffOffers.evidenceProviderPriceList",
+    WRITTEN_QUOTE: "staffOffers.evidenceWrittenQuote",
+    PROVIDER_WRITTEN_CONFIRMATION: "staffOffers.evidenceProviderWrittenConfirmation",
+    OTHER: "staffOffers.evidenceOther",
+  };
+  const rejectionReasonLabels: Record<string, string> = {
+    PRICE_EVIDENCE_UNAVAILABLE: "staffOffers.reasonPriceEvidenceUnavailable",
+    PRICE_NOT_VERIFIED: "staffOffers.reasonPriceNotVerified",
+    SCOPE_INCOMPLETE: "staffOffers.reasonScopeIncomplete",
+    PROVIDER_CONSENT_UNVERIFIED: "staffOffers.reasonProviderConsentUnverified",
+    COMMERCIAL_TERMS_INCOMPLETE: "staffOffers.reasonCommercialTermsIncomplete",
+    OTHER: "staffOffers.reasonOther",
+  };
 
   return (
     <main className="mx-auto max-w-5xl space-y-6" dir={dir}>
@@ -344,6 +428,7 @@ export default function StaffOfferDetailPage() {
               <select
                 id="offer-revision"
                 value={selected.id}
+                disabled={actionDisabled}
                 onChange={(event) => {
                   setSelectedId(event.target.value);
                   setUnsaved(false);
@@ -365,12 +450,28 @@ export default function StaffOfferDetailPage() {
             </div>
           </section>
           <section className="rounded-2xl border bg-white p-5">
-            <h2 className="text-lg font-bold">{t("staffOffers.checkAnswers")}</h2>
+            <h2 className="text-lg font-bold">{t("staffOffers.decisionSnapshot")}</h2>
+            <p className="mt-1 text-sm text-slate-600">
+              {t("staffOffers.snapshotVersion", {
+                revision: selected.revisionNumber,
+                version: selected.version,
+              })}{" "}
+              {t(offerStatusKey(selected.status))}
+            </p>
             <dl className="mt-4 grid gap-4 sm:grid-cols-2">
-              {detail(
-                t("staffOffers.service"),
-                locale === "ar" ? selected.serviceNameAr : selected.serviceNameEn
-              )}
+              {detail(t("staffOffers.provider"), offer.providerOrganization?.nameEn)}
+              {detail(t("staffOffers.providerAr"), offer.providerOrganization?.nameAr)}
+              {detail(t("staffOffers.branch"), offer.branch?.nameEn)}
+              {detail(t("staffOffers.branchAr"), offer.branch?.nameAr)}
+              {detail(t("staffOffers.category"), selected.categoryNameEn)}
+              {detail(t("staffOffers.categoryAr"), selected.categoryNameAr)}
+              {detail(t("staffOffers.code"), selected.serviceCode, true)}
+              {detail(t("staffOffers.scopeEn"), selected.serviceScopeEn)}
+              {detail(t("staffOffers.scopeAr"), selected.serviceScopeAr)}
+              {detail(t("staffOffers.serviceEn"), selected.serviceNameEn)}
+              {detail(t("staffOffers.serviceAr"), selected.serviceNameAr)}
+              {detail(t("staffOffers.titleEn"), selected.titleEn)}
+              {detail(t("staffOffers.titleAr"), selected.titleAr)}
               {detail(t("staffOffers.includedLaborEn"), selected.includedLaborEn)}
               {detail(t("staffOffers.includedLaborAr"), selected.includedLaborAr)}
               {detail(t("staffOffers.includedPartsEn"), selected.includedPartsEn)}
@@ -379,6 +480,10 @@ export default function StaffOfferDetailPage() {
               {detail(t("staffOffers.excludedLaborAr"), selected.excludedLaborAr)}
               {detail(t("staffOffers.excludedPartsEn"), selected.excludedPartsEn)}
               {detail(t("staffOffers.excludedPartsAr"), selected.excludedPartsAr)}
+              {detail(t("staffOffers.bookingRule"), t(bookingRuleLabels[selected.bookingRule]))}
+              {detail(t("staffOffers.durationMinutes"), String(selected.durationMinutes), true)}
+              {detail(t("staffOffers.validFrom"), cairoDate(selected.validFrom), true)}
+              {detail(t("staffOffers.validUntil"), cairoDate(selected.validUntil), true)}
               {detail(
                 t("staffOffers.normalPrice"),
                 `EGP ${minorToEgp(selected.normalPriceMinor)}`,
@@ -389,10 +494,39 @@ export default function StaffOfferDetailPage() {
                 `EGP ${minorToEgp(selected.customerPriceMinor)}`,
                 true
               )}
+              {detail(t("staffOffers.savings"), `EGP ${minorToEgp(selected.savingsMinor)}`, true)}
+              {detail(t("staffOffers.discount"), percentage(selected.discountRateBps), true)}
               {detail(t("staffOffers.evidencePacket"), selected.evidencePacketId, true)}
+              {detail(
+                t("staffOffers.evidenceType"),
+                t(evidenceTypeLabels[selected.evidenceType] ?? "staffOffers.unrecognizedValue")
+              )}
+              {detail(t("staffOffers.evidenceDate"), cairoDate(selected.evidenceDate), true)}
               {detail(t("staffOffers.termsPacket"), selected.commercialTermsPacketId, true)}
-              {detail(t("staffOffers.commissionBps"), String(selected.commissionRateBps), true)}
+              {detail(
+                t("staffOffers.termsAgreedAt"),
+                cairoDate(selected.commercialTermsAgreedAt),
+                true
+              )}
+              {detail(t("staffOffers.commissionBasis"), t("staffOffers.commissionCustomerPrice"))}
+              {detail(
+                t("staffOffers.commissionBps"),
+                `${selected.commissionRateBps} bps (${percentage(selected.commissionRateBps)})`,
+                true
+              )}
               {detail(t("staffOffers.priceNotes"), selected.priceBasisNotes)}
+              {detail(t("staffOffers.submittedAt"), cairoDate(selected.submittedAt), true)}
+              {detail(t("staffOffers.submittedBy"), selected.submittedByUserId, true)}
+              {detail(t("staffOffers.decidedAt"), cairoDate(selected.decidedAt), true)}
+              {detail(t("staffOffers.decidedBy"), selected.decidedByUserId, true)}
+              {selected.rejectionReason &&
+                detail(
+                  t("staffOffers.reason"),
+                  t(
+                    rejectionReasonLabels[selected.rejectionReason] ??
+                      "staffOffers.unrecognizedValue"
+                  )
+                )}
             </dl>
           </section>
           {selected.status === "DRAFT" && isSalesOwner && (
@@ -414,6 +548,22 @@ export default function StaffOfferDetailPage() {
                   );
                   setReload((value) => value + 1);
                   setMessage(t("staffOffers.saved"));
+                }}
+                onReconciled={(current) => {
+                  setOffer((previous) =>
+                    previous
+                      ? {
+                          ...previous,
+                          revisions: previous.revisions?.map((item) =>
+                            item.id === current.id ? current : item
+                          ),
+                        }
+                      : previous
+                  );
+                  setUnsaved(false);
+                  setMessage(null);
+                  setError(t("staffOffers.conflict"));
+                  setReload((value) => value + 1);
                 }}
                 onDirtyChange={setUnsaved}
                 onConflict={() => {
@@ -540,7 +690,7 @@ export default function StaffOfferDetailPage() {
                   <option value="">{t("staffOffers.choose")}</option>
                   {reasons.map((item) => (
                     <option key={item} value={item}>
-                      {item}
+                      {t(rejectionReasonLabels[item])}
                     </option>
                   ))}
                 </select>

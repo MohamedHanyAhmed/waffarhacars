@@ -7,9 +7,11 @@ import type { ProviderOrganizationDto } from "@/lib/provider/dto";
 import {
   cairoInputToUtc,
   clearPendingOfferOperation,
+  editReconciliationAdvanced,
   egpToMinor,
   minorToEgp,
   offerDiscountBps,
+  ownsPendingOfferCallback,
   readPendingOfferOperation,
   utcToCairoInput,
   writePendingOfferOperation,
@@ -119,12 +121,14 @@ export function OfferForm({
   revision,
   offer,
   onSaved,
+  onReconciled,
   onDirtyChange,
   onConflict,
 }: {
   revision?: OfferRevisionDto;
   offer?: OfferDto;
   onSaved?: (updated: OfferRevisionDto) => void;
+  onReconciled?: (updated: OfferRevisionDto) => void;
   onDirtyChange?: (dirty: boolean) => void;
   onConflict?: () => void;
 }) {
@@ -143,7 +147,7 @@ export function OfferForm({
   const [error, setError] = useState<string | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [message, setMessage] = useState<string | null>(null);
-  const [manual, setManual] = useState(false);
+  const [, setManual] = useState(false);
   const frozen = useRef<{
     payload: OfferDraftPayload;
     creationRequestId: string;
@@ -155,13 +159,26 @@ export function OfferForm({
   });
   const inFlight = useRef(false);
   const summaryRef = useRef<HTMLDivElement>(null);
+  const generation = useRef(0);
+
+  useEffect(() => {
+    const counter = generation;
+    const current = ++counter.current;
+    return () => {
+      if (counter.current === current) counter.current++;
+    };
+  }, [revision?.id, offer?.id]);
 
   useEffect(() => {
     const journal = readPendingOfferOperation();
     if (journal) {
       setUnknown(true);
       setError(t("staffOffers.unknown"));
-      const belongsHere = revision ? journal.revisionId === revision.id : journal.kind === "create";
+      const belongsHere = revision
+        ? journal.kind === "edit" &&
+          journal.offerId === offer?.id &&
+          journal.revisionId === revision.id
+        : journal.kind === "create" && Boolean(journal.creationRequestId);
       if (!belongsHere) setManual(true);
       if (journal.creationRequestId && journal.revisionRequestId) {
         intentIds.current = {
@@ -170,7 +187,7 @@ export function OfferForm({
         };
       }
     }
-  }, [revision, t]);
+  }, [revision, offer?.id, t]);
 
   useEffect(() => {
     if (revision) return;
@@ -339,13 +356,7 @@ export function OfferForm({
   const save = async () => {
     if (inFlight.current || unknown || stage !== "check") return;
     const existing = readPendingOfferOperation();
-    if (
-      existing &&
-      (revision
-        ? existing.kind !== "edit" || existing.revisionId !== revision.id
-        : existing.kind !== "create" ||
-          existing.creationRequestId !== intentIds.current.creationRequestId)
-    ) {
+    if (existing) {
       setUnknown(true);
       setManual(true);
       setError(t("staffOffers.manual"));
@@ -365,13 +376,22 @@ export function OfferForm({
       : "/api/v1/staff/offers";
     const operation = revision
       ? {
+          operationId: crypto.randomUUID(),
           kind: "edit" as const,
           offerId: offer!.id,
           revisionId: revision.id,
           expectedVersion: revision.version,
           unresolved: true as const,
         }
-      : { kind: "create" as const, ...intentIds.current, unresolved: true as const };
+      : {
+          operationId: crypto.randomUUID(),
+          kind: "create" as const,
+          ...intentIds.current,
+          unresolved: true as const,
+        };
+    const currentGeneration = generation.current;
+    const ownsCurrentOperation = () =>
+      ownsPendingOfferCallback(operation.operationId, currentGeneration, generation.current);
     try {
       writePendingOfferOperation(operation);
     } catch {
@@ -398,15 +418,19 @@ export function OfferForm({
               }
         ),
       });
+      if (!ownsCurrentOperation()) return;
       if (!result.ok) {
-        if (result.status === 401) return router.replace("/staff/login");
+        if (result.status === 401) {
+          clearPendingOfferOperation(operation.operationId);
+          return router.replace("/staff/login");
+        }
         if (mutationOutcomeUnknown(result.status)) {
           setUnknown(true);
           setError(t("staffOffers.unknown"));
           return;
         }
         if (result.status === 409) {
-          clearPendingOfferOperation();
+          clearPendingOfferOperation(operation.operationId);
           frozen.current = null;
           intentIds.current = {
             creationRequestId: crypto.randomUUID(),
@@ -417,7 +441,7 @@ export function OfferForm({
           onConflict?.();
           return;
         }
-        clearPendingOfferOperation();
+        clearPendingOfferOperation(operation.operationId);
         frozen.current = null;
         intentIds.current = {
           creationRequestId: crypto.randomUUID(),
@@ -435,44 +459,66 @@ export function OfferForm({
         setStage("edit");
         return;
       }
-      clearPendingOfferOperation();
+      clearPendingOfferOperation(operation.operationId);
       if (revision) {
         onSaved?.(result.data as OfferRevisionDto);
         onDirtyChange?.(false);
-        setMessage(t("staffOffers.saved"));
         setStage("edit");
       } else router.push(`/staff/offers/${(result.data as { offer: OfferDto }).offer.id}`);
     } catch {
-      setUnknown(true);
-      setError(t("staffOffers.unknown"));
+      if (ownsCurrentOperation()) {
+        setUnknown(true);
+        setError(t("staffOffers.unknown"));
+      }
     } finally {
       inFlight.current = false;
-      setPending(false);
+      if (generation.current === currentGeneration) setPending(false);
     }
   };
 
   const reconcile = async () => {
+    const journal = readPendingOfferOperation();
+    const belongsHere = revision
+      ? journal?.kind === "edit" &&
+        journal.offerId === offer?.id &&
+        journal.revisionId === revision.id
+      : journal?.kind === "create" &&
+        journal.creationRequestId === intentIds.current.creationRequestId;
+    if (!journal || !belongsHere) {
+      setManual(true);
+      setError(t("staffOffers.manual"));
+      return;
+    }
+    const currentGeneration = generation.current;
+    const stillOwned = () =>
+      ownsPendingOfferCallback(journal.operationId, currentGeneration, generation.current);
     try {
       if (revision && offer) {
         const result = await offerApi<OfferDto>(`/api/v1/staff/offers/${offer.id}`);
+        if (!stillOwned()) return;
         if (result.ok) {
           const current = result.data.revisions?.find((item) => item.id === revision.id);
-          if (current && current.version > revision.version) {
-            clearPendingOfferOperation();
+          if (
+            current &&
+            editReconciliationAdvanced(journal, offer.id, revision.id, current.version)
+          ) {
+            clearPendingOfferOperation(journal.operationId);
             setUnknown(false);
+            setManual(false);
             setError(t("staffOffers.conflict"));
-            onSaved?.(current);
+            onReconciled?.(current);
             return;
           }
         }
       } else {
         const result = await offerApi<OfferRevisionDto[]>("/api/v1/staff/offers");
+        if (!stillOwned()) return;
         if (result.ok) {
           const match = result.data.find(
-            (item) => item.offer?.creationRequestId === intentIds.current.creationRequestId
+            (item) => item.offer?.creationRequestId === journal.creationRequestId
           );
           if (match) {
-            clearPendingOfferOperation();
+            clearPendingOfferOperation(journal.operationId);
             router.push(`/staff/offers/${match.offerId}`);
             return;
           }
@@ -481,7 +527,7 @@ export function OfferForm({
       setManual(true);
       setError(t("staffOffers.manual"));
     } catch {
-      setError(t("staffOffers.manual"));
+      if (stillOwned()) setError(t("staffOffers.manual"));
     }
   };
 
@@ -570,18 +616,6 @@ export function OfferForm({
           >
             {t("staffOffers.reconcile")}
           </button>
-          {!revision && frozen.current && !manual && (
-            <button
-              type="button"
-              onClick={() => {
-                setUnknown(false);
-                setStage("check");
-              }}
-              className="ms-3 rounded-lg border px-4 py-2"
-            >
-              {t("staffOffers.retrySame")}
-            </button>
-          )}
         </div>
       )}
       {stage === "check" ? (
@@ -777,12 +811,14 @@ export function OfferForm({
                   onChange={(event) => change("evidenceType", event.target.value)}
                   className="mt-1 w-full rounded-xl border p-3"
                 >
-                  <option value="PROVIDER_PRICE_LIST">PROVIDER_PRICE_LIST</option>
-                  <option value="WRITTEN_QUOTE">WRITTEN_QUOTE</option>
-                  <option value="PROVIDER_WRITTEN_CONFIRMATION">
-                    PROVIDER_WRITTEN_CONFIRMATION
+                  <option value="PROVIDER_PRICE_LIST">
+                    {t("staffOffers.evidenceProviderPriceList")}
                   </option>
-                  <option value="OTHER">OTHER</option>
+                  <option value="WRITTEN_QUOTE">{t("staffOffers.evidenceWrittenQuote")}</option>
+                  <option value="PROVIDER_WRITTEN_CONFIRMATION">
+                    {t("staffOffers.evidenceProviderWrittenConfirmation")}
+                  </option>
+                  <option value="OTHER">{t("staffOffers.evidenceOther")}</option>
                 </select>
               </div>
               {input("evidenceDate", "datetime-local", false, true)}

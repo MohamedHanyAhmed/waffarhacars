@@ -1,11 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useI18n } from "@/context/I18nContext";
 import { offerApi, offerFailureMessage, mutationOutcomeUnknown } from "@/lib/offer/client-api";
 import {
   clearPendingCatalogOperation,
+  ownsPendingCatalogCallback,
   readPendingCatalogOperation,
   writePendingCatalogOperation,
   type ServiceCategoryDto,
@@ -49,6 +50,16 @@ export default function StaffCatalogPage() {
   const [message, setMessage] = useState<string | null>(null);
   const [form, setForm] = useState<ServiceForm>(emptyForm);
   const [editing, setEditing] = useState<{ id: string; version: number } | null>(null);
+  const generation = useRef(0);
+  const inFlight = useRef(false);
+
+  useEffect(() => {
+    const counter = generation;
+    const current = ++counter.current;
+    return () => {
+      if (counter.current === current) counter.current++;
+    };
+  }, []);
 
   const load = useCallback(
     async (signal?: AbortSignal) => {
@@ -112,7 +123,13 @@ export default function StaffCatalogPage() {
 
   const save = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (pending || unknown || !canManage) return;
+    if (inFlight.current || pending || unknown || !canManage) return;
+    if (readPendingCatalogOperation()) {
+      setUnknown(true);
+      setError(t("staffOffers.manual"));
+      return;
+    }
+    inFlight.current = true;
     setPending(true);
     setError(null);
     setMessage(null);
@@ -127,12 +144,18 @@ export default function StaffCatalogPage() {
       itemSku: form.itemSku.trim() || null,
       ...(editing ? { expectedVersion: editing.version, isActive: form.isActive } : {}),
     };
+    const operation = {
+      operationId: crypto.randomUUID(),
+      code: payload.code,
+      ...(editing ? { definitionId: editing.id, expectedVersion: editing.version } : {}),
+    };
+    const currentGeneration = generation.current;
+    const ownsCurrentOperation = () =>
+      ownsPendingCatalogCallback(operation.operationId, currentGeneration, generation.current);
     try {
-      writePendingCatalogOperation({
-        code: payload.code,
-        ...(editing ? { definitionId: editing.id, expectedVersion: editing.version } : {}),
-      });
+      writePendingCatalogOperation(operation);
     } catch {
+      inFlight.current = false;
       setPending(false);
       setError(t("staffOffers.storageUnavailable"));
       return;
@@ -144,28 +167,35 @@ export default function StaffCatalogPage() {
           : "/api/v1/staff/ops/catalog/services",
         { method: editing ? "PATCH" : "POST", body: JSON.stringify(payload) }
       );
+      if (!ownsCurrentOperation()) return;
       if (!result.ok) {
-        if (result.status === 401) return router.replace("/staff/login");
+        if (result.status === 401) {
+          clearPendingCatalogOperation(operation.operationId);
+          return router.replace("/staff/login");
+        }
         if (mutationOutcomeUnknown(result.status)) {
           setUnknown(true);
           setError(t("staffOffers.unknown"));
         } else {
-          clearPendingCatalogOperation();
+          clearPendingCatalogOperation(operation.operationId);
           if (result.status === 409) await load();
           setError(offerFailureMessage(result, t));
         }
         return;
       }
-      clearPendingCatalogOperation();
+      clearPendingCatalogOperation(operation.operationId);
       setMessage(t("staffOffers.saved"));
       setEditing(null);
       setForm(emptyForm);
       await load();
     } catch {
-      setUnknown(true);
-      setError(t("staffOffers.unknown"));
+      if (ownsCurrentOperation()) {
+        setUnknown(true);
+        setError(t("staffOffers.unknown"));
+      }
     } finally {
-      setPending(false);
+      inFlight.current = false;
+      if (generation.current === currentGeneration) setPending(false);
     }
   };
 
@@ -248,127 +278,132 @@ export default function StaffCatalogPage() {
           onSubmit={save}
           className="space-y-5 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"
         >
-          <h2 className="text-lg font-bold">
-            {t(editing ? "staffOffers.editService" : "staffOffers.createService")}
-          </h2>
-          <div className="grid gap-4 sm:grid-cols-2">
-            {field("code", t("staffOffers.code"), { dir: "ltr" })}
-            <div>
-              <label
-                htmlFor="catalog-categoryId"
-                className="block text-sm font-semibold text-slate-700"
-              >
-                {t("staffOffers.category")}
-              </label>
-              <select
-                id="catalog-categoryId"
-                required
-                value={form.categoryId}
-                onChange={(event) => {
-                  const category = categories.find((item) => item.id === event.target.value);
-                  setForm((previous) => ({
-                    ...previous,
-                    categoryId: event.target.value,
-                    pricingMode:
-                      category?.code === "GENERAL_REPAIRS"
-                        ? "QUOTE_REQUIRED"
-                        : previous.pricingMode,
-                    itemSku: category?.code === "ACCESSORIES" ? previous.itemSku : "",
-                  }));
-                }}
-                className="mt-1 w-full rounded-xl border border-slate-300 p-3"
-              >
-                <option value="">{t("staffOffers.choose")}</option>
-                {categories
-                  .filter((category) => category.isActive)
-                  .map((category) => (
-                    <option key={category.id} value={category.id}>
-                      {locale === "ar" ? category.nameAr : category.nameEn}
-                    </option>
-                  ))}
-              </select>
+          <fieldset disabled={pending || unknown} className="space-y-5">
+            <h2 className="text-lg font-bold">
+              {t(editing ? "staffOffers.editService" : "staffOffers.createService")}
+            </h2>
+            <div className="grid gap-4 sm:grid-cols-2">
+              {field("code", t("staffOffers.code"), { dir: "ltr" })}
+              <div>
+                <label
+                  htmlFor="catalog-categoryId"
+                  className="block text-sm font-semibold text-slate-700"
+                >
+                  {t("staffOffers.category")}
+                </label>
+                <select
+                  id="catalog-categoryId"
+                  required
+                  value={form.categoryId}
+                  onChange={(event) => {
+                    const category = categories.find((item) => item.id === event.target.value);
+                    setForm((previous) => ({
+                      ...previous,
+                      categoryId: event.target.value,
+                      pricingMode:
+                        category?.code === "GENERAL_REPAIRS"
+                          ? "QUOTE_REQUIRED"
+                          : previous.pricingMode,
+                      itemSku: category?.code === "ACCESSORIES" ? previous.itemSku : "",
+                    }));
+                  }}
+                  className="mt-1 w-full rounded-xl border border-slate-300 p-3"
+                >
+                  <option value="">{t("staffOffers.choose")}</option>
+                  {categories
+                    .filter((category) => category.isActive)
+                    .map((category) => (
+                      <option key={category.id} value={category.id}>
+                        {locale === "ar" ? category.nameAr : category.nameEn}
+                      </option>
+                    ))}
+                </select>
+              </div>
+              {field("nameEn", t("staffOffers.serviceEn"), { dir: "ltr" })}
+              {field("nameAr", t("staffOffers.serviceAr"), { dir: "rtl" })}
+              {field("scopeEn", t("staffOffers.scopeEn"), { textarea: true, dir: "ltr" })}
+              {field("scopeAr", t("staffOffers.scopeAr"), { textarea: true, dir: "rtl" })}
+              <div>
+                <label
+                  htmlFor="catalog-pricingMode"
+                  className="block text-sm font-semibold text-slate-700"
+                >
+                  {t("staffOffers.pricingMode")}
+                </label>
+                <select
+                  id="catalog-pricingMode"
+                  value={form.pricingMode}
+                  onChange={(event) =>
+                    setForm((previous) => ({
+                      ...previous,
+                      pricingMode: event.target.value as ServiceForm["pricingMode"],
+                    }))
+                  }
+                  className="mt-1 w-full rounded-xl border border-slate-300 p-3"
+                >
+                  <option
+                    value="FIXED_SCOPE"
+                    disabled={selectedCategory?.code === "GENERAL_REPAIRS"}
+                  >
+                    {t("staffOffers.fixedScope")}
+                  </option>
+                  <option value="QUOTE_REQUIRED">{t("staffOffers.quoteRequired")}</option>
+                </select>
+              </div>
+              <div>
+                <label
+                  htmlFor="catalog-itemSku"
+                  className="block text-sm font-semibold text-slate-700"
+                >
+                  {t("staffOffers.sku")}
+                </label>
+                <input
+                  id="catalog-itemSku"
+                  dir="ltr"
+                  required={selectedCategory?.code === "ACCESSORIES"}
+                  value={form.itemSku}
+                  onChange={(event) =>
+                    setForm((previous) => ({ ...previous, itemSku: event.target.value }))
+                  }
+                  className="mt-1 w-full rounded-xl border border-slate-300 p-3"
+                />
+              </div>
             </div>
-            {field("nameEn", t("staffOffers.serviceEn"), { dir: "ltr" })}
-            {field("nameAr", t("staffOffers.serviceAr"), { dir: "rtl" })}
-            {field("scopeEn", t("staffOffers.scopeEn"), { textarea: true, dir: "ltr" })}
-            {field("scopeAr", t("staffOffers.scopeAr"), { textarea: true, dir: "rtl" })}
-            <div>
-              <label
-                htmlFor="catalog-pricingMode"
-                className="block text-sm font-semibold text-slate-700"
-              >
-                {t("staffOffers.pricingMode")}
-              </label>
-              <select
-                id="catalog-pricingMode"
-                value={form.pricingMode}
-                onChange={(event) =>
-                  setForm((previous) => ({
-                    ...previous,
-                    pricingMode: event.target.value as ServiceForm["pricingMode"],
-                  }))
-                }
-                className="mt-1 w-full rounded-xl border border-slate-300 p-3"
-              >
-                <option value="FIXED_SCOPE" disabled={selectedCategory?.code === "GENERAL_REPAIRS"}>
-                  {t("staffOffers.fixedScope")}
-                </option>
-                <option value="QUOTE_REQUIRED">{t("staffOffers.quoteRequired")}</option>
-              </select>
-            </div>
-            <div>
-              <label
-                htmlFor="catalog-itemSku"
-                className="block text-sm font-semibold text-slate-700"
-              >
-                {t("staffOffers.sku")}
-              </label>
-              <input
-                id="catalog-itemSku"
-                dir="ltr"
-                required={selectedCategory?.code === "ACCESSORIES"}
-                value={form.itemSku}
-                onChange={(event) =>
-                  setForm((previous) => ({ ...previous, itemSku: event.target.value }))
-                }
-                className="mt-1 w-full rounded-xl border border-slate-300 p-3"
-              />
-            </div>
-          </div>
-          {editing && (
-            <label className="flex items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                checked={form.isActive}
-                onChange={(event) =>
-                  setForm((previous) => ({ ...previous, isActive: event.target.checked }))
-                }
-              />
-              {t("staffOffers.active")}
-            </label>
-          )}
-          <div className="flex gap-3">
-            <button
-              disabled={pending || unknown}
-              type="submit"
-              className="rounded-xl bg-brand-600 px-5 py-3 font-semibold text-white disabled:opacity-50"
-            >
-              {pending ? t("staffOffers.saving") : t("staffOffers.saveService")}
-            </button>
             {editing && (
-              <button
-                type="button"
-                disabled={pending || unknown}
-                onClick={() => {
-                  setEditing(null);
-                  setForm(emptyForm);
-                }}
-                className="rounded-xl border px-5 py-3"
-              >
-                {t("staffOffers.editAnswers")}
-              </button>
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={form.isActive}
+                  onChange={(event) =>
+                    setForm((previous) => ({ ...previous, isActive: event.target.checked }))
+                  }
+                />
+                {t("staffOffers.active")}
+              </label>
             )}
-          </div>
+            <div className="flex gap-3">
+              <button
+                disabled={pending || unknown}
+                type="submit"
+                className="rounded-xl bg-brand-600 px-5 py-3 font-semibold text-white disabled:opacity-50"
+              >
+                {pending ? t("staffOffers.saving") : t("staffOffers.saveService")}
+              </button>
+              {editing && (
+                <button
+                  type="button"
+                  disabled={pending || unknown}
+                  onClick={() => {
+                    setEditing(null);
+                    setForm(emptyForm);
+                  }}
+                  className="rounded-xl border px-5 py-3"
+                >
+                  {t("staffOffers.editAnswers")}
+                </button>
+              )}
+            </div>
+          </fieldset>
         </form>
       )}
       <div className="space-y-4">

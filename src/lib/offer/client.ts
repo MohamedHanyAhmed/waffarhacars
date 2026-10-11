@@ -54,7 +54,12 @@ export interface OfferRevisionDto {
   serviceDefinitionId: string;
   serviceNameEn: string;
   serviceNameAr: string;
+  serviceCode: string;
+  serviceScopeEn: string;
+  serviceScopeAr: string;
   categoryCode: string;
+  categoryNameEn: string;
+  categoryNameAr: string;
   offer?: OfferDto;
 }
 
@@ -121,6 +126,7 @@ export interface OfferDraftPayload {
 }
 
 export interface PendingOfferOperation {
+  operationId: string;
   kind: OfferMutationKind;
   offerId?: string;
   revisionId?: string;
@@ -134,6 +140,7 @@ const JOURNAL_KEY = "waffarhacars_offer_pending_v1";
 const CATALOG_JOURNAL_KEY = "waffarhacars_catalog_pending_v1";
 
 export interface PendingCatalogOperation {
+  operationId: string;
   code: string;
   definitionId?: string;
   expectedVersion?: number;
@@ -154,11 +161,27 @@ export function readPendingCatalogOperation(): PendingCatalogOperation | null {
 }
 
 export function writePendingCatalogOperation(operation: PendingCatalogOperation): void {
+  const existing = readPendingCatalogOperation();
+  if (existing && existing.operationId !== operation.operationId)
+    throw new Error("A different catalog operation is unresolved");
   sessionStorage.setItem(CATALOG_JOURNAL_KEY, JSON.stringify(operation));
 }
 
-export function clearPendingCatalogOperation(): void {
+export function clearPendingCatalogOperation(operationId: string): boolean {
+  if (readPendingCatalogOperation()?.operationId !== operationId) return false;
   sessionStorage.removeItem(CATALOG_JOURNAL_KEY);
+  return true;
+}
+
+export function ownsPendingCatalogCallback(
+  operationId: string,
+  dispatchedGeneration: number,
+  currentGeneration: number
+): boolean {
+  return (
+    dispatchedGeneration === currentGeneration &&
+    readPendingCatalogOperation()?.operationId === operationId
+  );
 }
 
 export function readPendingOfferOperation(): PendingOfferOperation | null {
@@ -177,11 +200,43 @@ export function readPendingOfferOperation(): PendingOfferOperation | null {
 }
 
 export function writePendingOfferOperation(operation: PendingOfferOperation): void {
+  const existing = readPendingOfferOperation();
+  if (existing && existing.operationId !== operation.operationId)
+    throw new Error("A different offer operation is unresolved");
   sessionStorage.setItem(JOURNAL_KEY, JSON.stringify(operation));
 }
 
-export function clearPendingOfferOperation(): void {
+export function clearPendingOfferOperation(operationId: string): boolean {
+  if (readPendingOfferOperation()?.operationId !== operationId) return false;
   sessionStorage.removeItem(JOURNAL_KEY);
+  return true;
+}
+
+export function ownsPendingOfferCallback(
+  operationId: string,
+  dispatchedGeneration: number,
+  currentGeneration: number
+): boolean {
+  return (
+    dispatchedGeneration === currentGeneration &&
+    readPendingOfferOperation()?.operationId === operationId
+  );
+}
+
+/** A newer server version settles this CAS attempt, not proof that its values won. */
+export function editReconciliationAdvanced(
+  operation: PendingOfferOperation,
+  offerId: string,
+  revisionId: string,
+  serverVersion: number
+): boolean {
+  return (
+    operation.kind === "edit" &&
+    operation.offerId === offerId &&
+    operation.revisionId === revisionId &&
+    operation.expectedVersion !== undefined &&
+    serverVersion > operation.expectedVersion
+  );
 }
 
 /** Exact decimal EGP to integer piastres, with no floating-point arithmetic. */

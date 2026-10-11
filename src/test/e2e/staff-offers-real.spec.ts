@@ -54,10 +54,10 @@ async function waitForBlockedRequests(blocker: pg.Client, expected: number): Pro
   return waiting;
 }
 
-test("real UI and PostgreSQL: Ops catalogs, Sales drafts/submits, separate Ops approves with exact persisted state", async ({
+test("real UI and PostgreSQL: English and Arabic mobile offers, response loss, CAS conflict, and Ops decisions", async ({
   browser,
 }, testInfo) => {
-  test.setTimeout(150_000);
+  test.setTimeout(210_000);
   const probe = new pg.Client({ connectionString: databaseUrl, connectionTimeoutMillis: 5000 });
   try {
     await probe.connect();
@@ -270,6 +270,7 @@ test("real UI and PostgreSQL: Ops catalogs, Sales drafts/submits, separate Ops a
         ),
       { timeout: 15_000 }
     );
+    await salesPage.unroute("**/api/v1/staff/offers");
     offerId = new URL(salesPage.url()).pathname.split("/").at(-1);
     expect(offerId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
     const draft = await prisma.offerRevision.findFirstOrThrow({
@@ -287,6 +288,38 @@ test("real UI and PostgreSQL: Ops catalogs, Sales drafts/submits, separate Ops a
       })
     ).toBe(1);
 
+    console.info("[Offer E2E] Committed edit with dropped response and reload reconciliation");
+    const editedTitle = "Express oil change after price-list review";
+    await salesPage.locator("form #offer-titleEn").fill(editedTitle);
+    await salesPage.locator("form").getByRole("button", { name: "Check answers" }).click();
+    let editCommittedButResponseLost = false;
+    await salesPage.route("**/api/v1/staff/offers/*/revisions/*", async (route) => {
+      if (route.request().method() !== "PATCH") return route.continue();
+      const committed = await route.fetch();
+      expect(committed.status()).toBe(200);
+      editCommittedButResponseLost = true;
+      await route.abort("failed");
+    });
+    await salesPage.getByRole("button", { name: "Save draft" }).click();
+    await expect(salesPage.getByText("Outcome is unknown", { exact: false }).first()).toBeVisible();
+    expect(editCommittedButResponseLost).toBe(true);
+    await salesPage.unroute("**/api/v1/staff/offers/*/revisions/*");
+    await salesPage.reload();
+    await expect(salesPage.getByRole("button", { name: "Recheck server state" })).toBeVisible();
+    await salesPage.getByRole("button", { name: "Recheck server state" }).click();
+    await expect(
+      salesPage.getByText("This record changed.", { exact: false }).first()
+    ).toBeVisible();
+    await expect(salesPage.locator("form #offer-titleEn")).toHaveValue(editedTitle);
+    const afterLostEdit = await prisma.offerRevision.findUniqueOrThrow({ where: { id: draft.id } });
+    expect(afterLostEdit.titleEn).toBe(editedTitle);
+    expect(afterLostEdit.version).toBe(2);
+    expect(
+      await prisma.securityAuditEvent.count({
+        where: { eventType: "OFFER_DRAFT_UPDATED", targetEntity: `offer_revision:${draft.id}` },
+      })
+    ).toBe(1);
+
     console.info("[Offer E2E] Two real browser contexts compete on one draft version");
     const secondSalesContext = await browser.newContext({
       viewport: { width: 1440, height: 900 },
@@ -299,6 +332,10 @@ test("real UI and PostgreSQL: Ops catalogs, Sales drafts/submits, separate Ops a
     const secondSalesPage = await secondSalesContext.newPage();
     await secondSalesPage.goto(`/staff/offers/${offerId}`);
     await expect(secondSalesPage.locator("form #offer-titleEn")).toBeVisible();
+    const firstContenderTitle = "First competing value";
+    const secondContenderTitle = "Second competing value";
+    await salesPage.locator("form #offer-titleEn").fill(firstContenderTitle);
+    await secondSalesPage.locator("form #offer-titleEn").fill(secondContenderTitle);
     await salesPage.locator("form").getByRole("button", { name: "Check answers" }).click();
     await secondSalesPage.locator("form").getByRole("button", { name: "Check answers" }).click();
 
@@ -323,7 +360,7 @@ test("real UI and PostgreSQL: Ops catalogs, Sales drafts/submits, separate Ops a
         const current = await prisma.offerRevision.findUniqueOrThrow({ where: { id: draft.id } });
         return current.version;
       })
-      .toBe(2);
+      .toBe(3);
     await expect
       .poll(async () => {
         const pages = [salesPage, secondSalesPage];
@@ -339,11 +376,13 @@ test("real UI and PostgreSQL: Ops catalogs, Sales drafts/submits, separate Ops a
         };
       })
       .toEqual({ saved: 1, conflict: 1 });
+    const raceWinner = await prisma.offerRevision.findUniqueOrThrow({ where: { id: draft.id } });
+    expect([firstContenderTitle, secondContenderTitle]).toContain(raceWinner.titleEn);
     expect(
       await prisma.securityAuditEvent.count({
         where: { eventType: "OFFER_DRAFT_UPDATED", targetEntity: `offer_revision:${draft.id}` },
       })
-    ).toBe(1);
+    ).toBe(2);
     await salesPage.reload();
     await expect(salesPage.locator("form #offer-titleEn")).toBeVisible();
 
@@ -378,7 +417,7 @@ test("real UI and PostgreSQL: Ops catalogs, Sales drafts/submits, separate Ops a
     const storedOffer = await prisma.offer.findUniqueOrThrow({ where: { id: offerId } });
     const approved = await prisma.offerRevision.findUniqueOrThrow({ where: { id: draft.id } });
     expect(approved.status).toBe("APPROVED");
-    expect(approved.version).toBe(4);
+    expect(approved.version).toBe(5);
     expect(approved.submittedByUserId).toBe(sales.userId);
     expect(approved.decidedByUserId).toBe(ops.userId);
     expect(storedOffer.currentApprovedRevisionId).toBe(draft.id);
@@ -395,14 +434,234 @@ test("real UI and PostgreSQL: Ops catalogs, Sales drafts/submits, separate Ops a
         },
       },
     });
-    expect(auditCount).toBe(4);
+    expect(auditCount).toBe(5);
 
-    console.info("[Offer E2E] Arabic mobile evidence");
+    console.info("[Offer E2E] Arabic mobile form, validation, and check-answers journey");
     await salesPage
       .getByRole("button", { name: "Toggle language between Arabic and English" })
       .click();
+    await salesPage.goto("/staff/offers/new");
     await expect(salesPage.locator("main[dir=rtl]")).toBeVisible();
-    await expect(salesPage.getByText(fields.titleAr).first()).toBeVisible();
+    await expect(salesPage.locator("#offer-provider")).toBeVisible();
+    await expect(salesPage.locator(`#offer-provider option[value="${provider.id}"]`)).toHaveCount(
+      1
+    );
+    await salesPage.locator("#offer-provider").selectOption(provider.id);
+    await expect(salesPage.locator(`#offer-branch option[value="${branch.id}"]`)).toHaveCount(1);
+    await salesPage.locator("#offer-branch").selectOption(branch.id);
+    await expect(salesPage.locator(`#offer-service option[value="${definition.id}"]`)).toHaveCount(
+      1
+    );
+    await salesPage.locator("#offer-service").selectOption(definition.id);
+    const arabicFields: Record<string, string> = {
+      ...fields,
+      titleEn: "Arabic mobile journey offer",
+      titleAr: "عرض صيانة عبر الهاتف",
+      evidencePacketId: `AR_PRICE_${uid}`,
+      commercialTermsPacketId: `AR_TERMS_${uid}`,
+    };
+    for (const [name, value] of Object.entries(arabicFields)) {
+      await salesPage.locator(`#offer-${name}`).fill(value);
+    }
+    await salesPage.locator("#offer-bookingRule").selectOption("WALK_IN_ALLOWED");
+    await salesPage.locator("#offer-evidenceType").selectOption("WRITTEN_QUOTE");
+    await salesPage.locator("#offer-validFrom").fill(future);
+    await salesPage.locator("#offer-validUntil").fill(later);
+    await salesPage.locator("#offer-evidenceDate").fill(yesterday);
+    await salesPage.locator("#offer-commercialTermsAgreedAt").fill(yesterday);
+    await salesPage.locator("#offer-evidencePacketId").fill("x");
+    await salesPage.locator("#offer-customerPriceMinor").fill("1000.00");
+    await salesPage.getByRole("button", { name: "مراجعة البيانات" }).click();
+    await expect(salesPage.getByRole("alert").first()).toBeFocused();
+    await expect(salesPage.locator("#offer-evidencePacketId")).toHaveAttribute(
+      "aria-invalid",
+      "true"
+    );
+    await expect(salesPage.locator("#offer-customerPriceMinor")).toHaveAttribute(
+      "aria-invalid",
+      "true"
+    );
+    await expect(salesPage.locator("#offer-titleAr")).toHaveValue(arabicFields.titleAr);
+    await salesPage.locator("#offer-evidencePacketId").fill(arabicFields.evidencePacketId);
+    await salesPage.locator("#offer-customerPriceMinor").fill(arabicFields.customerPriceMinor);
+    await salesPage.getByRole("button", { name: "مراجعة البيانات" }).click();
+    const checkAnswers = salesPage.getByRole("region", { name: "مراجعة البيانات" });
+    await expect(checkAnswers).toBeVisible();
+    await expect(checkAnswers.getByText(arabicFields.titleAr)).toBeVisible();
+    await expect(checkAnswers.getByText(arabicFields.includedLaborAr)).toBeVisible();
+    await expect(checkAnswers.getByText(arabicFields.evidencePacketId)).toBeVisible();
+    await expect(checkAnswers.getByText("800.00")).toBeVisible();
+    expect(
+      await salesPage.evaluate(
+        () =>
+          Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) <=
+          innerWidth + 1
+      )
+    ).toBe(true);
+    const checkScreenshot = testInfo.outputPath("offer-mobile-arabic-check-answers.png");
+    await salesPage.screenshot({ path: checkScreenshot, fullPage: true });
+    await testInfo.attach("offer-mobile-arabic-check-answers", {
+      path: checkScreenshot,
+      contentType: "image/png",
+    });
+    await salesPage.getByRole("button", { name: "حفظ المسودة" }).click();
+    await salesPage.waitForURL(
+      (url) =>
+        /^\/staff\/offers\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+          url.pathname
+        ),
+      { timeout: 15_000 }
+    );
+    const arabicOfferId = new URL(salesPage.url()).pathname.split("/").at(-1)!;
+    expect(arabicOfferId).not.toBe(offerId);
+    const arabicDraft = await prisma.offerRevision.findFirstOrThrow({
+      where: { offerId: arabicOfferId },
+    });
+    expect(arabicDraft.status).toBe("DRAFT");
+    expect(arabicDraft.titleAr).toBe(arabicFields.titleAr);
+    expect(arabicDraft.bookingRule).toBe("WALK_IN_ALLOWED");
+    expect(arabicDraft.evidenceType).toBe("WRITTEN_QUOTE");
+    expect(arabicDraft.normalPriceMinor.toString()).toBe("100000");
+    expect(arabicDraft.customerPriceMinor.toString()).toBe("80000");
+    expect(arabicDraft.commissionRateBps).toBe(0);
+    await salesPage.reload();
+    await expect(salesPage.locator("main[dir=rtl]")).toBeVisible();
+    await expect(salesPage.locator("form #offer-titleAr")).toHaveValue(arabicDraft.titleAr);
+    await expect(salesPage.locator("form #offer-bookingRule")).toHaveValue(arabicDraft.bookingRule);
+    await expect(salesPage.locator("form #offer-evidenceType")).toHaveValue(
+      arabicDraft.evidenceType
+    );
+    const arabicSubmitSection = salesPage
+      .locator("section")
+      .filter({ hasText: "إرسال لمراجعة العمليات" });
+    await arabicSubmitSection.getByRole("button", { name: "مراجعة البيانات" }).click();
+    await arabicSubmitSection.getByRole("button", { name: "إرسال لمراجعة العمليات" }).click();
+    await expect(
+      salesPage.getByRole("status").filter({ hasText: "أكد الخادم إرسال العرض" })
+    ).toBeVisible();
+
+    console.info("[Offer E2E] Arabic Operations snapshot and decision");
+    await opsPage
+      .getByRole("button", { name: "Toggle language between Arabic and English" })
+      .click();
+    await opsPage.goto("/staff/ops/offers");
+    await expect(opsPage.locator("main[dir=rtl]")).toBeVisible();
+    await expect(opsPage.locator(`a[href="/staff/offers/${arabicOfferId}"]`)).toBeVisible();
+    await opsPage.locator(`a[href="/staff/offers/${arabicOfferId}"]`).click();
+    await expect(opsPage.getByText(arabicDraft.titleAr).first()).toBeVisible();
+    for (const value of [
+      arabicDraft.titleEn,
+      arabicDraft.includedLaborEn,
+      arabicDraft.includedLaborAr,
+      arabicDraft.includedPartsEn,
+      arabicDraft.includedPartsAr,
+      arabicDraft.excludedLaborEn,
+      arabicDraft.excludedLaborAr,
+      arabicDraft.excludedPartsEn,
+      arabicDraft.excludedPartsAr,
+      arabicDraft.evidencePacketId,
+      arabicDraft.commercialTermsPacketId,
+      arabicDraft.priceBasisNotes,
+    ]) {
+      await expect(opsPage.getByText(value, { exact: true }).first()).toBeVisible();
+    }
+    await expect(opsPage.getByText("قاعدة الحجز", { exact: true })).toBeVisible();
+    await expect(opsPage.getByText("الزيارة دون موعد متاحة", { exact: true })).toBeVisible();
+    await expect(opsPage.getByText("نوع الإثبات", { exact: true })).toBeVisible();
+    await expect(opsPage.getByText("عرض سعر مكتوب", { exact: true })).toBeVisible();
+    await expect(
+      opsPage.getByText("بداية الصلاحية (توقيت القاهرة)", { exact: true })
+    ).toBeVisible();
+    await expect(
+      opsPage.getByText("نهاية الصلاحية (توقيت القاهرة)", { exact: true })
+    ).toBeVisible();
+    await expect(opsPage.getByText("تاريخ الإثبات (توقيت القاهرة)", { exact: true })).toBeVisible();
+    await expect(opsPage.getByText("تاريخ الاتفاق (توقيت القاهرة)", { exact: true })).toBeVisible();
+    for (const date of [
+      arabicDraft.validFrom,
+      arabicDraft.validUntil,
+      arabicDraft.evidenceDate,
+      arabicDraft.commercialTermsAgreedAt,
+    ]) {
+      await expect(
+        opsPage
+          .getByText(utcToCairoInput(date.toISOString()).replace("T", " "), { exact: true })
+          .first()
+      ).toBeVisible();
+    }
+    await expect(opsPage.getByText("المدة بالدقائق", { exact: true })).toBeVisible();
+    await expect(
+      opsPage.getByText(String(arabicDraft.durationMinutes), { exact: true }).first()
+    ).toBeVisible();
+    await expect(
+      opsPage.getByText("العمولة المتفق عليها بالنقاط الأساسية (الصفر مسموح)", { exact: true })
+    ).toBeVisible();
+    await expect(opsPage.getByText("أساس احتساب العمولة", { exact: true })).toBeVisible();
+    await expect(opsPage.getByText("اسم الخدمة (بالإنجليزية)", { exact: true })).toBeVisible();
+    await expect(opsPage.getByText("اسم الخدمة (بالعربية)", { exact: true })).toBeVisible();
+    await expect(opsPage.getByText("نطاق الخدمة (بالإنجليزية)", { exact: true })).toBeVisible();
+    await expect(opsPage.getByText("نطاق الخدمة (بالعربية)", { exact: true })).toBeVisible();
+    await expect(
+      opsPage.getByText("Fixed oil and filter replacement", { exact: true })
+    ).toBeVisible();
+    await expect(opsPage.getByText("تغيير زيت وفلتر محدد النطاق", { exact: true })).toBeVisible();
+    await expect(opsPage.getByText("EGP 1000.00", { exact: true })).toBeVisible();
+    await expect(opsPage.getByText("EGP 800.00", { exact: true })).toBeVisible();
+    await expect(opsPage.getByText("0 bps (0.00%)", { exact: true })).toBeVisible();
+    await expect(opsPage.getByText("تاريخ الإرسال (توقيت القاهرة)", { exact: true })).toBeVisible();
+    await expect(opsPage.getByText("معرّف الموظف المُرسل", { exact: true })).toBeVisible();
+    await expect(opsPage.getByText(sales.userId, { exact: true })).toBeVisible();
+    await expect(opsPage.getByText("موعد مسبق مطلوب", { exact: true })).toHaveCount(0);
+    await expect(opsPage.getByRole("button", { name: "اعتماد داخلي" })).toBeDisabled();
+    const reviewScreenshot = testInfo.outputPath("offer-mobile-arabic-ops-review.png");
+    await opsPage.setViewportSize({ width: 390, height: 844 });
+    expect(
+      await opsPage.evaluate(
+        () =>
+          Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) <=
+          innerWidth + 1
+      )
+    ).toBe(true);
+    await opsPage.screenshot({ path: reviewScreenshot, fullPage: true });
+    await testInfo.attach("offer-mobile-arabic-ops-review", {
+      path: reviewScreenshot,
+      contentType: "image/png",
+    });
+    for (const label of [
+      "فحصت ملف الإثبات",
+      "تحققت من السعر المعتاد وسعر العميل",
+      "تحققت من نطاق الخدمة باللغتين",
+      "تحققت من موافقة المركز والاتفاق التجاري",
+    ]) {
+      await opsPage.getByRole("checkbox", { name: label }).check();
+    }
+    await opsPage.getByRole("button", { name: "اعتماد داخلي" }).click();
+    await expect(
+      opsPage.getByRole("status").filter({ hasText: "أكد الخادم الاعتماد الداخلي" })
+    ).toBeVisible();
+    const arabicApproved = await prisma.offerRevision.findUniqueOrThrow({
+      where: { id: arabicDraft.id },
+    });
+    const arabicOffer = await prisma.offer.findUniqueOrThrow({ where: { id: arabicOfferId } });
+    expect(arabicApproved.status).toBe("APPROVED");
+    expect(arabicApproved.version).toBe(3);
+    expect(arabicApproved.submittedByUserId).toBe(sales.userId);
+    expect(arabicApproved.decidedByUserId).toBe(ops.userId);
+    expect(arabicOffer.currentApprovedRevisionId).toBe(arabicDraft.id);
+    expect(
+      await prisma.securityAuditEvent.count({
+        where: { targetEntity: `offer_revision:${arabicDraft.id}` },
+      })
+    ).toBe(3);
+    await salesPage.reload();
+    await expect(salesPage.getByText(arabicDraft.titleAr).first()).toBeVisible();
+    expect(
+      await salesPage.evaluate(
+        () =>
+          Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) <=
+          innerWidth + 1
+      )
+    ).toBe(true);
     const screenshotPath = testInfo.outputPath("offer-mobile-arabic.png");
     await salesPage.screenshot({ path: screenshotPath, fullPage: true });
     await testInfo.attach("offer-mobile-arabic", {
