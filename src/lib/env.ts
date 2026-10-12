@@ -3,6 +3,8 @@ import { z } from "zod";
 
 export type AppRuntimeProfile = "showcase" | "production";
 export type AppDataBackend = "demo" | "postgres";
+export type PublicationPilotCluster =
+  "NASR_CITY_HELIOPOLIS" | "NEW_CAIRO" | "MAADI" | "OCTOBER_ZAYED";
 
 const POSTGRES_URL_REGEX = /^postgres(?:ql)?:\/\//i;
 
@@ -32,6 +34,11 @@ const RawServerEnvSchema = z.object({
   OFFER_EVIDENCE_PACKET_REPOSITORY_READY: z
     .preprocess((value) => value ?? "false", z.enum(["true", "false"]))
     .transform((value) => value === "true"),
+  OFFER_PUBLICATION_ENABLED: z
+    .preprocess((value) => value ?? "false", z.enum(["true", "false"]))
+    .transform((value) => value === "true"),
+  // A malformed pilot cluster must not prevent emergency withdrawal.
+  OFFER_PUBLICATION_PILOT_CLUSTER: z.string().optional(),
 });
 
 export interface ServerEnv {
@@ -54,6 +61,8 @@ export interface ServerEnv {
   OTP_DISPATCH_TIMEOUT_MS: number;
   TRUSTED_PROXY_HOPS: number;
   OFFER_EVIDENCE_PACKET_REPOSITORY_READY: boolean;
+  OFFER_PUBLICATION_ENABLED: boolean;
+  OFFER_PUBLICATION_PILOT_CLUSTER: PublicationPilotCluster | null;
 }
 
 let cachedEnv: ServerEnv | null = null;
@@ -301,6 +310,11 @@ export function validateServerEnv(
     OTP_DISPATCH_TIMEOUT_MS: data.OTP_DISPATCH_TIMEOUT_MS,
     TRUSTED_PROXY_HOPS: data.TRUSTED_PROXY_HOPS,
     OFFER_EVIDENCE_PACKET_REPOSITORY_READY: data.OFFER_EVIDENCE_PACKET_REPOSITORY_READY,
+    OFFER_PUBLICATION_ENABLED: data.OFFER_PUBLICATION_ENABLED,
+    OFFER_PUBLICATION_PILOT_CLUSTER:
+      (["NASR_CITY_HELIOPOLIS", "NEW_CAIRO", "MAADI", "OCTOBER_ZAYED"] as const).find(
+        (cluster) => cluster === data.OFFER_PUBLICATION_PILOT_CLUSTER
+      ) ?? null,
   };
 }
 

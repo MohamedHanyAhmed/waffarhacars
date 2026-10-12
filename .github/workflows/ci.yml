@@ -95,6 +95,11 @@ jobs:
       - name: Verify Prisma Migration Status
         run: npm run prisma:migrate:status
 
+      - name: Verify Publication Upgrade Preserves Approved Offers
+        run: npm run publication:upgrade:check
+        env:
+          CI: "true"
+
       - name: Real PostgreSQL Integration Tests
         run: npm run test:integration
         env:
@@ -120,6 +125,9 @@ jobs:
         run: npm run test:e2e
         env:
           CI: "true"
+          # Synthetic test-only visibility; never a production launch setting.
+          OFFER_PUBLICATION_ENABLED: "true"
+          OFFER_PUBLICATION_PILOT_CLUSTER: NASR_CITY_HELIOPOLIS
           # CI-only loopback ingress accepts per-context reserved test IPs so
           # independent real-login journeys do not share one rate-limit bucket.
           TRUSTED_PROXY_HOPS: "1"

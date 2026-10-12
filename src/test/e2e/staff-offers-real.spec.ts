@@ -54,10 +54,10 @@ async function waitForBlockedRequests(blocker: pg.Client, expected: number): Pro
   return waiting;
 }
 
-test("real UI and PostgreSQL: English and Arabic mobile offers, response loss, CAS conflict, and Ops decisions", async ({
+test("real UI and PostgreSQL: bilingual mobile offers, approval, explicit publication and withdrawal", async ({
   browser,
 }, testInfo) => {
-  test.setTimeout(210_000);
+  test.setTimeout(270_000);
   const probe = new pg.Client({ connectionString: databaseUrl, connectionTimeoutMillis: 5000 });
   try {
     await probe.connect();
@@ -233,10 +233,12 @@ test("real UI and PostgreSQL: English and Arabic mobile offers, response loss, C
     for (const [name, value] of Object.entries(fields)) {
       await salesPage.locator(`#offer-${name}`).fill(value);
     }
-    const future = utcToCairoInput(new Date(Date.now() + 2 * 60 * 60_000).toISOString());
-    const later = utcToCairoInput(new Date(Date.now() + 15 * 24 * 60 * 60_000).toISOString());
-    const yesterday = utcToCairoInput(new Date(Date.now() - 24 * 60 * 60_000).toISOString());
-    await salesPage.locator("#offer-validFrom").fill(future);
+    // Midday Cairo avoids Egypt's midnight DST gaps/repeated hour in long-lived CI.
+    const cairoNoon = (instant: string) => `${utcToCairoInput(instant).slice(0, 10)}T12:00`;
+    const activeFrom = cairoNoon(new Date(Date.now() - 24 * 60 * 60_000).toISOString());
+    const later = cairoNoon(new Date(Date.now() + 15 * 24 * 60 * 60_000).toISOString());
+    const yesterday = activeFrom;
+    await salesPage.locator("#offer-validFrom").fill(activeFrom);
     await salesPage.locator("#offer-validUntil").fill(later);
     await salesPage.locator("#offer-evidenceDate").fill(yesterday);
     await salesPage.locator("#offer-commercialTermsAgreedAt").fill(yesterday);
@@ -452,6 +454,86 @@ test("real UI and PostgreSQL: English and Arabic mobile offers, response loss, C
     });
     expect(auditCount).toBe(5);
 
+    console.info("[Offer E2E] Internal approval remains invisible until explicit publication");
+    const anonymousContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
+    contexts.push(anonymousContext);
+    expect((await anonymousContext.request.get(`/api/v1/offers/${offerId}`)).status()).toBe(404);
+    const englishPublication = opsPage.getByRole("region", {
+      name: "Customer publication control",
+    });
+    await expect(englishPublication).toBeVisible();
+    await expect(englishPublication.getByText("Withdrawn or never published")).toBeVisible();
+    await expect(englishPublication.getByText("No", { exact: true })).toBeVisible();
+    let publishCommittedButResponseLost = false;
+    await opsPage.route(`**/api/v1/staff/ops/offers/${offerId}/publication`, async (route) => {
+      if (route.request().method() !== "POST") return route.continue();
+      const committed = await route.fetch();
+      expect(committed.status()).toBe(200);
+      publishCommittedButResponseLost = true;
+      await route.abort("failed");
+    });
+    await englishPublication.getByRole("button", { name: "Prepare publication" }).click();
+    await expect(englishPublication.getByText("Check the publication decision")).toBeVisible();
+    await englishPublication.getByRole("button", { name: "Confirm Operations command" }).click();
+    await expect(
+      englishPublication.getByText("The command outcome is unknown.", { exact: false }).first()
+    ).toBeVisible();
+    expect(publishCommittedButResponseLost).toBe(true);
+    await opsPage.unroute(`**/api/v1/staff/ops/offers/${offerId}/publication`);
+    await opsPage.reload();
+    await expect(
+      englishPublication.getByRole("button", { name: "Recheck publication command" })
+    ).toBeVisible();
+    await englishPublication.getByRole("button", { name: "Recheck publication command" }).click();
+    await expect(englishPublication.getByText("Published command active")).toBeVisible();
+    await expect(
+      englishPublication.getByText("Yes, subject to recheck on each request")
+    ).toBeVisible();
+    const publicDetailResponse = await anonymousContext.request.get(`/api/v1/offers/${offerId}`);
+    expect(publicDetailResponse.status()).toBe(200);
+    const publicDetail = (await publicDetailResponse.json()) as Record<string, unknown>;
+    expect(publicDetail.offerId).toBe(offerId);
+    expect(publicDetail.revisionId).toBe(draft.id);
+    expect(publicDetail.customerPriceMinor).toBe("80000");
+    expect(publicDetail.normalPriceMinor).toBe("100000");
+    const publicBody = JSON.stringify(publicDetail);
+    for (const privateValue of [
+      approved.evidencePacketId,
+      approved.commercialTermsPacketId,
+      approved.priceBasisNotes,
+      approved.createdByUserId,
+    ]) {
+      expect(publicBody).not.toContain(privateValue);
+    }
+    expect(publicBody).not.toContain("commissionRateBps");
+    const publicListResponse = await anonymousContext.request.get("/api/v1/offers");
+    expect(publicListResponse.status()).toBe(200);
+    const publicList = (await publicListResponse.json()) as { items: Array<{ offerId: string }> };
+    expect(publicList.items.some((item) => item.offerId === offerId)).toBe(true);
+    expect(
+      await prisma.securityAuditEvent.count({
+        where: { eventType: "OFFER_PUBLISHED", targetEntity: `offer:${offerId}` },
+      })
+    ).toBe(1);
+    const englishPublicationRow = await prisma.offerPublication.findUniqueOrThrow({
+      where: { offerId },
+    });
+    expect(englishPublicationRow.pinnedRevisionId).toBe(draft.id);
+    expect(englishPublicationRow.version).toBe(1);
+
+    await englishPublication.getByRole("button", { name: "Prepare withdrawal" }).click();
+    await englishPublication.getByRole("button", { name: "Confirm Operations command" }).click();
+    await expect(englishPublication.getByText("Withdrawn or never published")).toBeVisible();
+    expect((await anonymousContext.request.get(`/api/v1/offers/${offerId}`)).status()).toBe(404);
+    expect(
+      await prisma.securityAuditEvent.count({
+        where: { eventType: "OFFER_UNPUBLISHED", targetEntity: `offer:${offerId}` },
+      })
+    ).toBe(1);
+    const withdrawnRow = await prisma.offerPublication.findUniqueOrThrow({ where: { offerId } });
+    expect(withdrawnRow.version).toBe(2);
+    expect(withdrawnRow.status).toBe("UNPUBLISHED");
+
     console.info("[Offer E2E] Arabic mobile form, validation, and check-answers journey");
     await salesPage
       .getByRole("button", { name: "Toggle language between Arabic and English" })
@@ -481,7 +563,7 @@ test("real UI and PostgreSQL: English and Arabic mobile offers, response loss, C
     }
     await salesPage.locator("#offer-bookingRule").selectOption("WALK_IN_ALLOWED");
     await salesPage.locator("#offer-evidenceType").selectOption("WRITTEN_QUOTE");
-    await salesPage.locator("#offer-validFrom").fill(future);
+    await salesPage.locator("#offer-validFrom").fill(activeFrom);
     await salesPage.locator("#offer-validUntil").fill(later);
     await salesPage.locator("#offer-evidenceDate").fill(yesterday);
     await salesPage.locator("#offer-commercialTermsAgreedAt").fill(yesterday);
@@ -671,6 +753,59 @@ test("real UI and PostgreSQL: English and Arabic mobile offers, response loss, C
         where: { targetEntity: `offer_revision:${arabicDraft.id}` },
       })
     ).toBe(3);
+    console.info("[Offer E2E] Arabic mobile explicit publication and withdrawal");
+    expect((await anonymousContext.request.get(`/api/v1/offers/${arabicOfferId}`)).status()).toBe(
+      404
+    );
+    const arabicPublication = opsPage.getByRole("region", {
+      name: "التحكم في نشر العروض للعملاء",
+    });
+    await expect(arabicPublication).toBeVisible();
+    await expect(arabicPublication.getByText("مسحوب أو لم يُنشر بعد")).toBeVisible();
+    await arabicPublication.getByRole("button", { name: "تحضير النشر" }).click();
+    await expect(arabicPublication.getByText("مراجعة قرار النشر")).toBeVisible();
+    await arabicPublication.getByRole("button", { name: "تأكيد أمر العمليات" }).click();
+    await expect(arabicPublication.getByText("أمر النشر نشط")).toBeVisible();
+    await expect(arabicPublication.getByText("نعم، مع إعادة التحقق عند كل طلب")).toBeVisible();
+    const arabicPublicResponse = await anonymousContext.request.get(
+      `/api/v1/offers/${arabicOfferId}`
+    );
+    expect(arabicPublicResponse.status()).toBe(200);
+    const arabicPublic = (await arabicPublicResponse.json()) as Record<string, unknown>;
+    expect(arabicPublic.revisionId).toBe(arabicDraft.id);
+    expect(arabicPublic.titleAr).toBe(arabicDraft.titleAr);
+    const arabicPublishedRow = await prisma.offerPublication.findUniqueOrThrow({
+      where: { offerId: arabicOfferId },
+    });
+    expect(arabicPublishedRow.status).toBe("PUBLISHED");
+    expect(arabicPublishedRow.pinnedRevisionId).toBe(arabicDraft.id);
+    expect(arabicPublishedRow.version).toBe(1);
+    const publicationScreenshot = testInfo.outputPath("offer-mobile-arabic-published.png");
+    await opsPage.evaluate(() => window.scrollTo(0, 0));
+    await opsPage.screenshot({ path: publicationScreenshot, fullPage: true });
+    await testInfo.attach("offer-mobile-arabic-published", {
+      path: publicationScreenshot,
+      contentType: "image/png",
+    });
+    await arabicPublication.getByRole("button", { name: "تحضير سحب النشر" }).click();
+    await arabicPublication.getByRole("button", { name: "تأكيد أمر العمليات" }).click();
+    await expect(arabicPublication.getByText("مسحوب أو لم يُنشر بعد")).toBeVisible();
+    expect((await anonymousContext.request.get(`/api/v1/offers/${arabicOfferId}`)).status()).toBe(
+      404
+    );
+    const arabicWithdrawnRow = await prisma.offerPublication.findUniqueOrThrow({
+      where: { offerId: arabicOfferId },
+    });
+    expect(arabicWithdrawnRow.status).toBe("UNPUBLISHED");
+    expect(arabicWithdrawnRow.version).toBe(2);
+    expect(
+      await prisma.securityAuditEvent.count({
+        where: {
+          targetEntity: `offer:${arabicOfferId}`,
+          eventType: { in: ["OFFER_PUBLISHED", "OFFER_UNPUBLISHED"] },
+        },
+      })
+    ).toBe(2);
     await salesPage.reload();
     await expect(salesPage.getByText(arabicDraft.titleAr).first()).toBeVisible();
     expect(
@@ -698,6 +833,10 @@ test("real UI and PostgreSQL: English and Arabic mobile offers, response loss, C
         : [];
       const ownedOfferIds = ownedOffers.map((item) => item.id);
       if (ownedOfferIds.length) {
+        await prisma.offerPublicationCommand.deleteMany({
+          where: { offerId: { in: ownedOfferIds } },
+        });
+        await prisma.offerPublication.deleteMany({ where: { offerId: { in: ownedOfferIds } } });
         await prisma.offer.updateMany({
           where: { id: { in: ownedOfferIds } },
           data: { currentApprovedRevisionId: null },

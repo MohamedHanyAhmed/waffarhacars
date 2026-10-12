@@ -15,23 +15,24 @@ Do not build a literal Waffarha clone. Build a car-care marketplace that uses a 
 
 ## Product pack map
 
-| File                                                                              | Purpose                                                                               |
-| --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| [01-product-strategy.md](docs/01-product-strategy.md)                             | Positioning, hypotheses, launch wedge, business model, success gates                  |
-| [02-reference-analysis.md](docs/02-reference-analysis.md)                         | Observable Waffarha model, automotive references, transferable patterns               |
-| [03-prd.md](docs/03-prd.md)                                                       | MVP requirements, actors, journeys, stories, acceptance criteria                      |
-| [04-ux-information-architecture.md](docs/04-ux-information-architecture.md)       | Navigation, screen inventory, content rules, Arabic/RTL, service UX                   |
-| [05-domain-and-architecture.md](docs/05-domain-and-architecture.md)               | Domain model, state machines, system architecture, API boundaries                     |
-| [06-operations-and-commercial.md](docs/06-operations-and-commercial.md)           | Provider recruitment, vetting, offer design, B2B, support and commission collection   |
-| [07-delivery-and-backlog.md](docs/07-delivery-and-backlog.md)                     | Discovery gates, build slices, backlog, dependencies, release plan                    |
-| [08-quality-security-observability.md](docs/08-quality-security-observability.md) | Definition of done, threat controls, test strategy, SLOs and telemetry                |
-| [09-antigravity-playbook.md](docs/09-antigravity-playbook.md)                     | How the AI agent is supervised, PR size, evidence, escalation rules                   |
-| [10-decisions-risks-open-questions.md](docs/10-decisions-risks-open-questions.md) | ADR summary, risk register, unresolved founder decisions                              |
-| [11-transaction-redemption-sop.md](docs/11-transaction-redemption-sop.md)         | Exact reservation, redemption, commission billing, collection and exception workflows |
-| [12-demo-slice.md](docs/12-demo-slice.md)                                         | High-fidelity clickable demo scope for customers, providers, sales and reviewers      |
-| [13-production-foundation-plan.md](docs/13-production-foundation-plan.md)         | Production backend foundation, Prisma 7 ADR, state machine, and PR sequence           |
-| [ANTIGRAVITY_DEMO_PROMPT.md](ANTIGRAVITY_DEMO_PROMPT.md)                          | Single copy-paste instruction for Antigravity to build and verify the showcase        |
-| [SOURCES.md](SOURCES.md)                                                          | Full cited source inventory and access notes                                          |
+| File                                                                                  | Purpose                                                                               |
+| ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| [01-product-strategy.md](docs/01-product-strategy.md)                                 | Positioning, hypotheses, launch wedge, business model, success gates                  |
+| [02-reference-analysis.md](docs/02-reference-analysis.md)                             | Observable Waffarha model, automotive references, transferable patterns               |
+| [03-prd.md](docs/03-prd.md)                                                           | MVP requirements, actors, journeys, stories, acceptance criteria                      |
+| [04-ux-information-architecture.md](docs/04-ux-information-architecture.md)           | Navigation, screen inventory, content rules, Arabic/RTL, service UX                   |
+| [05-domain-and-architecture.md](docs/05-domain-and-architecture.md)                   | Domain model, state machines, system architecture, API boundaries                     |
+| [06-operations-and-commercial.md](docs/06-operations-and-commercial.md)               | Provider recruitment, vetting, offer design, B2B, support and commission collection   |
+| [07-delivery-and-backlog.md](docs/07-delivery-and-backlog.md)                         | Discovery gates, build slices, backlog, dependencies, release plan                    |
+| [08-quality-security-observability.md](docs/08-quality-security-observability.md)     | Definition of done, threat controls, test strategy, SLOs and telemetry                |
+| [09-antigravity-playbook.md](docs/09-antigravity-playbook.md)                         | How the AI agent is supervised, PR size, evidence, escalation rules                   |
+| [10-decisions-risks-open-questions.md](docs/10-decisions-risks-open-questions.md)     | ADR summary, risk register, unresolved founder decisions                              |
+| [11-transaction-redemption-sop.md](docs/11-transaction-redemption-sop.md)             | Exact reservation, redemption, commission billing, collection and exception workflows |
+| [12-demo-slice.md](docs/12-demo-slice.md)                                             | High-fidelity clickable demo scope for customers, providers, sales and reviewers      |
+| [13-production-foundation-plan.md](docs/13-production-foundation-plan.md)             | Production backend foundation, Prisma 7 ADR, state machine, and PR sequence           |
+| [16-publication-discovery-foundation.md](docs/16-publication-discovery-foundation.md) | Gated offer publication, safe discovery APIs, and operational recovery controls       |
+| [ANTIGRAVITY_DEMO_PROMPT.md](ANTIGRAVITY_DEMO_PROMPT.md)                              | Single copy-paste instruction for Antigravity to build and verify the showcase        |
+| [SOURCES.md](SOURCES.md)                                                              | Full cited source inventory and access notes                                          |
 
 ## Product surfaces
 
@@ -54,7 +55,7 @@ The MVP is release-ready only when a real customer can select a saved vehicle an
 
 ### Implementation status boundary
 
-This repository contains both a clickable demonstration and an incrementally built production backend. Provider onboarding and staff identity foundations are implemented. PR 3C-A adds production staff APIs for controlled service definitions and internal offer approval. This approval is **not customer publication**: there is no production discovery, reservation, payment, redemption, or commission accrual flow yet. The demo screens and demo offers remain simulated and are not production records.
+This repository contains both a clickable demonstration and an incrementally built production backend. Provider onboarding, staff identity, controlled service definitions and internal offer approval are implemented. PR 4A adds an explicit Operations publication command and default-off, read-only public offer APIs. Approval alone is **not publication**, and PR 4A is **not launch authorization**: there is no production vehicle compatibility, customer discovery UI, reservation, payment, redemption, or commission accrual flow yet. The demo screens and demo offers remain simulated and are not production records.
 
 The four broad service categories are seeded, but no service definitions, providers, prices or offers are seeded. Real offers must not be approved until the business designates a company-controlled evidence packet repository, Operations access, and named retrieval/retention owners. That remains an operational launch gate.
 
