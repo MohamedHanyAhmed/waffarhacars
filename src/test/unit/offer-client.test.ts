@@ -167,6 +167,7 @@ describe("staff offer client-safe money and Cairo time helpers", () => {
     const a = {
       commandId: "command-A",
       offerId: "offer-A",
+      actorUserId: "operator-A",
       action: "PUBLISH" as const,
       revisionId: "revision-A",
       expectedVersion: 0,
@@ -185,6 +186,7 @@ describe("staff offer client-safe money and Cairo time helpers", () => {
     const stored = sessionStorage.getItem("waffarhacars_publication_pending_v1");
     expect(stored).not.toContain("normalPriceMinor");
     expect(stored).not.toContain("evidencePacketId");
+    expect(readPendingPublicationOperation()?.actorUserId).toBe("operator-A");
     expect(readPendingPublicationOperation()).toEqual(a);
     expect(clearPendingPublicationOperation(a.commandId)).toBe(true);
   });
@@ -193,6 +195,7 @@ describe("staff offer client-safe money and Cairo time helpers", () => {
     const a = {
       commandId: "command-A",
       offerId: "offer-A",
+      actorUserId: "operator-A",
       action: "PUBLISH" as const,
       revisionId: "revision-A",
       expectedVersion: 0,
@@ -200,6 +203,7 @@ describe("staff offer client-safe money and Cairo time helpers", () => {
     const b = {
       commandId: "command-B",
       offerId: "offer-B",
+      actorUserId: "operator-B",
       action: "UNPUBLISH" as const,
       expectedVersion: 2,
     };

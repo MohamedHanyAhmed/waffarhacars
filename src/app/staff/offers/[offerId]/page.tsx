@@ -101,6 +101,7 @@ export default function StaffOfferDetailPage() {
   const [publicationUnknown, setPublicationUnknown] = useState(
     () => readPendingPublicationOperation()?.offerId === offerId
   );
+  const [publicationRetryAvailable, setPublicationRetryAvailable] = useState(false);
   const [publicationError, setPublicationError] = useState<string | null>(null);
   const [publicationMessage, setPublicationMessage] = useState<string | null>(null);
   const [publicationConfirm, setPublicationConfirm] = useState<{
@@ -136,6 +137,7 @@ export default function StaffOfferDetailPage() {
       setPublicationMessage(null);
       setPublicationConfirm(null);
       setPublicationUnknown(Boolean(readPendingPublicationOperation()));
+      setPublicationRetryAvailable(false);
     });
     return () => {
       if (counter.current === current) counter.current++;
@@ -308,6 +310,10 @@ export default function StaffOfferDetailPage() {
       setPublicationError(t("staffOffers.publicationOtherPending"));
       return;
     }
+    if (target.actorUserId !== staff?.userId) {
+      setPublicationError(t("staffOffers.publicationOriginalActor"));
+      return;
+    }
     const currentGeneration = publicationGeneration.current;
     const ownsCurrent = () =>
       ownsPendingPublicationCallback(
@@ -324,10 +330,12 @@ export default function StaffOfferDetailPage() {
         if (response.status === 401) return router.replace("/staff/login");
         // A missing command is not proof that an in-flight write failed or rolled back.
         setPublicationUnknown(true);
+        setPublicationRetryAvailable(response.status === 404);
         setPublicationError(t("staffOffers.publicationStillUnknown"));
         return;
       }
       clearPendingPublicationOperation(target.commandId);
+      setPublicationRetryAvailable(false);
       setPublication((previous) =>
         previous && previous.version > response.data.publication.version
           ? previous
@@ -346,6 +354,7 @@ export default function StaffOfferDetailPage() {
     } catch {
       if (ownsCurrent()) {
         setPublicationUnknown(true);
+        setPublicationRetryAvailable(false);
         setPublicationError(t("staffOffers.publicationStillUnknown"));
       }
     }
@@ -356,7 +365,8 @@ export default function StaffOfferDetailPage() {
     revisionId?: string;
     expectedVersion: number;
   }) => {
-    if (publicationInFlight.current || publicationActionDisabled || !publication) return;
+    if (publicationInFlight.current || publicationActionDisabled || !publication || !staff?.userId)
+      return;
     if (
       decision.expectedVersion !== publication.version ||
       (decision.action !== "UNPUBLISH" &&
@@ -369,10 +379,22 @@ export default function StaffOfferDetailPage() {
     const operation: PendingPublicationOperation = {
       commandId: crypto.randomUUID(),
       offerId,
+      actorUserId: staff.userId,
       action: decision.action,
       expectedVersion: decision.expectedVersion,
       ...(decision.revisionId ? { revisionId: decision.revisionId } : {}),
     };
+    setPublicationRetryAvailable(false);
+    try {
+      writePendingPublicationOperation(operation);
+    } catch {
+      setPublicationError(t("staffOffers.storageUnavailable"));
+      return;
+    }
+    await postPublication(operation);
+  };
+
+  const postPublication = async (operation: PendingPublicationOperation) => {
     const currentGeneration = publicationGeneration.current;
     const ownsCurrent = () =>
       ownsPendingPublicationCallback(
@@ -384,14 +406,6 @@ export default function StaffOfferDetailPage() {
     setPublicationPending(true);
     setPublicationError(null);
     setPublicationMessage(null);
-    try {
-      writePendingPublicationOperation(operation);
-    } catch {
-      publicationInFlight.current = false;
-      setPublicationPending(false);
-      setPublicationError(t("staffOffers.storageUnavailable"));
-      return;
-    }
     try {
       const response = await offerApi<PublicationCommandResult>(
         `/api/v1/staff/ops/offers/${offerId}/publication`,
@@ -408,11 +422,11 @@ export default function StaffOfferDetailPage() {
       if (!ownsCurrent()) return;
       if (!response.ok) {
         if (response.status === 401) {
-          clearPendingPublicationOperation(operation.commandId);
           return router.replace("/staff/login");
         }
         if (mutationOutcomeUnknown(response.status)) {
           setPublicationUnknown(true);
+          setPublicationRetryAvailable(false);
           setPublicationError(t("staffOffers.publicationStillUnknown"));
           return;
         }
@@ -420,11 +434,13 @@ export default function StaffOfferDetailPage() {
           await reconcilePublication(operation);
           return;
         }
-        clearPendingPublicationOperation(operation.commandId);
+        setPublicationUnknown(true);
+        setPublicationRetryAvailable(false);
         setPublicationError(offerFailureMessage(response, t));
         return;
       }
       clearPendingPublicationOperation(operation.commandId);
+      setPublicationRetryAvailable(false);
       setPublication((previous) =>
         previous && previous.version > response.data.publication.version
           ? previous
@@ -437,12 +453,30 @@ export default function StaffOfferDetailPage() {
     } catch {
       if (ownsCurrent()) {
         setPublicationUnknown(true);
+        setPublicationRetryAvailable(false);
         setPublicationError(t("staffOffers.publicationStillUnknown"));
       }
     } finally {
       publicationInFlight.current = false;
       if (publicationGeneration.current === currentGeneration) setPublicationPending(false);
     }
+  };
+
+  const retryPublication = async () => {
+    const operation = readPendingPublicationOperation();
+    if (
+      !publicationRetryAvailable ||
+      publicationInFlight.current ||
+      !canManagePublication ||
+      !operation ||
+      operation.offerId !== offerId ||
+      operation.actorUserId !== staff?.userId
+    )
+      return;
+    // Keep the original command ID, actor-bound resource, target and expected version.
+    // A still-running original request is serialized and replayed by the server.
+    setPublicationRetryAvailable(false);
+    await postPublication(operation);
   };
 
   const markUnknown = (operation: PendingOfferOperation) => {
@@ -1074,14 +1108,29 @@ export default function StaffOfferDetailPage() {
               {publicationUnknown && (
                 <div className="rounded-xl border border-amber-300 bg-amber-50 p-4">
                   <p>{t("staffOffers.publicationStillUnknown")}</p>
-                  <button
-                    type="button"
-                    onClick={() => void reconcilePublication()}
-                    disabled={publicationJournal?.offerId !== offerId}
-                    className="mt-3 rounded-lg bg-slate-900 px-4 py-2 text-white disabled:opacity-50"
-                  >
-                    {t("staffOffers.publicationRecheckCommand")}
-                  </button>
+                  {publicationRetryAvailable && publicationJournal?.offerId === offerId && (
+                    <p role="status">{t("staffOffers.publicationNoReceipt")}</p>
+                  )}
+                  <div className="mt-3 flex flex-wrap gap-3">
+                    <button
+                      type="button"
+                      onClick={() => void reconcilePublication()}
+                      disabled={publicationPending || publicationJournal?.offerId !== offerId}
+                      className="rounded-lg bg-slate-900 px-4 py-2 text-white disabled:opacity-50"
+                    >
+                      {t("staffOffers.publicationRecheckCommand")}
+                    </button>
+                    {publicationRetryAvailable && publicationJournal?.offerId === offerId && (
+                      <button
+                        type="button"
+                        onClick={() => void retryPublication()}
+                        disabled={publicationPending || !canManagePublication}
+                        className="rounded-lg border border-slate-900 px-4 py-2 font-semibold disabled:opacity-50"
+                      >
+                        {t("staffOffers.publicationRetrySameCommand")}
+                      </button>
+                    )}
+                  </div>
                 </div>
               )}
               <button

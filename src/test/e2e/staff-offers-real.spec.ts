@@ -822,6 +822,255 @@ test("real UI and PostgreSQL: bilingual mobile offers, approval, explicit public
       path: screenshotPath,
       contentType: "image/png",
     });
+
+    console.info("[Offer E2E] Undelivered publish is recovered with original command identity");
+    await opsPage
+      .getByRole("button", { name: "Toggle language between Arabic and English" })
+      .click();
+    await opsPage.goto(`/staff/offers/${offerId}`);
+    await expect(englishPublication.getByText("Withdrawn or never published")).toBeVisible();
+    let undeliveredPayload: Record<string, unknown> | undefined;
+    const englishPublicationUrl = `**/api/v1/staff/ops/offers/${offerId}/publication`;
+    await opsPage.route(englishPublicationUrl, async (route) => {
+      if (route.request().method() !== "POST") return route.continue();
+      undeliveredPayload = route.request().postDataJSON() as Record<string, unknown>;
+      // Abort before route.continue/route.fetch: the API never sees this browser request.
+      await route.abort("failed");
+    });
+    await englishPublication.getByRole("button", { name: "Prepare publication" }).click();
+    await englishPublication.getByRole("button", { name: "Confirm Operations command" }).click();
+    await expect(
+      englishPublication.getByText("The command outcome is unknown.", { exact: false }).first()
+    ).toBeVisible();
+    await opsPage.unroute(englishPublicationUrl);
+    const undeliveredJournal = JSON.parse(
+      (await opsPage.evaluate(() => sessionStorage.getItem("waffarhacars_publication_pending_v1")))!
+    ) as {
+      commandId: string;
+      offerId: string;
+      action: string;
+      revisionId: string;
+      expectedVersion: number;
+    };
+    expect(undeliveredJournal.offerId).toBe(offerId);
+    expect(undeliveredJournal.action).toBe("PUBLISH");
+    expect(undeliveredJournal.revisionId).toBe(draft.id);
+    expect(undeliveredJournal.expectedVersion).toBe(2);
+    expect(undeliveredPayload).toEqual({
+      commandId: undeliveredJournal.commandId,
+      action: undeliveredJournal.action,
+      revisionId: undeliveredJournal.revisionId,
+      expectedVersion: undeliveredJournal.expectedVersion,
+    });
+    expect(
+      await prisma.offerPublicationCommand.count({
+        where: { commandId: undeliveredJournal.commandId },
+      })
+    ).toBe(0);
+    await opsPage.reload();
+    await englishPublication.getByRole("button", { name: "Recheck publication command" }).click();
+    await expect(
+      englishPublication.getByText("No durable command record found.", { exact: false })
+    ).toBeVisible();
+    const exactRetryRequest = opsPage.waitForRequest(
+      (request) =>
+        request.method() === "POST" &&
+        request.url().endsWith(`/api/v1/staff/ops/offers/${offerId}/publication`)
+    );
+    await englishPublication
+      .getByRole("button", { name: "Retry same publication command" })
+      .click();
+    expect((await exactRetryRequest).postDataJSON()).toEqual(undeliveredPayload);
+    await expect(englishPublication.getByText("Published command active")).toBeVisible();
+    const recoveredPublish = await prisma.offerPublication.findUniqueOrThrow({
+      where: { offerId },
+    });
+    expect(recoveredPublish.version).toBe(3);
+    expect(recoveredPublish.status).toBe("PUBLISHED");
+    expect(recoveredPublish.pinnedRevisionId).toBe(draft.id);
+    expect(
+      await prisma.offerPublicationCommand.count({
+        where: { commandId: undeliveredJournal.commandId, outcome: "APPLIED" },
+      })
+    ).toBe(1);
+    expect(
+      await prisma.securityAuditEvent.count({
+        where: { eventType: "OFFER_PUBLISHED", targetEntity: `offer:${offerId}` },
+      })
+    ).toBe(2);
+    expect((await anonymousContext.request.get(`/api/v1/offers/${offerId}`)).status()).toBe(200);
+
+    console.info("[Offer E2E] Browser same-key retry overlaps an in-flight real API command");
+    let overlappingPayload: Record<string, unknown> | undefined;
+    await opsPage.route(englishPublicationUrl, async (route) => {
+      if (route.request().method() !== "POST") return route.continue();
+      overlappingPayload = route.request().postDataJSON() as Record<string, unknown>;
+      await route.abort("failed");
+    });
+    await englishPublication.getByRole("button", { name: "Prepare withdrawal" }).click();
+    await englishPublication.getByRole("button", { name: "Confirm Operations command" }).click();
+    await expect(
+      englishPublication.getByText("The command outcome is unknown.", { exact: false }).first()
+    ).toBeVisible();
+    await opsPage.unroute(englishPublicationUrl);
+    const overlappingJournal = JSON.parse(
+      (await opsPage.evaluate(() => sessionStorage.getItem("waffarhacars_publication_pending_v1")))!
+    ) as { commandId: string; offerId: string; action: string; expectedVersion: number };
+    expect(overlappingJournal.offerId).toBe(offerId);
+    expect(overlappingJournal.action).toBe("UNPUBLISH");
+    expect(overlappingJournal.expectedVersion).toBe(3);
+    expect(overlappingPayload).toEqual({
+      commandId: overlappingJournal.commandId,
+      action: overlappingJournal.action,
+      expectedVersion: overlappingJournal.expectedVersion,
+    });
+    await englishPublication.getByRole("button", { name: "Recheck publication command" }).click();
+    await expect(
+      englishPublication.getByText("No durable command record found.", { exact: false })
+    ).toBeVisible();
+    const overlapBlocker = new pg.Client({ connectionString: databaseUrl });
+    await overlapBlocker.connect();
+    let originalResponse: Promise<Awaited<ReturnType<typeof opsPage.request.post>>> | undefined;
+    try {
+      await overlapBlocker.query("BEGIN");
+      await overlapBlocker.query("SELECT id FROM provider_organizations WHERE id = $1 FOR UPDATE", [
+        provider.id,
+      ]);
+      originalResponse = opsPage.request.post(
+        new URL(`/api/v1/staff/ops/offers/${offerId}/publication`, opsPage.url()).toString(),
+        {
+          data: overlappingPayload,
+          headers: { Origin: new URL(opsPage.url()).origin },
+        }
+      );
+      expect(await waitForBlockedRequests(overlapBlocker, 1)).toBeGreaterThanOrEqual(1);
+      const retryRequest = opsPage.waitForRequest(
+        (request) =>
+          request.method() === "POST" &&
+          request.url().endsWith(`/api/v1/staff/ops/offers/${offerId}/publication`)
+      );
+      await englishPublication
+        .getByRole("button", { name: "Retry same publication command" })
+        .click();
+      expect((await retryRequest).postDataJSON()).toEqual(overlappingPayload);
+      expect(await waitForBlockedRequests(overlapBlocker, 2)).toBeGreaterThanOrEqual(2);
+    } finally {
+      await overlapBlocker.query("COMMIT").catch(async () => overlapBlocker.query("ROLLBACK"));
+      await overlapBlocker.end();
+    }
+    expect((await originalResponse!).status()).toBe(200);
+    await expect(englishPublication.getByText("Withdrawn or never published")).toBeVisible();
+    const overlapWithdrawn = await prisma.offerPublication.findUniqueOrThrow({
+      where: { offerId },
+    });
+    expect(overlapWithdrawn.status).toBe("UNPUBLISHED");
+    expect(overlapWithdrawn.version).toBe(4);
+    expect(
+      await prisma.offerPublicationCommand.count({
+        where: { commandId: overlappingJournal.commandId, outcome: "APPLIED" },
+      })
+    ).toBe(1);
+    expect(
+      await prisma.securityAuditEvent.count({
+        where: { eventType: "OFFER_UNPUBLISHED", targetEntity: `offer:${offerId}` },
+      })
+    ).toBe(2);
+
+    console.info("[Offer E2E] Lock-timeout rollback and same-key withdrawal while branch paused");
+    await opsPage
+      .getByRole("button", { name: "Toggle language between Arabic and English" })
+      .click();
+    await opsPage.goto(`/staff/offers/${arabicOfferId}`);
+    await expect(arabicPublication.getByText("مسحوب أو لم يُنشر بعد")).toBeVisible();
+    await arabicPublication.getByRole("button", { name: "تحضير النشر" }).click();
+    await arabicPublication.getByRole("button", { name: "تأكيد أمر العمليات" }).click();
+    await expect(arabicPublication.getByText("أمر النشر نشط")).toBeVisible();
+    const republishedArabic = await prisma.offerPublication.findUniqueOrThrow({
+      where: { offerId: arabicOfferId },
+    });
+    expect(republishedArabic.version).toBe(3);
+    await prisma.providerBranch.update({ where: { id: branch.id }, data: { status: "PAUSED" } });
+    expect((await anonymousContext.request.get(`/api/v1/offers/${arabicOfferId}`)).status()).toBe(
+      404
+    );
+    await arabicPublication.getByRole("button", { name: "تحديث" }).click();
+    await expect(arabicPublication.getByText("الفرع غير نشط.")).toBeVisible();
+    const rollbackBlocker = new pg.Client({ connectionString: databaseUrl });
+    await rollbackBlocker.connect();
+    let rolledBackCommandId: string | undefined;
+    let rollbackPayload: Record<string, unknown> | undefined;
+    try {
+      await rollbackBlocker.query("BEGIN");
+      await rollbackBlocker.query(
+        "SELECT id FROM provider_organizations WHERE id = $1 FOR UPDATE",
+        [provider.id]
+      );
+      const failedRequest = opsPage.waitForRequest(
+        (request) =>
+          request.method() === "POST" &&
+          request.url().endsWith(`/api/v1/staff/ops/offers/${arabicOfferId}/publication`)
+      );
+      const failedResponse = opsPage.waitForResponse(
+        (response) =>
+          response.request().method() === "POST" &&
+          response.url().endsWith(`/api/v1/staff/ops/offers/${arabicOfferId}/publication`)
+      );
+      await arabicPublication.getByRole("button", { name: "تحضير سحب النشر" }).click();
+      await arabicPublication.getByRole("button", { name: "تأكيد أمر العمليات" }).click();
+      rollbackPayload = (await failedRequest).postDataJSON() as Record<string, unknown>;
+      rolledBackCommandId = rollbackPayload.commandId as string;
+      expect(await waitForBlockedRequests(rollbackBlocker, 1)).toBeGreaterThanOrEqual(1);
+      expect((await failedResponse).status()).toBe(503);
+      await expect(
+        arabicPublication.getByText("نتيجة الأمر غير مؤكدة.", { exact: false }).first()
+      ).toBeVisible();
+      const afterRollback = await prisma.offerPublication.findUniqueOrThrow({
+        where: { offerId: arabicOfferId },
+      });
+      expect(afterRollback.status).toBe("PUBLISHED");
+      expect(afterRollback.version).toBe(3);
+      expect(
+        await prisma.offerPublicationCommand.count({ where: { commandId: rolledBackCommandId } })
+      ).toBe(0);
+      expect(
+        await prisma.securityAuditEvent.count({
+          where: { eventType: "OFFER_UNPUBLISHED", targetEntity: `offer:${arabicOfferId}` },
+        })
+      ).toBe(1);
+    } finally {
+      await rollbackBlocker.query("COMMIT").catch(async () => rollbackBlocker.query("ROLLBACK"));
+      await rollbackBlocker.end();
+    }
+    await arabicPublication.getByRole("button", { name: "إعادة فحص أمر النشر" }).click();
+    await expect(
+      arabicPublication.getByRole("button", { name: "إعادة محاولة أمر النشر نفسه" })
+    ).toBeVisible();
+    const recoveredWithdrawalRequest = opsPage.waitForRequest(
+      (request) =>
+        request.method() === "POST" &&
+        request.url().endsWith(`/api/v1/staff/ops/offers/${arabicOfferId}/publication`)
+    );
+    await arabicPublication.getByRole("button", { name: "إعادة محاولة أمر النشر نفسه" }).click();
+    expect((await recoveredWithdrawalRequest).postDataJSON()).toEqual(rollbackPayload);
+    await expect(arabicPublication.getByText("مسحوب أو لم يُنشر بعد")).toBeVisible();
+    const recoveredWithdrawal = await prisma.offerPublication.findUniqueOrThrow({
+      where: { offerId: arabicOfferId },
+    });
+    expect(recoveredWithdrawal.status).toBe("UNPUBLISHED");
+    expect(recoveredWithdrawal.version).toBe(4);
+    expect(
+      await prisma.offerPublicationCommand.count({
+        where: { commandId: rolledBackCommandId, outcome: "APPLIED" },
+      })
+    ).toBe(1);
+    expect(
+      await prisma.securityAuditEvent.count({
+        where: { eventType: "OFFER_UNPUBLISHED", targetEntity: `offer:${arabicOfferId}` },
+      })
+    ).toBe(2);
+    expect((await anonymousContext.request.get(`/api/v1/offers/${arabicOfferId}`)).status()).toBe(
+      404
+    );
   } finally {
     const closeResults = await Promise.allSettled(contexts.map((context) => context.close()));
     try {

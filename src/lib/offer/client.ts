@@ -168,6 +168,7 @@ export interface PublicationCommandResult {
 export interface PendingPublicationOperation {
   commandId: string;
   offerId: string;
+  actorUserId: string;
   action: PublicationAction;
   revisionId?: string;
   expectedVersion: number;
@@ -188,6 +189,7 @@ export function readPendingPublicationOperation(): PendingPublicationOperation |
     if (
       typeof operation.commandId !== "string" ||
       typeof operation.offerId !== "string" ||
+      typeof operation.actorUserId !== "string" ||
       !["PUBLISH", "REPLACE", "UNPUBLISH"].includes(operation.action ?? "") ||
       typeof operation.expectedVersion !== "number"
     )
