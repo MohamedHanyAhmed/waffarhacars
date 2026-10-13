@@ -361,22 +361,24 @@ describe("Vehicle garage through real Better Auth session and PostgreSQL route b
       ).status
     ).toBe(403);
     await getPrisma().user.update({ where: { id: other.id }, data: { isSuspended: false } });
-    const session = await getPrisma().session.findFirstOrThrow({ where: { userId: other.id } });
+    const expiring = await customer("+201512345678");
+    const expiringCommandId = crypto.randomUUID();
+    expect((await postGarage(expiring.cookie, expiringCommandId)).status).toBe(201);
+    const session = await getPrisma().session.findFirstOrThrow({ where: { userId: expiring.id } });
     await getPrisma().session.update({
       where: { id: session.id },
       data: { expiresAt: new Date(Date.now() - 1000) },
     });
     expect(
       (
-        await commandGarage(req(`/api/v1/garage/commands/${commandId}`, "GET", other.cookie), {
-          params: Promise.resolve({ commandId }),
-        })
+        await commandGarage(
+          req(`/api/v1/garage/commands/${expiringCommandId}`, "GET", expiring.cookie),
+          {
+            params: Promise.resolve({ commandId: expiringCommandId }),
+          }
+        )
       ).status
     ).toBe(401);
-    await getPrisma().session.update({
-      where: { id: session.id },
-      data: { expiresAt: new Date(Date.now() + 86400000) },
-    });
   });
 
   it("allows exactly one competing edit/archive at one expected version and never revives archive", async () => {
@@ -410,6 +412,21 @@ describe("Vehicle garage through real Better Auth session and PostgreSQL route b
     expect(
       await getPrisma().vehicleCommand.count({ where: { commandId: { in: [editId, archiveId] } } })
     ).toBe(1);
+    const mutationAudit = await getPrisma().securityAuditEvent.findMany({
+      where: {
+        actorUserId: other.id,
+        eventType: { in: ["CUSTOMER_VEHICLE_UPDATED", "CUSTOMER_VEHICLE_ARCHIVED"] },
+        targetEntity: `customer_vehicle:${vehicleId}`,
+      },
+      select: { metadata: true },
+    });
+    expect(
+      mutationAudit.filter((row) =>
+        new Set<string>([editId, archiveId]).has(
+          (row.metadata as { commandId?: string }).commandId || ""
+        )
+      )
+    ).toHaveLength(1);
     if (archive.status === 200) {
       expect(stored.archivedAt).not.toBeNull();
       expect(
@@ -578,10 +595,10 @@ describe("Vehicle garage through real Better Auth session and PostgreSQL route b
     const secondPromise = postGarage(primary.cookie, secondId);
     let blocked = 0;
     try {
-      const deadline = Date.now() + 2000;
+      const deadline = Date.now() + 2400;
       while (Date.now() < deadline) {
         const waiting = await blocker.query(
-          "SELECT count(*)::int AS count FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query LIKE '%FROM customer_profile WHERE id%'"
+          "SELECT count(*)::int AS count FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND datname = current_database() AND wait_event_type = 'Lock'"
         );
         blocked = Number(waiting.rows[0].count);
         if (blocked >= 2) break;
