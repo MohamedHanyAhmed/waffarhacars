@@ -35,8 +35,15 @@ export function createDbContext(env: ServerEnv): DbContext {
   const adapter = new PrismaPg(pool);
   const prisma = new PrismaClient({
     adapter,
-    log: env.APP_RUNTIME_PROFILE === "production" ? ["error"] : ["warn", "error"],
+    // Prisma's default console logger prints raw SQL/driver exceptions, which
+    // can contain provider data or credentials. Keep telemetry, not payloads.
+    log: [
+      { emit: "event", level: "error" },
+      { emit: "event", level: "warn" },
+    ],
   });
+  prisma.$on("error", () => console.error("[Database] Query failed."));
+  prisma.$on("warn", () => console.warn("[Database] Query warning."));
 
   return { prisma, pool };
 }

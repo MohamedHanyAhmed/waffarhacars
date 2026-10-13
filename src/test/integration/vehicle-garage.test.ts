@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import crypto from "node:crypto";
 import pg from "pg";
 import { NextRequest } from "next/server";
@@ -1259,6 +1259,8 @@ describe("Vehicle garage through real Better Auth session and PostgreSQL route b
     const marker = "SYNTHETIC_SQL_HOST_PII_TOKEN_MUST_NOT_LEAK";
     const client = new pg.Client({ connectionString: url });
     await client.connect();
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warningLog = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       await client.query(
         `CREATE FUNCTION vehicle_storage_failure_test() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW."ownerUserId" = '${owner.id}'::uuid THEN RAISE EXCEPTION '${marker}'; END IF; RETURN NEW; END; $$`
@@ -1272,7 +1274,14 @@ describe("Vehicle garage through real Better Auth session and PostgreSQL route b
       expect(await failed.json()).toEqual({ error: "SERVICE_UNAVAILABLE" });
       expect(await getPrisma().vehicleCommand.count({ where: { commandId } })).toBe(0);
       expect(await getPrisma().customerVehicle.count({ where: { ownerUserId: owner.id } })).toBe(0);
+      const emitted = JSON.stringify([...errorLog.mock.calls, ...warningLog.mock.calls]);
+      expect(emitted).toContain("[Database] Query failed.");
+      expect(emitted).not.toContain(marker);
+      expect(emitted).not.toContain(owner.id);
+      expect(emitted).not.toContain("localhost");
     } finally {
+      errorLog.mockRestore();
+      warningLog.mockRestore();
       await client.query(
         "DROP TRIGGER IF EXISTS vehicle_storage_failure_test ON customer_vehicles"
       );
