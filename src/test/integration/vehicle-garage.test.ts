@@ -137,8 +137,9 @@ async function receipt(response: Response) {
   };
 }
 
-// This observes a real PostgreSQL blocking chain rooted in the exact row-locking
-// transaction created by the test. It never counts unrelated database waiters.
+// Observe from an autocommit connection: a long-lived blocker transaction can
+// retain a stale pg_stat_activity statistics snapshot across polling queries.
+// The chain is rooted in the exact row-locking transaction, not unrelated waiters.
 async function waitForBlockedCommands(client: pg.Client, blockerPid: number, expected: number) {
   const deadline = Date.now() + 2500;
   let observed = 0;
@@ -167,37 +168,26 @@ async function orderedRace(
   second: () => Promise<Response>
 ): Promise<[Response, Response]> {
   const blocker = new pg.Client({ connectionString: url });
-  await blocker.connect();
+  const observer = new pg.Client({ connectionString: url });
   let firstPromise: Promise<Response> | undefined;
   let secondPromise: Promise<Response> | undefined;
   try {
+    await blocker.connect();
+    await observer.connect();
     await blocker.query("BEGIN");
     const pid = Number((await blocker.query("SELECT pg_backend_pid() AS pid")).rows[0].pid);
     const locked = await blocker.query(lockSql, lockArgs);
     expect(locked.rowCount).toBe(1);
     firstPromise = first();
-    await waitForBlockedCommands(blocker, pid, 1);
+    await waitForBlockedCommands(observer, pid, 1);
     secondPromise = second();
-    await waitForBlockedCommands(blocker, pid, 2);
+    await waitForBlockedCommands(observer, pid, 2);
     await blocker.query("COMMIT");
     return await Promise.all([firstPromise, secondPromise]);
-  } catch (error) {
-    const waits = await blocker.query(
-      `SELECT pid, state, "wait_event_type" AS type, "wait_event" AS event,
-              pg_blocking_pids(pid) AS blockers
-       FROM pg_stat_activity WHERE datname = current_database()
-         AND pid <> pg_backend_pid() AND cardinality(pg_blocking_pids(pid)) > 0`
-    );
-    await blocker.query("ROLLBACK").catch(() => {});
-    const outcomes = await Promise.allSettled(
-      [firstPromise, secondPromise].filter(Boolean) as Promise<Response>[]
-    );
-    throw new Error(
-      `${String(error)}; blocked=${JSON.stringify(waits.rows)}; outcomes=${outcomes.map((outcome) => (outcome.status === "fulfilled" ? outcome.value.status : "rejected")).join(",")}`
-    );
   } finally {
     await blocker.query("ROLLBACK").catch(() => {});
-    await blocker.end();
+    await blocker.end().catch(() => {});
+    await observer.end().catch(() => {});
     await Promise.allSettled([firstPromise, secondPromise].filter(Boolean) as Promise<Response>[]);
   }
 }
