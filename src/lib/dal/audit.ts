@@ -47,6 +47,13 @@ export const SECURITY_AUDIT_EVENT_TYPES = [
   "OFFER_PUBLISHED",
   "OFFER_PUBLICATION_REPLACED",
   "OFFER_UNPUBLISHED",
+  "VEHICLE_MAKE_CREATED",
+  "VEHICLE_MAKE_UPDATED",
+  "VEHICLE_MODEL_CREATED",
+  "VEHICLE_MODEL_UPDATED",
+  "CUSTOMER_VEHICLE_CREATED",
+  "CUSTOMER_VEHICLE_UPDATED",
+  "CUSTOMER_VEHICLE_ARCHIVED",
 ] as const;
 
 export type SecurityAuditEventType = (typeof SECURITY_AUDIT_EVENT_TYPES)[number];
@@ -116,7 +123,10 @@ export function validateTargetIdentifier(target: unknown): string | null {
     prefix === "provider_branch" ||
     prefix === "service_definition" ||
     prefix === "offer" ||
-    prefix === "offer_revision"
+    prefix === "offer_revision" ||
+    prefix === "vehicle_make" ||
+    prefix === "vehicle_model" ||
+    prefix === "customer_vehicle"
   ) {
     if (UUID_REGEX.test(identifier)) {
       return `${prefix}:${identifier.toLowerCase()}`;
@@ -371,6 +381,20 @@ const OfferPublicationMetadataSchema = z.object({
   version: z.number().int().positive(),
 });
 
+const VehicleMutationMetadataSchema = z.object({
+  action: z.enum([
+    "CREATE_MAKE",
+    "UPDATE_MAKE",
+    "CREATE_MODEL",
+    "UPDATE_MODEL",
+    "CREATE",
+    "EDIT",
+    "ARCHIVE",
+  ]),
+  commandId: z.string().uuid(),
+  version: z.number().int().positive(),
+});
+
 export const AUDIT_METADATA_SCHEMAS: Record<SecurityAuditEventType, z.ZodTypeAny> = {
   STAFF_PROVISIONED: StaffProvisionedMetadataSchema,
   STAFF_ROLE_ASSIGNED: StaffRoleAssignedMetadataSchema,
@@ -409,6 +433,13 @@ export const AUDIT_METADATA_SCHEMAS: Record<SecurityAuditEventType, z.ZodTypeAny
   OFFER_PUBLISHED: OfferPublicationMetadataSchema,
   OFFER_PUBLICATION_REPLACED: OfferPublicationMetadataSchema,
   OFFER_UNPUBLISHED: OfferPublicationMetadataSchema,
+  VEHICLE_MAKE_CREATED: VehicleMutationMetadataSchema,
+  VEHICLE_MAKE_UPDATED: VehicleMutationMetadataSchema,
+  VEHICLE_MODEL_CREATED: VehicleMutationMetadataSchema,
+  VEHICLE_MODEL_UPDATED: VehicleMutationMetadataSchema,
+  CUSTOMER_VEHICLE_CREATED: VehicleMutationMetadataSchema,
+  CUSTOMER_VEHICLE_UPDATED: VehicleMutationMetadataSchema,
+  CUSTOMER_VEHICLE_ARCHIVED: VehicleMutationMetadataSchema,
 };
 
 /**

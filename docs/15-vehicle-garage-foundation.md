@@ -1,0 +1,30 @@
+# PR 4B-A: controlled vehicle catalog and customer garage backend
+
+This slice is a backend identification foundation, not vehicle-to-service fitment. All garage DTOs report `fitmentStatus: "UNKNOWN"`. No vehicle catalog is seeded or imported in production. Operations must verify Cairo/Egypt market model labels and store an internal, opaque evidence reference before creating each make/model. A referenced resource is never fetched by this API. Synthetic CI makes/models are test fixtures only.
+
+## Stable identity and display data
+
+- A make code is globally unique. A model code is unique **within its make**. IDs, codes, and model-parent make IDs never change; PostgreSQL triggers enforce these immutable fields even outside the API. FKs enforce the selected model belongs to the selected make and customer profile belongs to the vehicle owner.
+- Bilingual display labels and evidence references can be corrected with `expectedVersion`, operations permission, a transaction, and an audit event. Existing garage records reference stable IDs and therefore display the **current** catalog label, not a historical label snapshot. Future reservation/offer snapshots must preserve the terms and vehicle identity at their own decision time.
+- `ACTIVE -> INACTIVE -> ACTIVE` is permitted for catalog entries, with CAS and audit on each change. Deactivation stops new selections and edits selecting that entry, but never hides or mutates existing garage records. A model under an inactive make remains unavailable even if its own flag is active.
+- There is no hard-delete API. Operations should correct material identity errors through deactivation and creation of a new canonical record; production DB access controls should restrict direct deletes.
+
+## Customer contract
+
+The actual Better Auth cookie/session is resolved on every private request. A customer must have an unsuspended user, a CustomerProfile, and a verified canonical Egyptian mobile number. Staff-only identities lack customer authority; dual staff/customer identities may access **only their own** garage. The guard additionally requires a live database session under a 30-day absolute and 7-day idle window; a touch is throttled to five minutes. Sign-out/revocation, suspension, profile removal or expiry denies receipt access too.
+
+`POST /api/v1/garage` creates one car with `{commandId, makeId, modelId, modelYear}`. Model year is an integer from 1900 through current Africa/Cairo year +1; the DB has a stable 1900–2200 sanity bound. `GET /api/v1/garage` lists up to 50 own cars per request, with cursor; `GET /api/v1/garage/:id` reads one. `PATCH` changes make/model/year with `expectedVersion`; `DELETE` archives it terminally with `expectedVersion`. There is no restore. Same make/model/year may represent separate cars and is not unique. At most ten active cars per owner; archive frees a slot. There is no nickname, VIN, plate, trim, engine, default vehicle or image collection. Trim/engine remain requirements for future accurate fitment, not silently discarded.
+
+`GET /api/v1/vehicles/catalog` returns only active, bilingual public make/model allowlisted fields. Operations-only `/api/v1/staff/ops/vehicle-catalog/makes` and `/models` manage the catalog with evidence reference and CAS. Staff catalog management requires `vehicle_catalog:manage` (Ops Supervisor, not Sales). State-changing requests require trusted Origin/Referer. Private and public responses use `Cache-Control: no-store`; request payloads and list sizes are bounded.
+
+## Idempotency, ordering and recovery
+
+Every successful create/edit/archive and catalog mutation writes an actor/domain/action/resource/fingerprint-bound command receipt and sanitized audit event in the **same** PostgreSQL transaction as the state change. The receipt is historical: replay returns original action, target and version, not a claim about current state. Read the resource separately for current state. Same key with changed intent returns conflict; another actor cannot read or replay it. A new command key can create a second physically distinct car with identical attributes while under the limit.
+
+Validation failures, missing/foreign IDs, stale versions, inactive catalog, over-limit and other rejected/no-op intents write **no receipt or success audit**. They may be retried as fresh intents after the cause changes. Transient DB/audit/lock failures roll back everything, return sanitized 503, and permit same-key retry. Unknown transport outcome is reconciled at the owner-only command lookup. There are no provider calls, workers, SMS deliveries or partial external side effects in this slice.
+
+Mutation lock order: command-specific advisory lock, customer profile row (for all garage count-changing and edit operations), make row, model row, then owned vehicle row. Catalog model mutation locks make before model. Authorization/session resolution is before domain locks; no path acquires a profile lock after catalog locks. Customer-profile serialization prevents exceeding the ten-active limit, and CAS rejects stale edit/archive. The SQL lock timeout is three seconds; a timeout is a sanitized retryable 503. A late retry of a successful create cannot restore an archived vehicle.
+
+## Deployment and limitations
+
+Apply the additive migration with `prisma migrate deploy` after backup/PITR readiness. No production seed, auth schema change, publication gate change, compatibility approval, booking or launch is included. Recovery is forward-fix or database backup/PITR, not manual DOWN migrations. The publication upgrade check remains anchored to its own migration and also applies later migrations to prove existing approved offers, user/profile/session and non-publication state survive. CI must prove PostgreSQL-backed route/session tests; mock OTP fixtures do **not** prove an Egyptian SMS gateway. This backend slice is not a launch sign-off.

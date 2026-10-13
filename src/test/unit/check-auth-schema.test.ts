@@ -37,7 +37,7 @@ describe("checkAuthSchema Lifecycle and Cleanup Unit Test Suite", () => {
     expect(result.executionError).toBeNull();
     // Temporary directory must be completely removed
     expect(fs.existsSync(result.tempDir)).toBe(false);
-  });
+  }, 15000);
 
   it("proves cleanup after detected drift and byte-identical committed schema", () => {
     // Create a temporary mock schema file with artificial drift

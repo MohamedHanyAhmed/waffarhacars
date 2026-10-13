@@ -41,6 +41,9 @@ model User {
   decidedOfferRevisions     OfferRevision[]          @relation("OfferRevisionDecidedBy")
   changedOfferPublications OfferPublication[]       @relation("PublicationChangedBy")
   offerPublicationCommands OfferPublicationCommand[] @relation("PublicationCommandActor")
+  vehicleCatalogChanges VehicleCatalogEntry[] @relation("VehicleCatalogActor")
+  customerVehicles CustomerVehicle[]
+  vehicleCommands VehicleCommand[]
 
   @@unique([email])
   @@unique([phoneNumber])
@@ -142,8 +145,104 @@ model CustomerProfile {
   notificationPreferences Json     @default("{\"sms\": true, \"whatsapp\": false}")
   createdAt               DateTime @default(now())
   updatedAt               DateTime @updatedAt
+  vehicles                CustomerVehicle[]
+
+  @@unique([id, userId])
 
   @@map("customer_profile")
+}
+
+// Canonical codes are immutable in PostgreSQL. Names are display labels, not fitment evidence.
+
+model VehicleMake {
+  id String @id @default(dbgenerated("pg_catalog.gen_random_uuid()")) @db.Uuid
+  code String @unique @db.VarChar(48)
+  nameEn String @db.VarChar(120)
+  nameAr String @db.VarChar(120)
+  evidenceRef String @db.VarChar(128)
+  isActive Boolean @default(true)
+  version Int @default(1)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  models VehicleModel[]
+  vehicles CustomerVehicle[]
+  @@index([isActive, code])
+  @@map("vehicle_makes")
+}
+
+model VehicleModel {
+  id String @id @default(dbgenerated("pg_catalog.gen_random_uuid()")) @db.Uuid
+  makeId String @db.Uuid
+  make VehicleMake @relation(fields: [makeId], references: [id], onDelete: Restrict)
+  code String @db.VarChar(48)
+  nameEn String @db.VarChar(120)
+  nameAr String @db.VarChar(120)
+  evidenceRef String @db.VarChar(128)
+  isActive Boolean @default(true)
+  version Int @default(1)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  vehicles CustomerVehicle[]
+  // Code is unique per make, not globally.
+  @@unique([makeId, code])
+  @@unique([id, makeId])
+  @@index([makeId, isActive, code])
+  @@map("vehicle_models")
+}
+
+model CustomerVehicle {
+  id String @id @default(dbgenerated("pg_catalog.gen_random_uuid()")) @db.Uuid
+  ownerUserId String @db.Uuid
+  owner User @relation(fields: [ownerUserId], references: [id], onDelete: Restrict)
+  customerProfileId String @db.Uuid
+  customerProfile CustomerProfile @relation(fields: [customerProfileId, ownerUserId], references: [id, userId], onDelete: Restrict)
+  makeId String @db.Uuid
+  make VehicleMake @relation(fields: [makeId], references: [id], onDelete: Restrict)
+  modelId String @db.Uuid
+  model VehicleModel @relation(fields: [modelId, makeId], references: [id, makeId], onDelete: Restrict)
+  modelYear Int
+  version Int @default(1)
+  archivedAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  commands VehicleCommand[]
+  @@index([ownerUserId, archivedAt, createdAt, id])
+  @@map("customer_vehicles")
+}
+
+model VehicleCommand {
+  commandId String @id @db.Uuid
+  actorUserId String @db.Uuid
+  actor User @relation(fields: [actorUserId], references: [id], onDelete: Restrict)
+  domain String @db.VarChar(16)
+  action String @db.VarChar(24)
+  resourceId String @db.Uuid
+  vehicle CustomerVehicle? @relation(fields: [resourceId], references: [id], onDelete: Restrict)
+  fingerprint String @db.VarChar(64)
+  outcome String @db.VarChar(16)
+  httpStatus Int
+  errorCode String? @db.VarChar(64)
+  resultVersion Int?
+  createdAt DateTime @default(now())
+  @@index([actorUserId, domain, resourceId, createdAt])
+  @@map("vehicle_commands")
+}
+
+model VehicleCatalogEntry {
+  commandId String @id @db.Uuid
+  actorUserId String @db.Uuid
+  actor User @relation("VehicleCatalogActor", fields: [actorUserId], references: [id], onDelete: Restrict)
+  domain String @default("CATALOG") @db.VarChar(16)
+  action String @db.VarChar(24)
+  resourceId String @db.Uuid
+  fingerprint String @db.VarChar(64)
+  outcome String @db.VarChar(16)
+  httpStatus Int
+  errorCode String? @db.VarChar(64)
+  resultVersion Int?
+  createdAt DateTime @default(now())
+  @@index([actorUserId, domain, resourceId, createdAt])
+  @@map("vehicle_catalog_commands")
 }
 
 model RateLimitBucket {
@@ -381,11 +480,11 @@ model ProviderBranch {
 
   createdAt              DateTime             @default(now())
   updatedAt              DateTime             @updatedAt
+  offers Offer[]
 
   @@unique([providerOrganizationId, branchCode])
   @@unique([id, providerOrganizationId])
   @@index([cluster, status])
-  offers Offer[]
   @@map("provider_branches")
 }
 
