@@ -509,7 +509,7 @@ describe("Vehicle garage through real Better Auth session and PostgreSQL route b
     expect(await db.customerVehicle.count({ where: { makeId: alternate.id } })).toBe(0);
   });
 
-  it("rejects untrusted origins and invalid Cairo model years without receipt or audit", async () => {
+  it("rejects untrusted origins, invalid years and oversized payloads without receipt or audit", async () => {
     const commandId = crypto.randomUUID();
     const forbidden = await createGarage(
       req(
@@ -523,6 +523,8 @@ describe("Vehicle garage through real Better Auth session and PostgreSQL route b
     expect(forbidden.status).toBe(403);
     const invalid = await postGarage(primary.cookie, commandId, { modelYear: 1899 });
     expect(invalid.status).toBe(400);
+    const oversized = await postGarage(primary.cookie, commandId, { surplus: "x".repeat(5000) });
+    expect(oversized.status).toBe(400);
     expect(await getPrisma().vehicleCommand.count({ where: { commandId } })).toBe(0);
     const audit = await getPrisma().securityAuditEvent.findMany({
       where: { actorUserId: primary.id, eventType: "CUSTOMER_VEHICLE_CREATED" },

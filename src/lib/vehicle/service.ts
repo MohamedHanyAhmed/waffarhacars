@@ -149,11 +149,36 @@ export async function withVehicleApi(
 }
 
 export async function body<T>(req: NextRequest, schema: z.ZodType<T>): Promise<T> {
-  const raw = await req.text().catch(() => "");
-  if (raw.length > 4096) throw new VehicleError(400, "INVALID_PAYLOAD");
+  if (!req.body) throw new VehicleError(400, "INVALID_PAYLOAD");
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > 4096) {
+        await reader.cancel().catch(() => {});
+        throw new VehicleError(400, "INVALID_PAYLOAD");
+      }
+      chunks.push(value);
+    }
+  } catch (error) {
+    if (error instanceof VehicleError) throw error;
+    throw new VehicleError(400, "INVALID_PAYLOAD");
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
   let value: unknown;
   try {
-    value = JSON.parse(raw);
+    value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
   } catch {
     throw new VehicleError(400, "INVALID_PAYLOAD");
   }
