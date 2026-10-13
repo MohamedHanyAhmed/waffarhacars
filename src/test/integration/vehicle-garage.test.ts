@@ -181,6 +181,20 @@ async function orderedRace(
     await waitForBlockedCommands(blocker, pid, 2);
     await blocker.query("COMMIT");
     return await Promise.all([firstPromise, secondPromise]);
+  } catch (error) {
+    const waits = await blocker.query(
+      `SELECT pid, state, "wait_event_type" AS type, "wait_event" AS event,
+              pg_blocking_pids(pid) AS blockers
+       FROM pg_stat_activity WHERE datname = current_database()
+         AND pid <> pg_backend_pid() AND cardinality(pg_blocking_pids(pid)) > 0`
+    );
+    await blocker.query("ROLLBACK").catch(() => {});
+    const outcomes = await Promise.allSettled(
+      [firstPromise, secondPromise].filter(Boolean) as Promise<Response>[]
+    );
+    throw new Error(
+      `${String(error)}; blocked=${JSON.stringify(waits.rows)}; outcomes=${outcomes.map((outcome) => (outcome.status === "fulfilled" ? outcome.value.status : "rejected")).join(",")}`
+    );
   } finally {
     await blocker.query("ROLLBACK").catch(() => {});
     await blocker.end();
