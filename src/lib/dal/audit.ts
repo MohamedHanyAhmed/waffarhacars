@@ -44,6 +44,9 @@ export const SECURITY_AUDIT_EVENT_TYPES = [
   "OFFER_SUBMITTED_FOR_REVIEW",
   "OFFER_APPROVED",
   "OFFER_REJECTED",
+  "OFFER_PUBLISHED",
+  "OFFER_PUBLICATION_REPLACED",
+  "OFFER_UNPUBLISHED",
 ] as const;
 
 export type SecurityAuditEventType = (typeof SECURITY_AUDIT_EVENT_TYPES)[number];
@@ -360,6 +363,14 @@ const OfferRejectedMetadataSchema = z.object({
   ]),
 });
 
+const OfferPublicationMetadataSchema = z.object({
+  action: z.enum(["PUBLISH", "REPLACE", "UNPUBLISH"]),
+  commandId: z.string().uuid(),
+  offerId: z.string().uuid(),
+  revisionId: z.string().uuid().nullable(),
+  version: z.number().int().positive(),
+});
+
 export const AUDIT_METADATA_SCHEMAS: Record<SecurityAuditEventType, z.ZodTypeAny> = {
   STAFF_PROVISIONED: StaffProvisionedMetadataSchema,
   STAFF_ROLE_ASSIGNED: StaffRoleAssignedMetadataSchema,
@@ -395,6 +406,9 @@ export const AUDIT_METADATA_SCHEMAS: Record<SecurityAuditEventType, z.ZodTypeAny
   OFFER_SUBMITTED_FOR_REVIEW: OfferSubmittedMetadataSchema,
   OFFER_APPROVED: OfferApprovedMetadataSchema,
   OFFER_REJECTED: OfferRejectedMetadataSchema,
+  OFFER_PUBLISHED: OfferPublicationMetadataSchema,
+  OFFER_PUBLICATION_REPLACED: OfferPublicationMetadataSchema,
+  OFFER_UNPUBLISHED: OfferPublicationMetadataSchema,
 };
 
 /**

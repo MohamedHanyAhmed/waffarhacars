@@ -12,6 +12,7 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate:status": "prisma migrate status",
     "prisma:migrate:deploy": "prisma migrate deploy",
+    "publication:upgrade:check": "node scripts/check-publication-upgrade.mjs",
     "auth:schema:generate": "node node_modules/auth/dist/index.mjs generate --config src/lib/auth.schema.ts --output prisma/schema.prisma --adapter prisma --dialect postgresql -y",
     "auth:schema:check": "node scripts/check-auth-schema.mjs",
     "auth:cleanup": "node scripts/cleanup-auth.mjs",

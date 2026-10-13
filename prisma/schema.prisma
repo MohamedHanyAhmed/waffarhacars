@@ -39,6 +39,8 @@ model User {
   createdOfferRevisions     OfferRevision[]          @relation("OfferRevisionCreatedBy")
   submittedOfferRevisions   OfferRevision[]          @relation("OfferRevisionSubmittedBy")
   decidedOfferRevisions     OfferRevision[]          @relation("OfferRevisionDecidedBy")
+  changedOfferPublications OfferPublication[]       @relation("PublicationChangedBy")
+  offerPublicationCommands OfferPublicationCommand[] @relation("PublicationCommandActor")
 
   @@unique([email])
   @@unique([phoneNumber])
@@ -284,6 +286,22 @@ enum OfferCommissionBasis {
   DISCOUNTED_CUSTOMER_PRICE
 }
 
+enum OfferPublicationStatus {
+  PUBLISHED
+  UNPUBLISHED
+}
+
+enum OfferPublicationAction {
+  PUBLISH
+  REPLACE
+  UNPUBLISH
+}
+
+enum OfferPublicationOutcome {
+  APPLIED
+  REJECTED
+}
+
 model ProviderOrganization {
   id                           String         @id @default(dbgenerated("pg_catalog.gen_random_uuid()")) @db.Uuid
   nameEn                       String         @db.VarChar(128)
@@ -425,6 +443,8 @@ model Offer {
   currentApprovedRevisionId String?              @db.Uuid
   currentApprovedRevision   OfferRevision?       @relation("CurrentApprovedOfferRevision", fields: [currentApprovedRevisionId, id], references: [id, offerId], onDelete: Restrict)
   revisions                 OfferRevision[]      @relation("OfferRevisions")
+  publication               OfferPublication?
+  publicationCommands       OfferPublicationCommand[]
   nextRevisionNumber        Int                  @default(2)
   creationRequestId          String               @unique @db.Uuid
   creationRequestFingerprint String               @db.VarChar(64)
@@ -492,6 +512,7 @@ model OfferRevision {
   scopeVerified           Boolean                @default(false)
   providerConsentVerified Boolean                @default(false)
   currentForOffers        Offer[]                @relation("CurrentApprovedOfferRevision")
+  pinnedByPublications    OfferPublication[]     @relation("PinnedPublicationRevision")
   createdAt               DateTime               @default(now())
   updatedAt               DateTime               @updatedAt
 
@@ -500,4 +521,45 @@ model OfferRevision {
   @@index([status, createdAt])
   @@index([offerId, status])
   @@map("offer_revisions")
+}
+
+model OfferPublication {
+  offerId           String                 @id @db.Uuid
+  offer             Offer                  @relation(fields: [offerId], references: [id], onDelete: Restrict)
+  status            OfferPublicationStatus
+  pinnedRevisionId  String?                @db.Uuid
+  pinnedRevision    OfferRevision?         @relation("PinnedPublicationRevision", fields: [pinnedRevisionId, offerId], references: [id, offerId], onDelete: Restrict)
+  version           Int
+  lastActorUserId   String                 @db.Uuid
+  lastActorUser     User                   @relation("PublicationChangedBy", fields: [lastActorUserId], references: [id], onDelete: Restrict)
+  publishedAt       DateTime?
+  unpublishedAt     DateTime?
+  createdAt         DateTime               @default(now())
+  updatedAt         DateTime               @updatedAt
+
+  @@index([status, pinnedRevisionId])
+  @@map("offer_publications")
+}
+
+model OfferPublicationCommand {
+  commandId        String                  @id @db.Uuid
+  offerId          String                  @db.Uuid
+  offer            Offer                   @relation(fields: [offerId], references: [id], onDelete: Restrict)
+  actorUserId      String                  @db.Uuid
+  actorUser        User                    @relation("PublicationCommandActor", fields: [actorUserId], references: [id], onDelete: Restrict)
+  action           OfferPublicationAction
+  targetRevisionId String?                 @db.Uuid
+  expectedVersion  Int
+  fingerprint      String                  @db.VarChar(64)
+  outcome          OfferPublicationOutcome
+  httpStatus       Int
+  errorCode        String?                 @db.VarChar(64)
+  resultVersion    Int
+  resultStatus     OfferPublicationStatus
+  pinnedRevisionId String?                 @db.Uuid
+  createdAt        DateTime                @default(now())
+
+  @@index([offerId, createdAt])
+  @@index([actorUserId, createdAt])
+  @@map("offer_publication_commands")
 }

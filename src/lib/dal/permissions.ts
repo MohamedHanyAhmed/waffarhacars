@@ -54,6 +54,7 @@ export const STAFF_PERMISSIONS = [
   "offer_draft:review",
   "offer_draft:approve",
   "offer_draft:reject",
+  "offer_publication:manage",
 
   // Finance & Settlement
   "payout:view",
@@ -100,6 +101,7 @@ export const ROLE_PERMISSIONS_CATALOG: Record<StaffRole, ReadonlySet<StaffPermis
     "offer_draft:review",
     "offer_draft:approve",
     "offer_draft:reject",
+    "offer_publication:manage",
   ]),
   FINANCE_OFFICER: new Set<StaffPermission>([
     "staff:read",

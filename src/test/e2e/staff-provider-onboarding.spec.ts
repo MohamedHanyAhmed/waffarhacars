@@ -521,11 +521,15 @@ test.describe("Bilingual Staff Provider Onboarding UI Journey (Mocked APIs)", ()
     await activateProviderBtn.click();
     await page.waitForTimeout(300);
 
-    // 7. Verify status is Active (Vetted) and customer publication is clearly not available.
+    // 7. Provider vetting is not an offer decision or a customer-publication command.
     await expect(page.locator("text=Active (Vetted)").first()).toBeVisible();
-    await expect(
-      page.locator('[role="note"]').filter({ hasText: "customer publication" }).first()
-    ).toBeVisible();
+    const publicationBoundary = page.getByRole("note").filter({
+      hasText: "customer visibility requires a separate Operations publication command",
+    });
+    await expect(publicationBoundary).toBeVisible();
+    await expect(publicationBoundary).toContainText(
+      "Provider activation and offer approval do not publish an offer."
+    );
   });
 
   test("4. Operations remediable branch rejection returns provider and approvals to draft", async ({

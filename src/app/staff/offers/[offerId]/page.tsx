@@ -7,16 +7,24 @@ import { useI18n } from "@/context/I18nContext";
 import { OfferForm } from "@/components/staff/OfferForm";
 import {
   clearPendingOfferOperation,
+  clearPendingPublicationOperation,
   minorToEgp,
   offerStatusKey,
   ownsPendingOfferCallback,
+  ownsPendingPublicationCallback,
   readPendingOfferOperation,
+  readPendingPublicationOperation,
   utcToCairoInput,
   writePendingOfferOperation,
+  writePendingPublicationOperation,
   type OfferDto,
   type OfferMutationKind,
   type OfferRevisionDto,
   type PendingOfferOperation,
+  type PendingPublicationOperation,
+  type PublicationAction,
+  type PublicationCommandResult,
+  type StaffPublicationDto,
 } from "@/lib/offer/client";
 import { offerApi, offerFailureMessage, mutationOutcomeUnknown } from "@/lib/offer/client-api";
 import type { StaffAuthStatusResponse } from "@/lib/staff/status-contract";
@@ -41,6 +49,25 @@ const reasons = [
   "COMMERCIAL_TERMS_INCOMPLETE",
   "OTHER",
 ];
+
+const publicationReasonKeys: Record<string, string> = {
+  GATE_DISABLED: "staffOffers.publicationReasonGateDisabled",
+  PILOT_CLUSTER_UNSET: "staffOffers.publicationReasonPilotUnset",
+  EVIDENCE_REPOSITORY_UNREADY: "staffOffers.publicationReasonEvidenceUnavailable",
+  UNPUBLISHED: "staffOffers.publicationReasonUnpublished",
+  REVISION_NOT_APPROVED: "staffOffers.publicationReasonRevisionUnapproved",
+  PROVIDER_INACTIVE: "staffOffers.publicationReasonProviderInactive",
+  BRANCH_INACTIVE: "staffOffers.publicationReasonBranchInactive",
+  BRANCH_NOT_VETTED: "staffOffers.publicationReasonBranchUnvetted",
+  OUTSIDE_PILOT_CLUSTER: "staffOffers.publicationReasonOutsidePilot",
+  SERVICE_INACTIVE: "staffOffers.publicationReasonServiceInactive",
+  CATEGORY_INACTIVE: "staffOffers.publicationReasonCategoryInactive",
+  SERVICE_IDENTITY_CHANGED: "staffOffers.publicationReasonServiceChanged",
+  QUOTE_REQUIRED: "staffOffers.publicationReasonQuoteRequired",
+  NOT_YET_VALID: "staffOffers.publicationReasonNotYetValid",
+  EXPIRED: "staffOffers.publicationReasonExpired",
+  ATTESTATIONS_INCOMPLETE: "staffOffers.publicationReasonAttestationsIncomplete",
+};
 
 export default function StaffOfferDetailPage() {
   const { offerId } = useParams<{ offerId: string }>();
@@ -68,8 +95,26 @@ export default function StaffOfferDetailPage() {
   });
   const [reason, setReason] = useState("");
   const [reload, setReload] = useState(0);
+  const [publication, setPublication] = useState<StaffPublicationDto | null>(null);
+  const [publicationLoading, setPublicationLoading] = useState(false);
+  const [publicationLoadError, setPublicationLoadError] = useState(false);
+  const [publicationPending, setPublicationPending] = useState(false);
+  const [publicationUnknown, setPublicationUnknown] = useState(
+    () => readPendingPublicationOperation()?.offerId === offerId
+  );
+  const [publicationRetryAvailable, setPublicationRetryAvailable] = useState(false);
+  const [publicationError, setPublicationError] = useState<string | null>(null);
+  const [publicationMessage, setPublicationMessage] = useState<string | null>(null);
+  const [publicationConfirm, setPublicationConfirm] = useState<{
+    action: PublicationAction;
+    revisionId?: string;
+    expectedVersion: number;
+  } | null>(null);
+  const [publicationReload, setPublicationReload] = useState(0);
   const inFlight = useRef(false);
+  const publicationInFlight = useRef(false);
   const generation = useRef(0);
+  const publicationGeneration = useRef(0);
   const attestedSnapshot = useRef<string | null>(null);
   const operationRef = useRef<PendingOfferOperation | null>(
     readPendingOfferOperation()?.offerId === offerId ? readPendingOfferOperation() : null
@@ -82,6 +127,39 @@ export default function StaffOfferDetailPage() {
       if (counter.current === current) counter.current++;
     };
   }, [offerId]);
+
+  useEffect(() => {
+    const counter = publicationGeneration;
+    const current = ++counter.current;
+    queueMicrotask(() => {
+      if (counter.current !== current) return;
+      setPublication(null);
+      setPublicationLoadError(false);
+      setPublicationError(null);
+      setPublicationMessage(null);
+      setPublicationConfirm(null);
+      setPublicationUnknown(Boolean(readPendingPublicationOperation()));
+      setPublicationRetryAvailable(false);
+    });
+    return () => {
+      if (counter.current === current) counter.current++;
+    };
+  }, [offerId]);
+
+  useEffect(() => {
+    const journal = readPendingPublicationOperation();
+    if (!journal) return;
+    let active = true;
+    queueMicrotask(() => {
+      if (!active) return;
+      setPublicationUnknown(true);
+      if (journal.offerId !== offerId)
+        setPublicationError(t("staffOffers.publicationOtherPending"));
+    });
+    return () => {
+      active = false;
+    };
+  }, [offerId, t]);
 
   useEffect(() => {
     const journal = readPendingOfferOperation();
@@ -143,6 +221,47 @@ export default function StaffOfferDetailPage() {
     return () => controller.abort();
   }, [offerId, reload, load, t]);
 
+  useEffect(() => {
+    if (staff?.state !== "ACTIVE" || staff.department !== "OPERATIONS") return;
+    const controller = new AbortController();
+    let active = true;
+    queueMicrotask(() => {
+      if (active) setPublicationLoading(true);
+    });
+    void offerApi<StaffPublicationDto>(`/api/v1/staff/ops/offers/${offerId}/publication`, {
+      signal: controller.signal,
+    })
+      .then((response) => {
+        if (!active || controller.signal.aborted) return;
+        if (response.ok) {
+          setPublicationLoadError(false);
+          setPublication((previous) =>
+            previous && previous.offerId === offerId && previous.version > response.data.version
+              ? previous
+              : response.data
+          );
+          setPublicationError(null);
+        } else if (response.status === 401) router.replace("/staff/login");
+        else {
+          setPublicationLoadError(true);
+          setPublicationError(offerFailureMessage(response, t));
+        }
+      })
+      .catch(() => {
+        if (active && !controller.signal.aborted) {
+          setPublicationLoadError(true);
+          setPublicationError(t("staffOffers.genericError"));
+        }
+      })
+      .finally(() => {
+        if (active && !controller.signal.aborted) setPublicationLoading(false);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [staff?.userId, staff?.state, staff?.department, offerId, publicationReload, router, t]);
+
   const revisions = offer?.revisions ?? [];
   const selected = revisions.find((item) => item.id === selectedId) ?? null;
   const latest = revisions[0] ?? null;
@@ -165,7 +284,221 @@ export default function StaffOfferDetailPage() {
     staff?.state === "ACTIVE" &&
     staff.department === "OPERATIONS" &&
     selected?.createdByUserId !== staff.userId;
-  const actionDisabled = pending || unknown || loading || Boolean(readPendingOfferOperation());
+  const actionDisabled =
+    pending ||
+    unknown ||
+    loading ||
+    Boolean(readPendingOfferOperation()) ||
+    Boolean(readPendingPublicationOperation());
+  const canManagePublication =
+    staff?.state === "ACTIVE" && staff.department === "OPERATIONS" && offer?.id === offerId;
+  const publicationJournal = readPendingPublicationOperation();
+  const publicationActionDisabled =
+    publicationPending ||
+    publicationUnknown ||
+    publicationLoading ||
+    !publication ||
+    publicationLoadError ||
+    Boolean(publicationJournal) ||
+    Boolean(readPendingOfferOperation());
+
+  useEffect(() => {
+    let active = true;
+    queueMicrotask(() => {
+      if (active) setPublicationConfirm(null);
+    });
+    return () => {
+      active = false;
+    };
+  }, [selectedId, publication?.version]);
+
+  const reconcilePublication = async (operation?: PendingPublicationOperation) => {
+    const target = operation ?? readPendingPublicationOperation();
+    if (!target || target.offerId !== offerId) {
+      setPublicationError(t("staffOffers.publicationOtherPending"));
+      return;
+    }
+    if (target.actorUserId !== staff?.userId) {
+      setPublicationError(t("staffOffers.publicationOriginalActor"));
+      return;
+    }
+    const currentGeneration = publicationGeneration.current;
+    const ownsCurrent = () =>
+      ownsPendingPublicationCallback(
+        target.commandId,
+        currentGeneration,
+        publicationGeneration.current
+      );
+    try {
+      const response = await offerApi<PublicationCommandResult>(
+        `/api/v1/staff/ops/offers/${offerId}/publication/commands/${target.commandId}`
+      );
+      if (!ownsCurrent()) return;
+      if (!response.ok) {
+        if (response.status === 401) return router.replace("/staff/login");
+        // A missing command is not proof that an in-flight write failed or rolled back.
+        setPublicationUnknown(true);
+        setPublicationRetryAvailable(response.status === 404);
+        setPublicationError(t("staffOffers.publicationStillUnknown"));
+        return;
+      }
+      clearPendingPublicationOperation(target.commandId);
+      setPublicationRetryAvailable(false);
+      setPublication((previous) =>
+        previous && previous.version > response.data.publication.version
+          ? previous
+          : response.data.publication
+      );
+      setPublicationUnknown(false);
+      setPublicationConfirm(null);
+      if (response.data.command.outcome === "APPLIED") {
+        setPublicationError(null);
+        setPublicationMessage(t("staffOffers.publicationCommandRecorded"));
+        setPublicationReload((value) => value + 1);
+      } else {
+        setPublicationMessage(null);
+        setPublicationError(t("staffOffers.publicationCommandRejected"));
+      }
+    } catch {
+      if (ownsCurrent()) {
+        setPublicationUnknown(true);
+        setPublicationRetryAvailable(false);
+        setPublicationError(t("staffOffers.publicationStillUnknown"));
+      }
+    }
+  };
+
+  const mutatePublication = async (decision: {
+    action: PublicationAction;
+    revisionId?: string;
+    expectedVersion: number;
+  }) => {
+    if (publicationInFlight.current || publicationActionDisabled || !publication || !staff?.userId)
+      return;
+    if (
+      decision.expectedVersion !== publication.version ||
+      (decision.action !== "UNPUBLISH" &&
+        (!selected || selected.id !== decision.revisionId || selected.status !== "APPROVED"))
+    ) {
+      setPublicationConfirm(null);
+      setPublicationError(t("staffOffers.conflict"));
+      return;
+    }
+    const operation: PendingPublicationOperation = {
+      commandId: crypto.randomUUID(),
+      offerId,
+      actorUserId: staff.userId,
+      action: decision.action,
+      expectedVersion: decision.expectedVersion,
+      ...(decision.revisionId ? { revisionId: decision.revisionId } : {}),
+    };
+    setPublicationRetryAvailable(false);
+    try {
+      writePendingPublicationOperation(operation);
+    } catch {
+      setPublicationError(t("staffOffers.storageUnavailable"));
+      return;
+    }
+    await postPublication(operation, false);
+  };
+
+  const postPublication = async (
+    operation: PendingPublicationOperation,
+    isRecoveryRetry: boolean
+  ) => {
+    const currentGeneration = publicationGeneration.current;
+    const ownsCurrent = () =>
+      ownsPendingPublicationCallback(
+        operation.commandId,
+        currentGeneration,
+        publicationGeneration.current
+      );
+    publicationInFlight.current = true;
+    setPublicationPending(true);
+    setPublicationError(null);
+    setPublicationMessage(null);
+    try {
+      const response = await offerApi<PublicationCommandResult>(
+        `/api/v1/staff/ops/offers/${offerId}/publication`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            commandId: operation.commandId,
+            action: operation.action,
+            expectedVersion: operation.expectedVersion,
+            ...(operation.revisionId ? { revisionId: operation.revisionId } : {}),
+          }),
+        }
+      );
+      if (!ownsCurrent()) return;
+      if (!response.ok) {
+        if (mutationOutcomeUnknown(response.status)) {
+          setPublicationUnknown(true);
+          setPublicationRetryAvailable(false);
+          setPublicationError(t("staffOffers.publicationStillUnknown"));
+          return;
+        }
+        if (response.status === 409 || response.status === 422) {
+          await reconcilePublication(operation);
+          return;
+        }
+        // A definitive first-delivery validation/auth/maker-checker refusal has no
+        // prior request that could still commit. A retry after an unknown outcome
+        // must never clear the original journal on the same refusal.
+        if (!isRecoveryRetry && [400, 401, 403, 404].includes(response.status)) {
+          clearPendingPublicationOperation(operation.commandId);
+          setPublicationUnknown(false);
+          setPublicationRetryAvailable(false);
+          setPublicationConfirm(null);
+          if (response.status === 401) return router.replace("/staff/login");
+          setPublicationError(offerFailureMessage(response, t));
+          return;
+        }
+        if (response.status === 401) return router.replace("/staff/login");
+        setPublicationUnknown(true);
+        setPublicationRetryAvailable(false);
+        setPublicationError(offerFailureMessage(response, t));
+        return;
+      }
+      clearPendingPublicationOperation(operation.commandId);
+      setPublicationRetryAvailable(false);
+      setPublication((previous) =>
+        previous && previous.version > response.data.publication.version
+          ? previous
+          : response.data.publication
+      );
+      setPublicationReload((value) => value + 1);
+      setPublicationUnknown(false);
+      setPublicationConfirm(null);
+      setPublicationMessage(t("staffOffers.publicationCommandRecorded"));
+    } catch {
+      if (ownsCurrent()) {
+        setPublicationUnknown(true);
+        setPublicationRetryAvailable(false);
+        setPublicationError(t("staffOffers.publicationStillUnknown"));
+      }
+    } finally {
+      publicationInFlight.current = false;
+      if (publicationGeneration.current === currentGeneration) setPublicationPending(false);
+    }
+  };
+
+  const retryPublication = async () => {
+    const operation = readPendingPublicationOperation();
+    if (
+      !publicationRetryAvailable ||
+      publicationInFlight.current ||
+      !canManagePublication ||
+      !operation ||
+      operation.offerId !== offerId ||
+      operation.actorUserId !== staff?.userId
+    )
+      return;
+    // Keep the original command ID, actor-bound resource, target and expected version.
+    // A still-running original request is serialized and replayed by the server.
+    setPublicationRetryAvailable(false);
+    await postPublication(operation, true);
+  };
 
   const markUnknown = (operation: PendingOfferOperation) => {
     operationRef.current = operation;
@@ -722,6 +1055,203 @@ export default function StaffOfferDetailPage() {
                   {t("staffOffers.reject")}
                 </button>
               </div>
+            </section>
+          )}
+          {canManagePublication && (
+            <section
+              className="space-y-4 rounded-2xl border bg-white p-5"
+              aria-label={t("staffOffers.publicationControl")}
+            >
+              <h2 className="text-lg font-bold">{t("staffOffers.publicationControl")}</h2>
+              <p className="text-sm text-slate-600">{t("staffOffers.publicationExplanation")}</p>
+              {publicationLoading && <p role="status">{t("staffOffers.loading")}</p>}
+              {publication && (
+                <div className="space-y-2 text-sm">
+                  <p>
+                    {t("staffOffers.publicationRecordedState")}:{" "}
+                    <strong>
+                      {t(
+                        publication.status === "PUBLISHED"
+                          ? "staffOffers.publicationPublished"
+                          : "staffOffers.publicationUnpublished"
+                      )}
+                    </strong>{" "}
+                    · v{publication.version}
+                  </p>
+                  {publication.pinnedRevisionId && (
+                    <p>
+                      {t("staffOffers.publicationPinnedRevision")}:{" "}
+                      <bdi dir="ltr">
+                        #
+                        {revisions.find((item) => item.id === publication.pinnedRevisionId)
+                          ?.revisionNumber ?? publication.pinnedRevisionId}
+                      </bdi>
+                    </p>
+                  )}
+                  <p>
+                    {t("staffOffers.publicationEffectiveVisibility")}:{" "}
+                    <strong>
+                      {t(
+                        publication.effectiveVisible
+                          ? "staffOffers.publicationVisible"
+                          : "staffOffers.publicationHidden"
+                      )}
+                    </strong>
+                  </p>
+                  {!publication.effectiveVisible && publication.hiddenReasons.length > 0 && (
+                    <ul className="list-disc space-y-1 ps-5">
+                      {publication.hiddenReasons
+                        .filter(
+                          (item) =>
+                            publication.status === "PUBLISHED" ||
+                            [
+                              "UNPUBLISHED",
+                              "GATE_DISABLED",
+                              "PILOT_CLUSTER_UNSET",
+                              "EVIDENCE_REPOSITORY_UNREADY",
+                            ].includes(item)
+                        )
+                        .map((item) => (
+                          <li key={item}>
+                            {t(
+                              publicationReasonKeys[item] ??
+                                "staffOffers.publicationReasonUnavailable"
+                            )}
+                          </li>
+                        ))}
+                    </ul>
+                  )}
+                  <p className="text-slate-600">{t("staffOffers.publicationMayHideAgain")}</p>
+                </div>
+              )}
+              {publicationError && <p role="alert">{publicationError}</p>}
+              {publicationMessage && <p role="status">{publicationMessage}</p>}
+              {publicationUnknown && (
+                <div className="rounded-xl border border-amber-300 bg-amber-50 p-4">
+                  <p>{t("staffOffers.publicationStillUnknown")}</p>
+                  {publicationRetryAvailable && publicationJournal?.offerId === offerId && (
+                    <p role="status">{t("staffOffers.publicationNoReceipt")}</p>
+                  )}
+                  <div className="mt-3 flex flex-wrap gap-3">
+                    <button
+                      type="button"
+                      onClick={() => void reconcilePublication()}
+                      disabled={publicationPending || publicationJournal?.offerId !== offerId}
+                      className="rounded-lg bg-slate-900 px-4 py-2 text-white disabled:opacity-50"
+                    >
+                      {t("staffOffers.publicationRecheckCommand")}
+                    </button>
+                    {publicationRetryAvailable && publicationJournal?.offerId === offerId && (
+                      <button
+                        type="button"
+                        onClick={() => void retryPublication()}
+                        disabled={publicationPending || !canManagePublication}
+                        className="rounded-lg border border-slate-900 px-4 py-2 font-semibold disabled:opacity-50"
+                      >
+                        {t("staffOffers.publicationRetrySameCommand")}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+              <button
+                type="button"
+                onClick={() => setPublicationReload((value) => value + 1)}
+                className="rounded-xl border px-4 py-2 font-semibold"
+              >
+                {t("staffOffers.refresh")}
+              </button>
+              {publication && !publicationConfirm && (
+                <div className="flex flex-wrap gap-3">
+                  {selected.status === "APPROVED" &&
+                    (publication.status === "UNPUBLISHED" ||
+                      publication.pinnedRevisionId !== selected.id) && (
+                      <button
+                        type="button"
+                        disabled={
+                          publicationActionDisabled ||
+                          publication.hiddenReasons.some((item) =>
+                            [
+                              "GATE_DISABLED",
+                              "PILOT_CLUSTER_UNSET",
+                              "EVIDENCE_REPOSITORY_UNREADY",
+                            ].includes(item)
+                          )
+                        }
+                        onClick={() =>
+                          setPublicationConfirm({
+                            action: publication.status === "UNPUBLISHED" ? "PUBLISH" : "REPLACE",
+                            revisionId: selected.id,
+                            expectedVersion: publication.version,
+                          })
+                        }
+                        className="rounded-xl bg-brand-600 px-5 py-3 font-semibold text-white disabled:opacity-50"
+                      >
+                        {t(
+                          publication.status === "UNPUBLISHED"
+                            ? "staffOffers.publicationPublish"
+                            : "staffOffers.publicationReplace"
+                        )}
+                      </button>
+                    )}
+                  {publication.status === "PUBLISHED" && (
+                    <button
+                      type="button"
+                      disabled={publicationActionDisabled}
+                      onClick={() =>
+                        setPublicationConfirm({
+                          action: "UNPUBLISH",
+                          expectedVersion: publication.version,
+                        })
+                      }
+                      className="rounded-xl border border-rose-400 px-5 py-3 font-semibold text-rose-700 disabled:opacity-50"
+                    >
+                      {t("staffOffers.publicationWithdraw")}
+                    </button>
+                  )}
+                </div>
+              )}
+              {publicationConfirm && (
+                <div className="space-y-3 rounded-xl border border-amber-300 bg-amber-50 p-4">
+                  <p className="font-semibold">{t("staffOffers.publicationConfirmTitle")}</p>
+                  <p>
+                    {t(
+                      publicationConfirm.action === "PUBLISH"
+                        ? "staffOffers.publicationConfirmPublish"
+                        : publicationConfirm.action === "REPLACE"
+                          ? "staffOffers.publicationConfirmReplace"
+                          : "staffOffers.publicationConfirmWithdraw"
+                    )}
+                  </p>
+                  {publicationConfirm.revisionId && (
+                    <p>
+                      {t("staffOffers.publicationPinnedRevision")}:{" "}
+                      <bdi dir="ltr">
+                        #
+                        {revisions.find((item) => item.id === publicationConfirm.revisionId)
+                          ?.revisionNumber ?? publicationConfirm.revisionId}
+                      </bdi>
+                    </p>
+                  )}
+                  <div className="flex flex-wrap gap-3">
+                    <button
+                      type="button"
+                      disabled={publicationActionDisabled}
+                      onClick={() => void mutatePublication(publicationConfirm)}
+                      className="rounded-xl bg-slate-900 px-5 py-3 font-semibold text-white disabled:opacity-50"
+                    >
+                      {t("staffOffers.publicationConfirmAction")}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPublicationConfirm(null)}
+                      className="rounded-xl border px-5 py-3 font-semibold"
+                    >
+                      {t("staffOffers.publicationCancel")}
+                    </button>
+                  </div>
+                </div>
+              )}
             </section>
           )}
         </>

@@ -3,17 +3,21 @@ import {
   cairoInputToUtc,
   clearPendingOfferOperation,
   clearPendingCatalogOperation,
+  clearPendingPublicationOperation,
   editReconciliationAdvanced,
   egpToMinor,
   minorToEgp,
   offerDiscountBps,
   ownsPendingOfferCallback,
   ownsPendingCatalogCallback,
+  ownsPendingPublicationCallback,
   readPendingOfferOperation,
   readPendingCatalogOperation,
+  readPendingPublicationOperation,
   utcToCairoInput,
   writePendingOfferOperation,
   writePendingCatalogOperation,
+  writePendingPublicationOperation,
 } from "@/lib/offer/client";
 
 describe("staff offer client-safe money and Cairo time helpers", () => {
@@ -157,5 +161,72 @@ describe("staff offer client-safe money and Cairo time helpers", () => {
     await lateA;
     expect(readPendingCatalogOperation()?.operationId).toBe("B");
     expect(clearPendingCatalogOperation("B")).toBe(true);
+  });
+
+  it("publication journal preserves unresolved A when another offer B is inspected", () => {
+    const a = {
+      commandId: "command-A",
+      offerId: "offer-A",
+      actorUserId: "operator-A",
+      action: "PUBLISH" as const,
+      revisionId: "revision-A",
+      expectedVersion: 0,
+    };
+    writePendingPublicationOperation(a);
+    expect(readPendingPublicationOperation()).toEqual(a);
+    expect(clearPendingPublicationOperation("command-B")).toBe(false);
+    expect(() =>
+      writePendingPublicationOperation({
+        ...a,
+        commandId: "command-B",
+        offerId: "offer-B",
+        revisionId: "revision-B",
+      })
+    ).toThrow();
+    const stored = sessionStorage.getItem("waffarhacars_publication_pending_v1");
+    expect(stored).not.toContain("normalPriceMinor");
+    expect(stored).not.toContain("evidencePacketId");
+    expect(readPendingPublicationOperation()?.actorUserId).toBe("operator-A");
+    expect(readPendingPublicationOperation()).toEqual(a);
+    expect(clearPendingPublicationOperation(a.commandId)).toBe(true);
+  });
+
+  it("a deferred publication response A cannot clear B or act after route generation changes", async () => {
+    const a = {
+      commandId: "command-A",
+      offerId: "offer-A",
+      actorUserId: "operator-A",
+      action: "PUBLISH" as const,
+      revisionId: "revision-A",
+      expectedVersion: 0,
+    };
+    const b = {
+      commandId: "command-B",
+      offerId: "offer-B",
+      actorUserId: "operator-B",
+      action: "UNPUBLISH" as const,
+      expectedVersion: 2,
+    };
+    writePendingPublicationOperation(a);
+    let release!: () => void;
+    const response = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let staleCallbackActed = false;
+    const lateA = response.then(() => {
+      if (ownsPendingPublicationCallback(a.commandId, 1, 2)) {
+        staleCallbackActed = true;
+        clearPendingPublicationOperation(a.commandId);
+      }
+    });
+    expect(clearPendingPublicationOperation(a.commandId)).toBe(true);
+    writePendingPublicationOperation(b);
+    release();
+    await lateA;
+    expect(staleCallbackActed).toBe(false);
+    expect(ownsPendingPublicationCallback(a.commandId, 1, 1)).toBe(false);
+    expect(readPendingPublicationOperation()).toEqual(b);
+    expect(ownsPendingPublicationCallback(b.commandId, 2, 2)).toBe(true);
+    expect(clearPendingPublicationOperation(b.commandId)).toBe(true);
   });
 });

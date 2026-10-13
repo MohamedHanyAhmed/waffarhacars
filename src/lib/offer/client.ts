@@ -136,8 +136,93 @@ export interface PendingOfferOperation {
   unresolved: true;
 }
 
+export type PublicationAction = "PUBLISH" | "REPLACE" | "UNPUBLISH";
+export type PublicationStatus = "PUBLISHED" | "UNPUBLISHED";
+
+export interface StaffPublicationDto {
+  offerId: string;
+  status: PublicationStatus;
+  version: number;
+  pinnedRevisionId: string | null;
+  effectiveVisible: boolean;
+  hiddenReasons: string[];
+}
+
+export interface PublicationCommandDto {
+  commandId: string;
+  action: PublicationAction;
+  outcome: "APPLIED" | "REJECTED";
+  resultVersion?: number;
+  resultStatus?: PublicationStatus;
+  pinnedRevisionId?: string | null;
+  httpStatus?: number;
+  errorCode?: string;
+}
+
+export interface PublicationCommandResult {
+  command: PublicationCommandDto;
+  publication: StaffPublicationDto;
+}
+
+/** Only command identity and CAS metadata, never offer terms or private packet references. */
+export interface PendingPublicationOperation {
+  commandId: string;
+  offerId: string;
+  actorUserId: string;
+  action: PublicationAction;
+  revisionId?: string;
+  expectedVersion: number;
+}
+
 const JOURNAL_KEY = "waffarhacars_offer_pending_v1";
 const CATALOG_JOURNAL_KEY = "waffarhacars_catalog_pending_v1";
+const PUBLICATION_JOURNAL_KEY = "waffarhacars_publication_pending_v1";
+
+export function readPendingPublicationOperation(): PendingPublicationOperation | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = sessionStorage.getItem(PUBLICATION_JOURNAL_KEY);
+    if (!raw) return null;
+    const value: unknown = JSON.parse(raw);
+    if (!value || typeof value !== "object") return null;
+    const operation = value as Partial<PendingPublicationOperation>;
+    if (
+      typeof operation.commandId !== "string" ||
+      typeof operation.offerId !== "string" ||
+      typeof operation.actorUserId !== "string" ||
+      !["PUBLISH", "REPLACE", "UNPUBLISH"].includes(operation.action ?? "") ||
+      typeof operation.expectedVersion !== "number"
+    )
+      return null;
+    return operation as PendingPublicationOperation;
+  } catch {
+    return null;
+  }
+}
+
+export function writePendingPublicationOperation(operation: PendingPublicationOperation): void {
+  const existing = readPendingPublicationOperation();
+  if (existing && existing.commandId !== operation.commandId)
+    throw new Error("A different publication command is unresolved");
+  sessionStorage.setItem(PUBLICATION_JOURNAL_KEY, JSON.stringify(operation));
+}
+
+export function clearPendingPublicationOperation(commandId: string): boolean {
+  if (readPendingPublicationOperation()?.commandId !== commandId) return false;
+  sessionStorage.removeItem(PUBLICATION_JOURNAL_KEY);
+  return true;
+}
+
+export function ownsPendingPublicationCallback(
+  commandId: string,
+  dispatchedGeneration: number,
+  currentGeneration: number
+): boolean {
+  return (
+    dispatchedGeneration === currentGeneration &&
+    readPendingPublicationOperation()?.commandId === commandId
+  );
+}
 
 export interface PendingCatalogOperation {
   operationId: string;
