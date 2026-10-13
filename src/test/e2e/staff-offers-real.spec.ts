@@ -464,6 +464,64 @@ test("real UI and PostgreSQL: bilingual mobile offers, approval, explicit public
     await expect(englishPublication).toBeVisible();
     await expect(englishPublication.getByText("Withdrawn or never published")).toBeVisible();
     await expect(englishPublication.getByText("No", { exact: true })).toBeVisible();
+    console.info("[Offer E2E] Definitive first-delivery maker-checker 403 leaves no pending trap");
+    // The already-rendered detail still shows a Sales-authored revision. Change the
+    // test-owned database row immediately before delivery to exercise the server's
+    // authoritative maker-checker boundary, not a client-side disabled button.
+    await prisma.offerRevision.update({
+      where: { id: draft.id },
+      data: { createdByUserId: ops.userId },
+    });
+    let forbiddenCommandId: string | undefined;
+    try {
+      const forbiddenRequest = opsPage.waitForRequest(
+        (request) =>
+          request.method() === "POST" &&
+          request.url().endsWith(`/api/v1/staff/ops/offers/${offerId}/publication`)
+      );
+      const forbiddenResponse = opsPage.waitForResponse(
+        (response) =>
+          response.request().method() === "POST" &&
+          response.url().endsWith(`/api/v1/staff/ops/offers/${offerId}/publication`)
+      );
+      await englishPublication.getByRole("button", { name: "Prepare publication" }).click();
+      await englishPublication.getByRole("button", { name: "Confirm Operations command" }).click();
+      forbiddenCommandId = ((await forbiddenRequest).postDataJSON() as { commandId: string })
+        .commandId;
+      const response = await forbiddenResponse;
+      expect(response.status()).toBe(403);
+      expect((await response.json()) as { error: string }).toMatchObject({
+        error: "MAKER_CHECKER_VIOLATION",
+      });
+      await expect
+        .poll(() =>
+          opsPage.evaluate(() => sessionStorage.getItem("waffarhacars_publication_pending_v1"))
+        )
+        .toBeNull();
+      expect(await prisma.offerPublication.count({ where: { offerId } })).toBe(0);
+      expect(
+        await prisma.offerPublicationCommand.count({ where: { commandId: forbiddenCommandId } })
+      ).toBe(0);
+      expect(
+        await prisma.securityAuditEvent.count({
+          where: {
+            targetEntity: `offer:${offerId}`,
+            eventType: {
+              in: ["OFFER_PUBLISHED", "OFFER_PUBLICATION_REPLACED", "OFFER_UNPUBLISHED"],
+            },
+          },
+        })
+      ).toBe(0);
+      expect((await anonymousContext.request.get(`/api/v1/offers/${offerId}`)).status()).toBe(404);
+    } finally {
+      await prisma.offerRevision.update({
+        where: { id: draft.id },
+        data: { createdByUserId: sales.userId },
+      });
+    }
+    await expect(
+      englishPublication.getByRole("button", { name: "Prepare publication" })
+    ).toBeVisible();
     let publishCommittedButResponseLost = false;
     await opsPage.route(`**/api/v1/staff/ops/offers/${offerId}/publication`, async (route) => {
       if (route.request().method() !== "POST") return route.continue();

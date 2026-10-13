@@ -97,6 +97,7 @@ export default function StaffOfferDetailPage() {
   const [reload, setReload] = useState(0);
   const [publication, setPublication] = useState<StaffPublicationDto | null>(null);
   const [publicationLoading, setPublicationLoading] = useState(false);
+  const [publicationLoadError, setPublicationLoadError] = useState(false);
   const [publicationPending, setPublicationPending] = useState(false);
   const [publicationUnknown, setPublicationUnknown] = useState(
     () => readPendingPublicationOperation()?.offerId === offerId
@@ -133,6 +134,7 @@ export default function StaffOfferDetailPage() {
     queueMicrotask(() => {
       if (counter.current !== current) return;
       setPublication(null);
+      setPublicationLoadError(false);
       setPublicationError(null);
       setPublicationMessage(null);
       setPublicationConfirm(null);
@@ -232,6 +234,7 @@ export default function StaffOfferDetailPage() {
       .then((response) => {
         if (!active || controller.signal.aborted) return;
         if (response.ok) {
+          setPublicationLoadError(false);
           setPublication((previous) =>
             previous && previous.offerId === offerId && previous.version > response.data.version
               ? previous
@@ -239,11 +242,16 @@ export default function StaffOfferDetailPage() {
           );
           setPublicationError(null);
         } else if (response.status === 401) router.replace("/staff/login");
-        else setPublicationError(offerFailureMessage(response, t));
+        else {
+          setPublicationLoadError(true);
+          setPublicationError(offerFailureMessage(response, t));
+        }
       })
       .catch(() => {
-        if (active && !controller.signal.aborted)
+        if (active && !controller.signal.aborted) {
+          setPublicationLoadError(true);
           setPublicationError(t("staffOffers.genericError"));
+        }
       })
       .finally(() => {
         if (active && !controller.signal.aborted) setPublicationLoading(false);
@@ -290,7 +298,7 @@ export default function StaffOfferDetailPage() {
     publicationUnknown ||
     publicationLoading ||
     !publication ||
-    Boolean(publicationError) ||
+    publicationLoadError ||
     Boolean(publicationJournal) ||
     Boolean(readPendingOfferOperation());
 
@@ -391,10 +399,13 @@ export default function StaffOfferDetailPage() {
       setPublicationError(t("staffOffers.storageUnavailable"));
       return;
     }
-    await postPublication(operation);
+    await postPublication(operation, false);
   };
 
-  const postPublication = async (operation: PendingPublicationOperation) => {
+  const postPublication = async (
+    operation: PendingPublicationOperation,
+    isRecoveryRetry: boolean
+  ) => {
     const currentGeneration = publicationGeneration.current;
     const ownsCurrent = () =>
       ownsPendingPublicationCallback(
@@ -421,9 +432,6 @@ export default function StaffOfferDetailPage() {
       );
       if (!ownsCurrent()) return;
       if (!response.ok) {
-        if (response.status === 401) {
-          return router.replace("/staff/login");
-        }
         if (mutationOutcomeUnknown(response.status)) {
           setPublicationUnknown(true);
           setPublicationRetryAvailable(false);
@@ -434,6 +442,19 @@ export default function StaffOfferDetailPage() {
           await reconcilePublication(operation);
           return;
         }
+        // A definitive first-delivery validation/auth/maker-checker refusal has no
+        // prior request that could still commit. A retry after an unknown outcome
+        // must never clear the original journal on the same refusal.
+        if (!isRecoveryRetry && [400, 401, 403, 404].includes(response.status)) {
+          clearPendingPublicationOperation(operation.commandId);
+          setPublicationUnknown(false);
+          setPublicationRetryAvailable(false);
+          setPublicationConfirm(null);
+          if (response.status === 401) return router.replace("/staff/login");
+          setPublicationError(offerFailureMessage(response, t));
+          return;
+        }
+        if (response.status === 401) return router.replace("/staff/login");
         setPublicationUnknown(true);
         setPublicationRetryAvailable(false);
         setPublicationError(offerFailureMessage(response, t));
@@ -476,7 +497,7 @@ export default function StaffOfferDetailPage() {
     // Keep the original command ID, actor-bound resource, target and expected version.
     // A still-running original request is serialized and replayed by the server.
     setPublicationRetryAvailable(false);
-    await postPublication(operation);
+    await postPublication(operation, true);
   };
 
   const markUnknown = (operation: PendingOfferOperation) => {
