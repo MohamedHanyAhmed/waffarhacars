@@ -465,15 +465,24 @@ test("real UI and PostgreSQL: bilingual mobile offers, approval, explicit public
     await expect(englishPublication.getByText("Withdrawn or never published")).toBeVisible();
     await expect(englishPublication.getByText("No", { exact: true })).toBeVisible();
     console.info("[Offer E2E] Definitive first-delivery maker-checker 403 leaves no pending trap");
-    // The already-rendered detail still shows a Sales-authored revision. Change the
-    // test-owned database row immediately before delivery to exercise the server's
-    // authoritative maker-checker boundary, not a client-side disabled button.
-    await prisma.offerRevision.update({
-      where: { id: draft.id },
-      data: { createdByUserId: ops.userId },
+    // A separate synthetic approved revision exercises the authoritative publication
+    // boundary without mutating the terminal Sales-authored approval (DB-immutable).
+    const makerRevision = await prisma.offerRevision.create({
+      data: {
+        ...approved,
+        id: crypto.randomUUID(),
+        requestId: crypto.randomUUID(),
+        revisionNumber: approved.revisionNumber + 1,
+        createdByUserId: ops.userId,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
     });
     let forbiddenCommandId: string | undefined;
     try {
+      await opsPage.reload();
+      await opsPage.locator("#offer-revision").selectOption(makerRevision.id);
+      await expect(opsPage.locator("#offer-revision")).toHaveValue(makerRevision.id);
       const forbiddenRequest = opsPage.waitForRequest(
         (request) =>
           request.method() === "POST" &&
@@ -514,11 +523,10 @@ test("real UI and PostgreSQL: bilingual mobile offers, approval, explicit public
       ).toBe(0);
       expect((await anonymousContext.request.get(`/api/v1/offers/${offerId}`)).status()).toBe(404);
     } finally {
-      await prisma.offerRevision.update({
-        where: { id: draft.id },
-        data: { createdByUserId: sales.userId },
-      });
+      await prisma.offerRevision.delete({ where: { id: makerRevision.id } });
+      await opsPage.reload();
     }
+    await expect(opsPage.locator("#offer-revision")).toHaveValue(draft.id);
     await expect(
       englishPublication.getByRole("button", { name: "Prepare publication" })
     ).toBeVisible();
