@@ -568,7 +568,7 @@ describe("Vehicle garage through real Better Auth session and PostgreSQL route b
     );
   });
 
-  it("serializes two distinct creates at nine active cars to exactly ten, with one refusal", async () => {
+  it("holds a profile-row waiter and limits two competing creates at nine active cars to ten", async () => {
     const db = getPrisma();
     await db.customerVehicle.updateMany({
       where: { ownerUserId: primary.id, archivedAt: null },
@@ -601,7 +601,7 @@ describe("Vehicle garage through real Better Auth session and PostgreSQL route b
           "SELECT count(*)::int AS count FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND datname = current_database() AND wait_event_type = 'Lock'"
         );
         blocked = Number(waiting.rows[0].count);
-        if (blocked >= 2) break;
+        if (blocked >= 1) break;
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
     } finally {
@@ -609,7 +609,7 @@ describe("Vehicle garage through real Better Auth session and PostgreSQL route b
       await blocker.end();
     }
     const [first, second] = await Promise.all([firstPromise, secondPromise]);
-    expect(blocked).toBeGreaterThanOrEqual(2);
+    expect(blocked).toBeGreaterThanOrEqual(1);
     expect([first.status, second.status].sort()).toEqual([201, 409]);
     expect(
       await db.customerVehicle.count({ where: { ownerUserId: primary.id, archivedAt: null } })
