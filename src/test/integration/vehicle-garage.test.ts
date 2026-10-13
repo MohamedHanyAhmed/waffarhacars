@@ -1476,8 +1476,10 @@ describe("Vehicle garage through real Better Auth session and PostgreSQL route b
         { params: Promise.resolve({ id: catalog.makeId }) }
       );
     const [first, second] = await orderedRace(
-      "SELECT id FROM vehicle_makes WHERE id = $1 FOR UPDATE",
-      [catalog.makeId],
+      // The create acquires make before it waits on model. The deactivation
+      // then waits on the create-held make, forming an observable blocker chain.
+      "SELECT id FROM vehicle_models WHERE id = $1 FOR UPDATE",
+      [catalog.modelId],
       () => postGarage(owner.cookie, createId, catalog),
       deactivate
     );
