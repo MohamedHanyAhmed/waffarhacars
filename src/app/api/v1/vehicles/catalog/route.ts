@@ -32,7 +32,7 @@ export async function GET(req: NextRequest): Promise<Response> {
       )
         throw new VehicleError(404, "NOT_FOUND");
       const rows = await db.vehicleModel.findMany({
-        where: { makeId, isActive: true },
+        where: { makeId, isActive: true, make: { isActive: true } },
         select: { id: true, makeId: true, code: true, nameEn: true, nameAr: true },
         orderBy: [{ code: "asc" }, { id: "asc" }],
         take: limit + 1,

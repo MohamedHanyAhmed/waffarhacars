@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { NextRequest } from "next/server";
 import type { Prisma } from "@/generated/prisma/client";
 import { getPrisma } from "@/lib/db";
+import { getServerEnv } from "@/lib/env";
 import { assertAuthenticated, assertStaffPermission, AuthorizationError } from "@/lib/dal";
 import { logAuditEvent } from "@/lib/dal/audit";
 import { normalizeEgyptianPhone } from "@/lib/phone";
@@ -132,6 +133,7 @@ export async function withVehicleApi(
   handler: (actor: { userId: string; profileId?: string } | null) => Promise<Response>
 ): Promise<Response> {
   try {
+    if (getServerEnv().APP_DATA_BACKEND !== "postgres") throw unavailable();
     if (req.method !== "GET" && !validateRequestOrigin(req).valid)
       throw new VehicleError(403, "ORIGIN_DENIED");
     const actor =
