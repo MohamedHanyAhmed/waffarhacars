@@ -115,4 +115,3 @@ $$;
 CREATE TRIGGER immutable_vehicle_make BEFORE UPDATE ON "vehicle_makes" FOR EACH ROW EXECUTE FUNCTION prevent_vehicle_identity_change();
 CREATE TRIGGER immutable_vehicle_model BEFORE UPDATE ON "vehicle_models" FOR EACH ROW EXECUTE FUNCTION prevent_vehicle_identity_change();
 CREATE TRIGGER immutable_customer_vehicle_owner BEFORE UPDATE ON "customer_vehicles" FOR EACH ROW EXECUTE FUNCTION prevent_vehicle_identity_change();
-
