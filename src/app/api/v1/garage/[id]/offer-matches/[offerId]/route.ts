@@ -6,10 +6,10 @@ export const revalidate = 0;
 const headers = { "Cache-Control": "no-store, max-age=0" };
 export async function GET(
   req: NextRequest,
-  context: { params: Promise<{ vehicleId: string; offerId: string }> }
+  context: { params: Promise<{ id: string; offerId: string }> }
 ) {
   return withVehicleApi(req, "customer", async (actor) => {
-    const { vehicleId, offerId } = await context.params;
+    const { id: vehicleId, offerId } = await context.params;
     if (!uuid.safeParse(vehicleId).success || !uuid.safeParse(offerId).success)
       return Response.json({ error: "VALIDATION_ERROR" }, { status: 400, headers });
     const match = await ownerOfferMatch(actor!.userId, vehicleId, offerId);

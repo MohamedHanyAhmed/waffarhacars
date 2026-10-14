@@ -14,7 +14,7 @@ import { POST as createPolicyRoute } from "@/app/api/v1/staff/branches/[branchId
 import { POST as submitPolicyRoute } from "@/app/api/v1/staff/branches/[branchId]/fitment-policies/[policyId]/submit/route";
 import { POST as approvePolicyRoute } from "@/app/api/v1/staff/branches/[branchId]/fitment-policies/[policyId]/approve/route";
 import { POST as withdrawPolicyRoute } from "@/app/api/v1/staff/branches/[branchId]/fitment-policies/[policyId]/withdraw/route";
-import { GET as matchOfferRoute } from "@/app/api/v1/garage/[vehicleId]/offer-matches/[offerId]/route";
+import { GET as matchOfferRoute } from "@/app/api/v1/garage/[id]/offer-matches/[offerId]/route";
 import { GET as publicCoverageRoute } from "@/app/api/v1/offers/[offerId]/fitment/route";
 import { GET as publicOfferRoute } from "@/app/api/v1/offers/[offerId]/route";
 import { POST as publicationRoute } from "@/app/api/v1/staff/ops/offers/[offerId]/publication/route";
@@ -404,7 +404,7 @@ async function publish(f: Fixture) {
 async function match(f: Fixture, vehicleId = f.vehicleId, session = f.customer.session) {
   const response = await matchOfferRoute(
     request(`/api/v1/garage/${vehicleId}/offer-matches/${f.offerId}`, "GET", session),
-    { params: Promise.resolve({ vehicleId, offerId: f.offerId }) }
+    { params: Promise.resolve({ id: vehicleId, offerId: f.offerId }) }
   );
   return { response, data: await response.json() };
 }
