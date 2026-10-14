@@ -61,7 +61,7 @@ type PublicOfferRow = {
   customerPriceMinor: bigint;
 };
 
-function discoveryEnabled() {
+export function discoveryEnabled() {
   const env = getServerEnv();
   return (
     env.APP_DATA_BACKEND === "postgres" &&
@@ -131,7 +131,7 @@ function mapPublicOffer(row: PublicOfferRow) {
   };
 }
 
-function eligibleRowsQuery(args: {
+export function eligibleRowsQuery(args: {
   offerId?: string;
   category?: string;
   cluster?: string;
@@ -177,6 +177,20 @@ function eligibleRowsQuery(args: {
       AND sd.code = r."serviceCode" AND c.code = r."categoryCode"
       AND r."evidenceInspected" = true AND r."priceVerified" = true
       AND r."scopeVerified" = true AND r."providerConsentVerified" = true
+      AND r."fitmentMode" IS NOT NULL AND r."fitmentEvidenceRef" IS NOT NULL
+      AND r."fitmentAllVariantsAttested" = true AND r."fitmentScopePriceAttested" = true
+      AND EXISTS (
+        SELECT 1 FROM branch_capability_current bc
+        JOIN branch_capability_versions cv ON cv.id = bc."activeVersionId"
+        JOIN offer_fitment_coverage ofc ON ofc."revisionId" = r.id
+        JOIN branch_capability_coverage bcc ON bcc."versionId" = cv.id AND bcc."modelId" = ofc."modelId"
+          AND bcc."yearFrom" <= ofc."yearTo" AND ofc."yearFrom" <= bcc."yearTo"
+        JOIN vehicle_makes vm ON vm.id = ofc."makeId" AND vm."isActive" = true
+        JOIN vehicle_models vmo ON vmo.id = ofc."modelId" AND vmo."isActive" = true
+        WHERE bc."branchId" = b.id AND bc."categoryId" = c.id
+          AND cv.status = 'ACTIVE'::"BranchCapabilityStatus" AND cv.attested = true
+          AND cv."evidenceRef" IS NOT NULL
+      )
       AND r."validFrom" <= ${databaseNow} AND ${databaseNow} < r."validUntil"
       ${args.offerId ? Prisma.sql`AND o.id = ${args.offerId}::uuid` : Prisma.empty}
       ${args.category ? Prisma.sql`AND c.code = ${args.category}` : Prisma.empty}

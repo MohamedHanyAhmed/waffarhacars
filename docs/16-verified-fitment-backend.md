@@ -1,0 +1,26 @@
+# Verified bounded fitment backend (PR 4B-B)
+
+## Scope and release limitation
+
+This backend records reviewed, bounded base-vehicle coverage for each immutable offer revision. It does not decode a VIN, assess engines or trims, verify real supplier catalogues, reserve a service, or promise a price for an unlisted variant. Both supported modes require provider-backed evidence that every variant in each listed make/model/year range has the same exact fixed scope, parts, and price. Evidence is an opaque internal reference; a real company-controlled repository and Operations review remain release prerequisites. Synthetic test fixtures are not provider evidence.
+
+Publication remains default-off. Legacy approved revisions retain unassessed fitment and are hidden by public discovery; no universal fitment is backfilled. Existing published legacy rows can be unpublished by Operations. A successor revision copies coverage into an unapproved draft, resets fitment attestations, and needs submission, distinct Operations approval, and explicit publication replacement.
+
+## Lifecycle and HTTP boundaries
+
+- Sales enters draft offer coverage with `PUT /api/v1/staff/offers/{offerId}/revisions/{revisionId}/fitment`. Body: `commandId`, `expectedVersion`, `mode`, `evidenceRef`, and 1–50 `{makeId,modelId,yearFrom,yearTo}` rows. GET at the same path returns draft/review data to authorized staff; Sales may read only its own revision. `GET .../fitment/commands/{commandId}` resolves an actor-bound committed receipt after an unknown response. A changed payload under the same key is a conflict.
+- Submission freezes offer and coverage content. A distinct Operations checker must explicitly attest all-variant fitment and fixed scope/price at commercial revision approval. Approval does not publish.
+- Sales creates, optionally edits, and submits a category-scoped branch capability version under `/api/v1/staff/branches/{branchId}/fitment-policies`. A distinct Operations checker approves/rejects it. Approval atomically switches the branch/category current pointer; a former active version becomes withdrawn. Operations can withdraw the active version without fallthrough. The command receipt route is `/api/v1/staff/branches/{branchId}/fitment-policies/commands/{commandId}`.
+- `GET /api/v1/offers/{offerId}/fitment` exposes only currently effective public make/model labels and inclusive intersected years. `GET /api/v1/garage/{vehicleId}/offer-matches/{offerId}` requires a live verified customer session and owner-scoped stored vehicle. Hidden offer and foreign/missing/archived vehicle are indistinguishable 404. A visible offer returns `MATCH`, `NO_MATCH`, or `UNKNOWN`, the pinned revision, vehicle version, and active capability identity. No `canBook` is emitted.
+
+All mutation endpoints require an allowed Origin/Referer, bounded JSON, role permission and server-side session resolution. Evidence references and staff identity are never in public DTOs. Public/private responses are no-store. The two public reads use one SQL statement each for visibility, pin, active capability, catalog state, and coverage; an already-rendered browser page cannot be recalled after a withdrawal.
+
+## Invariants and operations
+
+The offer revision pin fixes offer-side coverage. Current branch capability can only narrow it. Draft coverage rows are limited and non-overlapping per model, and the database rejects child INSERT/UPDATE/DELETE after submission even through direct SQL. Capability rows similarly freeze after submission. Reviewed versions are immutable and terminal; corrections require a new version. The PostgreSQL migration is additive and does not rewrite historical offers, users, garage vehicles, publications, or receipts.
+
+Provider or branch pause, service/category or vehicle-catalog deactivation, expiry, and capability withdrawal affect the next public read without mutating approved evidence. Operations should withdraw a bad capability immediately and unpublish an affected offer when appropriate; correction is a new Sales draft plus distinct review, followed by explicit replacement. For a lost mutation response, query the same actor's receipt with the original command ID, then retry the exact same intent if no receipt exists. Do not invent a new command after an ambiguous timeout. Transaction failure leaves no partial domain/receipt/audit writes; application errors are sanitized. PostgreSQL server logs require separately restricted operational access and retention.
+
+Lock order: offer mutations acquire provider, branch, offer, revision, then canonical make/model (sorted), service, category and publication. Capability mutations acquire provider and branch, then canonical make/model for draft writes, category, version and pointer. Garage mutations retain profile, make, model, vehicle order. No provider network call or worker runs within these transactions.
+
+This slice deliberately has no fitment UI, booking/pass/payment, provider data import, engine/trim qualifier, or launch-gate enablement. A future reservation must revalidate the exact current fitment and capability and snapshot pinned terms atomically; this backend does not imply that reservation is currently safe to take.

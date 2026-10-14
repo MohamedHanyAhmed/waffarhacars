@@ -7,6 +7,7 @@ import type { AuthorizedStaffContext } from "@/lib/dal";
 import { createAuditFingerprint, logAuditEvent } from "@/lib/dal/audit";
 import type { OfferDraftFields } from "./validation";
 import { deriveOfferPricing } from "@/domain/offerPricing";
+import { FitmentError, validateCoverage } from "@/lib/fitment/shared";
 
 export class OfferError extends Error {
   constructor(
@@ -55,6 +56,24 @@ function withDerivedPricing<T extends { normalPriceMinor: bigint; customerPriceM
     ...value,
     ...deriveOfferPricing(value.normalPriceMinor, value.customerPriceMinor),
   });
+}
+
+async function assertRevisionCoverage(tx: Prisma.TransactionClient, revisionId: string) {
+  const fitmentRows = await tx.offerFitmentCoverage.findMany({
+    where: { revisionId },
+    select: { makeId: true, modelId: true, yearFrom: true, yearTo: true },
+  });
+  try {
+    await validateCoverage(tx, fitmentRows);
+  } catch (error) {
+    if (error instanceof FitmentError)
+      throw new OfferError(
+        422,
+        "INVALID_FITMENT_COVERAGE",
+        "Verified fitment coverage is invalid or inactive."
+      );
+    throw error;
+  }
 }
 
 async function lockActiveProviderAndBranch(
@@ -635,7 +654,13 @@ export async function createOfferRevision(
       await tx.$queryRaw`SELECT id FROM offers WHERE id = ${offerId}::uuid FOR UPDATE`;
       const offer = await tx.offer.findUniqueOrThrow({
         where: { id: offerId },
-        include: { revisions: { orderBy: { revisionNumber: "desc" }, take: 1 } },
+        include: {
+          revisions: {
+            orderBy: { revisionNumber: "desc" },
+            take: 1,
+            include: { fitmentCoverage: true },
+          },
+        },
       });
       const latest = offer.revisions[0];
       if (!latest)
@@ -679,6 +704,16 @@ export async function createOfferRevision(
           commercialTermsAgreedAt: latest.commercialTermsAgreedAt,
           commissionBasis: latest.commissionBasis,
           commissionRateBps: latest.commissionRateBps,
+          fitmentMode: latest.fitmentMode,
+          fitmentEvidenceRef: latest.fitmentEvidenceRef,
+          fitmentCoverage: {
+            create: latest.fitmentCoverage.map((row) => ({
+              makeId: row.makeId,
+              modelId: row.modelId,
+              yearFrom: row.yearFrom,
+              yearTo: row.yearTo,
+            })),
+          },
           createdByUserId: actor.userId,
         },
       });
@@ -748,6 +783,13 @@ export async function submitOfferRevision(
         "CONCURRENT_MODIFICATION",
         "Offer draft changed; refresh and retry."
       );
+    if (!revision.fitmentMode || !revision.fitmentEvidenceRef)
+      throw new OfferError(
+        422,
+        "FITMENT_UNASSESSED",
+        "Verified fitment is required before submission."
+      );
+    await assertRevisionCoverage(tx, revisionId);
     await getFixedServiceDefinition(tx, revision.serviceDefinitionId, true);
     if (revision.validUntil <= new Date())
       throw new OfferError(422, "OFFER_EXPIRED", "Offer validity must extend beyond submission.");
@@ -843,6 +885,8 @@ export async function approveOfferRevision(
     priceVerified: true;
     scopeVerified: true;
     providerConsentVerified: true;
+    fitmentAllVariantsAttested: true;
+    fitmentScopePriceAttested: true;
   },
   clientIp?: string
 ) {
@@ -882,6 +926,13 @@ export async function approveOfferRevision(
         "The offer creator or submitter cannot approve it."
       );
     }
+    if (!revision.fitmentMode || !revision.fitmentEvidenceRef)
+      throw new OfferError(
+        422,
+        "FITMENT_UNASSESSED",
+        "Verified fitment is required before approval."
+      );
+    await assertRevisionCoverage(tx, revisionId);
     await getFixedServiceDefinition(tx, revision.serviceDefinitionId, true);
     const approvalTime = new Date();
     if (revision.validUntil <= approvalTime)
@@ -903,6 +954,8 @@ export async function approveOfferRevision(
         priceVerified: true,
         scopeVerified: true,
         providerConsentVerified: true,
+        fitmentAllVariantsAttested: true,
+        fitmentScopePriceAttested: true,
         version: { increment: 1 },
       },
     });
@@ -932,6 +985,8 @@ export async function approveOfferRevision(
           priceVerified: true,
           scopeVerified: true,
           providerConsentVerified: true,
+          fitmentAllVariantsAttested: true,
+          fitmentScopePriceAttested: true,
         },
       },
       tx

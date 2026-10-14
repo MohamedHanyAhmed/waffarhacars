@@ -45,6 +45,15 @@ export const STAFF_PERMISSIONS = [
   "service_catalog:manage",
   "vehicle_catalog:manage",
 
+  // Reviewed branch/category vehicle capability (maker/checker)
+  "branch_fitment:read",
+  "branch_fitment:create",
+  "branch_fitment:edit",
+  "branch_fitment:submit",
+  "branch_fitment:approve",
+  "branch_fitment:reject",
+  "branch_fitment:withdraw",
+
   // Offer lifecycle (Maker)
   "offer_draft:read",
   "offer_draft:create",
@@ -79,6 +88,10 @@ export const ROLE_PERMISSIONS_CATALOG: Record<StaffRole, ReadonlySet<StaffPermis
     "branch:create",
     "branch:edit",
     "service_catalog:read",
+    "branch_fitment:read",
+    "branch_fitment:create",
+    "branch_fitment:edit",
+    "branch_fitment:submit",
     "offer_draft:read",
     "offer_draft:create",
     "offer_draft:edit",
@@ -99,6 +112,10 @@ export const ROLE_PERMISSIONS_CATALOG: Record<StaffRole, ReadonlySet<StaffPermis
     "service_catalog:read",
     "service_catalog:manage",
     "vehicle_catalog:manage",
+    "branch_fitment:read",
+    "branch_fitment:approve",
+    "branch_fitment:reject",
+    "branch_fitment:withdraw",
     "offer_draft:read",
     "offer_draft:review",
     "offer_draft:approve",

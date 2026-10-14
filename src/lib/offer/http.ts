@@ -3,6 +3,7 @@ import type { NextRequest } from "next/server";
 import { z } from "zod";
 import { assertStaffPermission, AuthorizationError } from "@/lib/dal";
 import { getClientIp } from "@/lib/rate-limit";
+import { validateRequestOrigin } from "@/lib/security/origin";
 import { OfferError } from "./service";
 
 const uuidParam = z.string().uuid();
@@ -21,6 +22,9 @@ export async function withOfferApi(
 ) {
   try {
     const actor = await assertStaffPermission(req.headers, permission);
+    if (req.method !== "GET" && !validateRequestOrigin(req).valid) {
+      throw new OfferError(403, "ORIGIN_DENIED", "Request origin is not allowed.");
+    }
     return await handler(actor);
   } catch (error) {
     if (error instanceof AuthorizationError || error instanceof OfferError)
@@ -42,8 +46,38 @@ export async function parseJson<T>(
       | { success: false; error: { issues: Array<{ path: PropertyKey[]; message: string }> } };
   }
 ) {
-  const body = await req.json().catch(() => null);
-  const parsed = schema.safeParse(body);
+  let value: unknown = null;
+  if (req.body) {
+    const reader = req.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    try {
+      while (true) {
+        const result = await reader.read();
+        if (result.done) break;
+        total += result.value.byteLength;
+        if (total > 16384) {
+          await reader.cancel().catch(() => {});
+          break;
+        }
+        chunks.push(result.value);
+      }
+      if (total <= 16384) {
+        const bytes = new Uint8Array(total);
+        let offset = 0;
+        for (const chunk of chunks) {
+          bytes.set(chunk, offset);
+          offset += chunk.byteLength;
+        }
+        value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+      }
+    } catch {
+      value = null;
+    } finally {
+      reader.releaseLock();
+    }
+  }
+  const parsed = schema.safeParse(value);
   if (!parsed.success) {
     return {
       data: null,

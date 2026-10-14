@@ -93,6 +93,7 @@ type AvailabilityRow = {
   priceVerified: boolean | null;
   scopeVerified: boolean | null;
   providerConsentVerified: boolean | null;
+  fitmentReady: boolean;
 };
 
 function publicationGateReasons(): string[] {
@@ -142,6 +143,7 @@ function availabilityReasons(row: AvailabilityRow): string[] {
     !row.providerConsentVerified
   )
     reasons.push("ATTESTATIONS_INCOMPLETE");
+  if (!row.fitmentReady) reasons.push("FITMENT_UNAVAILABLE");
   return reasons;
 }
 
@@ -157,7 +159,19 @@ async function readAvailability(offerId: string): Promise<PublicationState> {
       sd.id AS "serviceId", sd.code AS "serviceCode", r."serviceCode" AS "revisionServiceCode",
       c.code AS "categoryCode", r."categoryCode" AS "revisionCategoryCode",
       r."validFrom", r."validUntil", (statement_timestamp() AT TIME ZONE 'UTC') AS "databaseNow",
-      r."evidenceInspected", r."priceVerified", r."scopeVerified", r."providerConsentVerified"
+      r."evidenceInspected", r."priceVerified", r."scopeVerified", r."providerConsentVerified",
+      (r."fitmentMode" IS NOT NULL AND r."fitmentEvidenceRef" IS NOT NULL
+        AND r."fitmentAllVariantsAttested" = true AND r."fitmentScopePriceAttested" = true
+        AND EXISTS (SELECT 1 FROM branch_capability_current bc
+          JOIN branch_capability_versions cv ON cv.id = bc."activeVersionId"
+          JOIN offer_fitment_coverage ofc ON ofc."revisionId" = r.id
+          JOIN branch_capability_coverage bcc ON bcc."versionId" = cv.id AND bcc."modelId" = ofc."modelId"
+            AND bcc."yearFrom" <= ofc."yearTo" AND ofc."yearFrom" <= bcc."yearTo"
+          JOIN vehicle_makes vm ON vm.id = ofc."makeId" AND vm."isActive" = true
+          JOIN vehicle_models vmo ON vmo.id = ofc."modelId" AND vmo."isActive" = true
+          WHERE bc."branchId" = b.id AND bc."categoryId" = c.id
+            AND cv.status = 'ACTIVE'::"BranchCapabilityStatus" AND cv.attested = true
+            AND cv."evidenceRef" IS NOT NULL)) AS "fitmentReady"
     FROM offers o
     JOIN provider_organizations po ON po.id = o."providerOrganizationId"
     JOIN provider_branches b ON b.id = o."branchId" AND b."providerOrganizationId" = po.id
@@ -236,6 +250,10 @@ type LockedRevision = {
   priceVerified: boolean;
   scopeVerified: boolean;
   providerConsentVerified: boolean;
+  fitmentMode: string | null;
+  fitmentEvidenceRef: string | null;
+  fitmentAllVariantsAttested: boolean;
+  fitmentScopePriceAttested: boolean;
   createdByUserId: string;
   submittedByUserId: string | null;
 };
@@ -298,7 +316,8 @@ export async function executePublicationCommand(
         ? await tx.$queryRaw<LockedRevision[]>`
             SELECT id, "offerId", status, "serviceDefinitionId", "serviceCode", "categoryCode",
               "validFrom", "validUntil", "evidenceInspected", "priceVerified", "scopeVerified",
-              "providerConsentVerified", "createdByUserId", "submittedByUserId"
+              "providerConsentVerified", "createdByUserId", "submittedByUserId",
+              "fitmentMode", "fitmentEvidenceRef", "fitmentAllVariantsAttested", "fitmentScopePriceAttested"
             FROM offer_revisions WHERE id = ${revisionId}::uuid AND "offerId" = ${offerId}::uuid FOR UPDATE
           `
         : [];
@@ -379,6 +398,28 @@ export async function executePublicationCommand(
           !revision.providerConsentVerified
         )
           reject("ATTESTATIONS_INCOMPLETE", 422);
+        else if (
+          !revision.fitmentMode ||
+          !revision.fitmentEvidenceRef ||
+          !revision.fitmentAllVariantsAttested ||
+          !revision.fitmentScopePriceAttested
+        )
+          reject("FITMENT_UNASSESSED", 422);
+        else if (
+          !(
+            await tx.$queryRaw<Array<{ ready: boolean }>>`
+          SELECT EXISTS (SELECT 1 FROM branch_capability_current bc
+            JOIN branch_capability_versions cv ON cv.id = bc."activeVersionId"
+            JOIN offer_fitment_coverage ofc ON ofc."revisionId" = ${revision.id}::uuid
+            JOIN branch_capability_coverage bcc ON bcc."versionId" = cv.id AND bcc."modelId" = ofc."modelId"
+              AND bcc."yearFrom" <= ofc."yearTo" AND ofc."yearFrom" <= bcc."yearTo"
+            JOIN vehicle_makes vm ON vm.id = ofc."makeId" AND vm."isActive" = true
+            JOIN vehicle_models vmo ON vmo.id = ofc."modelId" AND vmo."isActive" = true
+            WHERE bc."branchId" = ${offer.branchId}::uuid AND bc."categoryId" = ${service!.categoryId}::uuid
+              AND cv.status = 'ACTIVE'::"BranchCapabilityStatus" AND cv.attested = true AND cv."evidenceRef" IS NOT NULL) AS ready`
+          )[0]?.ready
+        )
+          reject("FITMENT_UNAVAILABLE", 422);
         else {
           const [clock] = await tx.$queryRaw<Array<{ databaseNow: Date }>>`
             SELECT (statement_timestamp() AT TIME ZONE 'UTC') AS "databaseNow"

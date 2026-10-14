@@ -20,6 +20,10 @@ import {
 import { GET as getCommandHandler } from "@/app/api/v1/staff/ops/offers/[offerId]/publication/commands/[commandId]/route";
 import { GET as listPublicOffersHandler } from "@/app/api/v1/offers/route";
 import { GET as getPublicOfferHandler } from "@/app/api/v1/offers/[offerId]/route";
+import { PUT as setFitmentHandler } from "@/app/api/v1/staff/offers/[offerId]/revisions/[revisionId]/fitment/route";
+import { POST as createPolicyHandler } from "@/app/api/v1/staff/branches/[branchId]/fitment-policies/route";
+import { POST as submitPolicyHandler } from "@/app/api/v1/staff/branches/[branchId]/fitment-policies/[policyId]/submit/route";
+import { POST as approvePolicyHandler } from "@/app/api/v1/staff/branches/[branchId]/fitment-policies/[policyId]/approve/route";
 
 const TEST_DB_URL =
   process.env.DATABASE_URL ||
@@ -224,11 +228,75 @@ function offerInput(providerOrganizationId: string, branchId: string, serviceDef
   };
 }
 
+async function createReviewedSyntheticCoverage(
+  branchId: string,
+  categoryId: string,
+  salesCookie: string,
+  opsCookie: string
+) {
+  const db = getPrisma();
+  const suffix = crypto.randomUUID().replaceAll("-", "").slice(0, 12).toUpperCase();
+  const make = await db.vehicleMake.create({
+    data: {
+      code: `PUB_FIT_${suffix}`,
+      nameEn: "Synthetic publication make",
+      nameAr: "ماركة نشر اختبارية",
+      evidenceRef: "CI:PUBLICATION:MAKE",
+    },
+  });
+  const model = await db.vehicleModel.create({
+    data: {
+      makeId: make.id,
+      code: "ALL_VARIANTS_TEST",
+      nameEn: "Synthetic all-variant model",
+      nameAr: "طراز نشر اختباري",
+      evidenceRef: "CI:PUBLICATION:MODEL",
+    },
+  });
+  const coverage = [{ makeId: make.id, modelId: model.id, yearFrom: 2020, yearTo: 2024 }];
+  const base = `/api/v1/staff/branches/${branchId}/fitment-policies`;
+  const create = await createPolicyHandler(
+    request(base, "POST", salesCookie, {
+      commandId: crypto.randomUUID(),
+      categoryId,
+      evidenceRef: "CI:PUBLICATION:PROVIDER_CAPABILITY",
+      coverage,
+    }),
+    { params: Promise.resolve({ branchId }) }
+  );
+  expect(create.status).toBe(201);
+  const policyId = (await create.json()).command.policyId as string;
+  const submit = await submitPolicyHandler(
+    request(`${base}/${policyId}/submit`, "POST", salesCookie, {
+      commandId: crypto.randomUUID(),
+      expectedVersion: 1,
+    }),
+    { params: Promise.resolve({ branchId, policyId }) }
+  );
+  expect(submit.status).toBe(200);
+  const approve = await approvePolicyHandler(
+    request(`${base}/${policyId}/approve`, "POST", opsCookie, {
+      commandId: crypto.randomUUID(),
+      expectedVersion: 2,
+      attested: true,
+    }),
+    { params: Promise.resolve({ branchId, policyId }) }
+  );
+  expect(approve.status).toBe(200);
+  return coverage;
+}
+
 async function createApprovedFixture() {
   const sales = await createStaff("SALES_AGENT");
   const ops = await createStaff("OPS_SUPERVISOR");
   const { provider, branch } = await createProviderAndBranch(sales.userId, ops.userId);
   const { category, service } = await createService(ops.cookie);
+  const coverage = await createReviewedSyntheticCoverage(
+    branch.id,
+    category.id,
+    sales.cookie,
+    ops.cookie
+  );
   const payload = offerInput(provider.id, branch.id, service.id);
   const create = await createOfferHandler(
     request("/api/v1/staff/offers", "POST", sales.cookie, payload)
@@ -238,13 +306,29 @@ async function createApprovedFixture() {
   createdOfferIds.push(created.offer.id);
   const offerId = created.offer.id as string;
   const revisionId = created.revision.id as string;
+  const fitment = await setFitmentHandler(
+    request(
+      `/api/v1/staff/offers/${offerId}/revisions/${revisionId}/fitment`,
+      "PUT",
+      sales.cookie,
+      {
+        commandId: crypto.randomUUID(),
+        expectedVersion: 1,
+        mode: "BASE_VEHICLE_ALL_VARIANTS_VERIFIED",
+        evidenceRef: "CI:PUBLICATION:ALL_VARIANTS",
+        coverage,
+      }
+    ),
+    { params: Promise.resolve({ offerId, revisionId }) }
+  );
+  expect(fitment.status).toBe(200);
   const submit = await submitOfferHandler(
     request(
       `/api/v1/staff/offers/${offerId}/revisions/${revisionId}/submit`,
       "POST",
       sales.cookie,
       {
-        expectedVersion: 1,
+        expectedVersion: 2,
       }
     ),
     { params: Promise.resolve({ offerId, revisionId }) }
@@ -256,17 +340,30 @@ async function createApprovedFixture() {
       "POST",
       ops.cookie,
       {
-        expectedVersion: 2,
+        expectedVersion: 3,
         evidenceInspected: true,
         priceVerified: true,
         scopeVerified: true,
         providerConsentVerified: true,
+        fitmentAllVariantsAttested: true,
+        fitmentScopePriceAttested: true,
       }
     ),
     { params: Promise.resolve({ offerId, revisionId }) }
   );
   expect(approve.status).toBe(200);
-  return { sales, ops, provider, branch, category, service, offerId, revisionId, payload };
+  return {
+    sales,
+    ops,
+    provider,
+    branch,
+    category,
+    service,
+    offerId,
+    revisionId,
+    payload,
+    coverage,
+  };
 }
 
 async function createPendingSuccessor(
@@ -324,6 +421,8 @@ async function approveSuccessor(
         priceVerified: true,
         scopeVerified: true,
         providerConsentVerified: true,
+        fitmentAllVariantsAttested: true,
+        fitmentScopePriceAttested: true,
       }
     ),
     { params: Promise.resolve({ offerId: fixture.offerId, revisionId }) }
@@ -450,64 +549,13 @@ describe("Published offer routes with real PostgreSQL and resolved staff session
   });
 
   afterEach(async () => {
-    try {
-      if (!databaseAvailable) return;
-      const prisma = getPrisma();
-      const offers = await prisma.offer.findMany({
-        where: {
-          OR: [
-            { id: { in: createdOfferIds } },
-            { providerOrganizationId: { in: createdProviderIds } },
-          ],
-        },
-        select: { id: true },
-      });
-      const offerIds = offers.map((offer) => offer.id);
-      if (offerIds.length) {
-        await prisma.offerPublicationCommand.deleteMany({ where: { offerId: { in: offerIds } } });
-        await prisma.offerPublication.deleteMany({ where: { offerId: { in: offerIds } } });
-        await prisma.offer.updateMany({
-          where: { id: { in: offerIds } },
-          data: { currentApprovedRevisionId: null },
-        });
-        await prisma.offerRevision.deleteMany({ where: { offerId: { in: offerIds } } });
-        await prisma.offer.deleteMany({ where: { id: { in: offerIds } } });
-      }
-      if (createdServiceDefinitionIds.length) {
-        await prisma.serviceDefinition.deleteMany({
-          where: { id: { in: createdServiceDefinitionIds } },
-        });
-      }
-      if (createdProviderIds.length) {
-        await prisma.providerBranch.deleteMany({
-          where: { providerOrganizationId: { in: createdProviderIds } },
-        });
-        await prisma.providerOrganization.deleteMany({ where: { id: { in: createdProviderIds } } });
-      }
-      if (createdEmails.length) {
-        const users = await prisma.user.findMany({
-          where: { email: { in: createdEmails } },
-          select: { id: true },
-        });
-        const ids = users.map((user) => user.id);
-        if (ids.length) {
-          await prisma.securityAuditEvent.deleteMany({ where: { actorUserId: { in: ids } } });
-          await prisma.internalRoleAssignment.deleteMany({
-            where: { staffMembership: { userId: { in: ids } } },
-          });
-          await prisma.internalStaffMembership.deleteMany({ where: { userId: { in: ids } } });
-          await prisma.twoFactor.deleteMany({ where: { userId: { in: ids } } });
-          await prisma.session.deleteMany({ where: { userId: { in: ids } } });
-          await prisma.account.deleteMany({ where: { userId: { in: ids } } });
-          await prisma.user.deleteMany({ where: { id: { in: ids } } });
-        }
-      }
-    } finally {
-      createdEmails.length = 0;
-      createdProviderIds.length = 0;
-      createdServiceDefinitionIds.length = 0;
-      createdOfferIds.length = 0;
-    }
+    // Reviewed fitment and capability rows cannot be deleted without defeating
+    // production DB invariants. Fixtures are unique and this suite runs only
+    // against a disposable integration DB destroyed after the test job.
+    createdEmails.length = 0;
+    createdProviderIds.length = 0;
+    createdServiceDefinitionIds.length = 0;
+    createdOfferIds.length = 0;
   });
 
   afterAll(async () => {
@@ -1407,6 +1455,8 @@ describe("Published offer routes with real PostgreSQL and resolved staff session
           priceVerified: true,
           scopeVerified: true,
           providerConsentVerified: true,
+          fitmentAllVariantsAttested: true,
+          fitmentScopePriceAttested: true,
         }
       ),
       { params: Promise.resolve({ offerId: fixture.offerId, revisionId: successorId }) }
