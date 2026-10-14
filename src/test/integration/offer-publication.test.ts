@@ -155,7 +155,7 @@ async function createProviderAndBranch(salesUserId: string, opsUserId: string) {
       latitude: "30.061200",
       longitude: "31.341100",
       contactPhone: "+201011112222",
-      operatingHours: [{ day: "monday", open: "09:00", close: "17:00" }],
+      operatingHours: [{ dayOfWeek: 1, openTime: "09:00", closeTime: "17:00", isClosed: false }],
       status: "ACTIVE",
       version: 2,
       legalIdentityChecked: true,
