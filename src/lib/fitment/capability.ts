@@ -91,7 +91,7 @@ async function transaction<T>(run: (tx: Prisma.TransactionClient) => Promise<T>)
 }
 
 async function lockCommand(tx: Prisma.TransactionClient, id: string) {
-  await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext('BRANCH_CAPABILITY'), hashtext(${id}))`;
+  await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext('BRANCH_CAPABILITY'), hashtext(${id})) IS NULL AS locked`;
 }
 
 async function lockBranch(tx: Prisma.TransactionClient, branchId: string) {

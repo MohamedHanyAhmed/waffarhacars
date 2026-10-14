@@ -108,7 +108,7 @@ export async function updateOfferFitment(
       async (tx) => {
         await tx.$queryRaw`SELECT set_config('lock_timeout', '3000ms', true)`;
         await tx.$queryRaw`SELECT set_config('statement_timeout', '7000ms', true)`;
-        await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext('FITMENT'), hashtext(${input.commandId}))`;
+        await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext('FITMENT'), hashtext(${input.commandId})) IS NULL AS locked`;
         const offer = await tx.offer.findUnique({
           where: { id: offerId },
           select: { id: true, providerOrganizationId: true, branchId: true },
