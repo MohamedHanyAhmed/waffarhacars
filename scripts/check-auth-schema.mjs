@@ -27,6 +27,7 @@ export function checkAuthSchema(options = {}) {
   // Create an isolated temporary directory
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth-schema-check-"));
   const tempSchemaPath = path.join(tempDir, "schema.prisma");
+  const tempCommittedPath = path.join(tempDir, "committed.prisma");
 
   let exitCode = 0;
   let executionError = null;
@@ -34,6 +35,7 @@ export function checkAuthSchema(options = {}) {
   try {
     // Seed temporary schema with committed content so CLI respects existing generator settings
     fs.writeFileSync(tempSchemaPath, committedContent, "utf-8");
+    fs.writeFileSync(tempCommittedPath, committedContent, "utf-8");
 
     if (options.verbose !== false) {
       console.log(
@@ -64,10 +66,22 @@ export function checkAuthSchema(options = {}) {
       }
     );
 
+    // Better Auth rewrites Prisma whitespace/alignment when any model gains fields.
+    // Canonicalize both *temporary* copies with the pinned Prisma formatter, so the
+    // drift gate still compares all schema declarations without unrelated formatting noise.
+    const prismaCli = path.resolve(repoRoot, "node_modules/prisma/build/index.js");
+    for (const candidate of [tempSchemaPath, tempCommittedPath]) {
+      execFileSync(process.execPath, [prismaCli, "format", "--schema", candidate], {
+        cwd: repoRoot,
+        stdio: options.stdio || (options.verbose === false ? "ignore" : "inherit"),
+        env: { ...process.env, ...(options.env || {}) },
+      });
+    }
     const generatedContent = fs.readFileSync(tempSchemaPath, "utf-8");
+    const canonicalCommitted = fs.readFileSync(tempCommittedPath, "utf-8");
     const normalize = (s) => s.replace(/\r\n/g, "\n").trim();
 
-    if (normalize(committedContent) !== normalize(generatedContent)) {
+    if (normalize(canonicalCommitted) !== normalize(generatedContent)) {
       if (options.verbose !== false) {
         console.error("[auth:schema:check] ERROR: Schema drift detected in prisma/schema.prisma!");
         console.error("The committed Prisma schema does not match the output of auth generate.");

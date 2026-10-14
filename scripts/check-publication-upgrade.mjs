@@ -16,15 +16,16 @@ const migrationDirs = (await readdir(migrationsRoot, { withFileTypes: true }))
   .filter((entry) => entry.isDirectory())
   .map((entry) => entry.name)
   .sort();
-if (migrationDirs.at(-1) !== publicationMigration) {
-  throw new Error(
-    "Publication migration must be the final migration for this focused upgrade check."
-  );
+const publicationIndex = migrationDirs.indexOf(publicationMigration);
+if (publicationIndex < 0) {
+  throw new Error("Publication migration is missing from this focused upgrade check.");
 }
 
 const client = new pg.Client({ connectionString: url, connectionTimeoutMillis: 5000 });
 const schema = `publication_upgrade_${crypto.randomUUID().replaceAll("-", "")}`;
 const userId = crypto.randomUUID();
+const profileId = crypto.randomUUID();
+const sessionId = crypto.randomUUID();
 const providerId = crypto.randomUUID();
 const branchId = crypto.randomUUID();
 const serviceId = crypto.randomUUID();
@@ -36,12 +37,20 @@ try {
   await client.query("BEGIN");
   await client.query(`CREATE SCHEMA "${schema}"`);
   await client.query(`SET LOCAL search_path TO "${schema}", public`);
-  for (const name of migrationDirs.slice(0, -1)) {
+  for (const name of migrationDirs.slice(0, publicationIndex)) {
     await client.query(await readFile(join(migrationsRoot, name, "migration.sql"), "utf8"));
   }
   await client.query(
     `INSERT INTO "user" (id, name, email, "updatedAt") VALUES ($1, 'Upgrade checker', 'upgrade-check@test.eg', CURRENT_TIMESTAMP)`,
     [userId]
+  );
+  await client.query(
+    `INSERT INTO customer_profile (id, "userId", "updatedAt") VALUES ($1, $2, CURRENT_TIMESTAMP)`,
+    [profileId, userId]
+  );
+  await client.query(
+    `INSERT INTO "session" (id, "userId", token, "expiresAt", "lastActivityAt", "updatedAt") VALUES ($1, $2, $3, CURRENT_TIMESTAMP + INTERVAL '1 day', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+    [sessionId, userId, `upgrade-${sessionId}`]
   );
   await client.query(
     `INSERT INTO provider_organizations
@@ -136,8 +145,34 @@ try {
       "Publication migration changed an existing approved offer or backfilled visibility."
     );
   }
+  // Later additive migrations must preserve the same approved offer and the explicit
+  // absence of publication backfill. This check remains anchored at publication.
+  for (const name of migrationDirs.slice(publicationIndex + 1)) {
+    await client.query(await readFile(join(migrationsRoot, name, "migration.sql"), "utf8"));
+  }
+  const afterLater = await client.query(
+    `SELECT o."currentApprovedRevisionId", r.status, r."customerPriceMinor"::text AS price
+       FROM offers o JOIN offer_revisions r ON r.id = o."currentApprovedRevisionId" WHERE o.id = $1`,
+    [offerId]
+  );
+  if (JSON.stringify(afterLater.rows) !== JSON.stringify(before.rows)) {
+    throw new Error("A later migration changed the existing approved offer.");
+  }
+  const identity = await client.query(
+    `SELECT u.id, p.id AS profile_id, s.id AS session_id FROM "user" u
+     JOIN customer_profile p ON p."userId" = u.id JOIN "session" s ON s."userId" = u.id
+     WHERE u.id = $1`,
+    [userId]
+  );
+  if (
+    identity.rowCount !== 1 ||
+    identity.rows[0].profile_id !== profileId ||
+    identity.rows[0].session_id !== sessionId
+  ) {
+    throw new Error("A later migration changed an existing user, customer profile, or session.");
+  }
   console.log(
-    "Publication upgrade check passed: approved offer preserved; no publication backfill."
+    "Publication and later upgrade check passed: approved offer preserved; no publication backfill."
   );
 } finally {
   await client.query("ROLLBACK").catch(() => {});

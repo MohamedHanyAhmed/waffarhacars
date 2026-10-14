@@ -43,6 +43,7 @@ export const STAFF_PERMISSIONS = [
   // Controlled service catalogue
   "service_catalog:read",
   "service_catalog:manage",
+  "vehicle_catalog:manage",
 
   // Offer lifecycle (Maker)
   "offer_draft:read",
@@ -97,6 +98,7 @@ export const ROLE_PERMISSIONS_CATALOG: Record<StaffRole, ReadonlySet<StaffPermis
     "branch:resume",
     "service_catalog:read",
     "service_catalog:manage",
+    "vehicle_catalog:manage",
     "offer_draft:read",
     "offer_draft:review",
     "offer_draft:approve",
