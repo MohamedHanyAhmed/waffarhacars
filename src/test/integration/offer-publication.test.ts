@@ -835,19 +835,26 @@ describe("Published offer routes with real PostgreSQL and resolved staff session
       (await command(second.offerId, second.ops.cookie, "PUBLISH", 0, second.revisionId)).response
         .status
     ).toBe(200);
-    const pageOne = await publicList("?limit=1");
-    expect(pageOne.response.status).toBe(200);
-    expect(pageOne.data.items).toHaveLength(1);
-    expect(typeof pageOne.data.nextCursor).toBe("string");
-    const pageTwo = await publicList(
-      `?limit=1&cursor=${encodeURIComponent(pageOne.data.nextCursor)}`
-    );
-    expect(pageTwo.response.status).toBe(200);
-    expect(pageTwo.data.items).toHaveLength(1);
-    expect(pageTwo.data.items[0].offerId).not.toBe(pageOne.data.items[0].offerId);
-    expect([pageOne.data.items[0].offerId, pageTwo.data.items[0].offerId].sort()).toEqual(
-      [first.offerId, second.offerId].sort()
-    );
+    // Earlier tests deliberately retain immutable published rows in this disposable DB.
+    // Traverse the entire cursor chain instead of assuming these are the only two offers.
+    const seen = new Set<string>();
+    let cursor: string | undefined;
+    for (let pageNumber = 0; pageNumber < 100; pageNumber += 1) {
+      const page = await publicList(
+        cursor ? `?limit=1&cursor=${encodeURIComponent(cursor)}` : "?limit=1"
+      );
+      expect(page.response.status).toBe(200);
+      expect(page.data.items.length).toBeLessThanOrEqual(1);
+      for (const item of page.data.items) {
+        expect(seen.has(item.offerId)).toBe(false);
+        seen.add(item.offerId);
+      }
+      cursor = page.data.nextCursor;
+      if (!cursor) break;
+      expect(pageNumber).toBeLessThan(99);
+    }
+    expect(seen.has(first.offerId)).toBe(true);
+    expect(seen.has(second.offerId)).toBe(true);
     for (const query of [
       "?limit=0",
       "?limit=21",

@@ -624,7 +624,7 @@ describe("Verified offer fitment through real sessions, routes, and PostgreSQL",
     ).toBe(1);
   });
 
-  it("enforces maker-checker against a dual-role Sales creator for both offer and capability approval", async () => {
+  it("denies dual-role Sales creators before either offer or capability approval and leaves both pending", async () => {
     const f = await fixture();
     const db = getPrisma();
     const policy = await createPolicy(f);
@@ -665,7 +665,7 @@ describe("Verified offer fitment through real sessions, routes, and PostgreSQL",
       policyContext(f, policy.policyId)
     );
     expect(selfPolicyApproval.status).toBe(403);
-    expect((await selfPolicyApproval.json()).error).toBe("MAKER_CHECKER_CONFLICT");
+    expect((await selfPolicyApproval.json()).error).toBe("FORBIDDEN");
     const selfOfferApproval = await approveOfferRoute(
       request(
         `/api/v1/staff/ops/offers/${f.offerId}/revisions/${f.revisionId}/approve`,
@@ -684,7 +684,7 @@ describe("Verified offer fitment through real sessions, routes, and PostgreSQL",
       offerContext(f)
     );
     expect(selfOfferApproval.status).toBe(403);
-    expect((await selfOfferApproval.json()).error).toBe("MAKER_CHECKER_VIOLATION");
+    expect((await selfOfferApproval.json()).error).toBe("FORBIDDEN");
     expect(
       (await db.branchCapabilityVersion.findUniqueOrThrow({ where: { id: policy.policyId } }))
         .status
@@ -708,7 +708,7 @@ describe("Verified offer fitment through real sessions, routes, and PostgreSQL",
     const own = await match(f);
     expect(own.response.status).toBe(200);
     expect(own.response.headers.get("cache-control")).toContain("no-store");
-    expect(own.data.data?.result ?? own.data.result).toBe("MATCH");
+    expect(own.data.data?.status ?? own.data.status).toBe("MATCH");
     expect(own.data.data?.revisionId ?? own.data.revisionId).toBe(f.revisionId);
     const coverage = await publicCoverageRoute(
       request(`/api/v1/offers/${f.offerId}/fitment`, "GET"),
@@ -768,11 +768,11 @@ describe("Verified offer fitment through real sessions, routes, and PostgreSQL",
     const outside = await addVehicle(f, f.modelId, 2019);
     const lowResult = await match(f, low.id);
     const highResult = await match(f, high.id);
-    expect(lowResult.data.data?.result ?? lowResult.data.result).toBe("MATCH");
-    expect(highResult.data.data?.result ?? highResult.data.result).toBe("MATCH");
+    expect(lowResult.data.data?.status ?? lowResult.data.status).toBe("MATCH");
+    expect(highResult.data.data?.status ?? highResult.data.status).toBe("MATCH");
     const missed = await match(f, outside.id);
     expect(missed.response.status).toBe(200);
-    expect(missed.data.data?.result ?? missed.data.result).toBe("NO_MATCH");
+    expect(missed.data.data?.status ?? missed.data.status).toBe("NO_MATCH");
   });
 
   it("returns NO_MATCH when reviewed branch capability excludes a base vehicle included by pinned offer evidence", async () => {
@@ -819,9 +819,9 @@ describe("Verified offer fitment through real sessions, routes, and PostgreSQL",
     const excludedVehicle = await addVehicle(f, f.otherModelId, 2022);
     const included = await match(f);
     const excluded = await match(f, excludedVehicle.id);
-    expect(included.data.data?.result ?? included.data.result).toBe("MATCH");
+    expect(included.data.data?.status ?? included.data.status).toBe("MATCH");
     expect(excluded.response.status).toBe(200);
-    expect(excluded.data.data?.result ?? excluded.data.result).toBe("NO_MATCH");
+    expect(excluded.data.data?.status ?? excluded.data.status).toBe("NO_MATCH");
     expect(await db.offerFitmentCoverage.count({ where: { revisionId: f.revisionId } })).toBe(2);
   });
 
@@ -870,7 +870,7 @@ describe("Verified offer fitment through real sessions, routes, and PostgreSQL",
     ).toBe(200);
     await publish(f);
     const before = await match(f);
-    expect(before.data.data?.result ?? before.data.result).toBe("MATCH");
+    expect(before.data.data?.status ?? before.data.status).toBe("MATCH");
     const model = await getPrisma().vehicleModel.findUniqueOrThrow({ where: { id: f.modelId } });
     const deactivate = await updateModelRoute(
       request(`/api/v1/staff/ops/vehicle-catalog/models/${f.modelId}`, "PATCH", f.ops.session, {
@@ -890,7 +890,7 @@ describe("Verified offer fitment through real sessions, routes, and PostgreSQL",
     expect(detail.status).toBe(200);
     const after = await match(f);
     expect(after.response.status).toBe(200);
-    expect(after.data.data?.result ?? after.data.result).toBe("UNKNOWN");
+    expect(after.data.data?.status ?? after.data.status).toBe("UNKNOWN");
     expect(
       (await getPrisma().offerPublication.findUniqueOrThrow({ where: { offerId: f.offerId } }))
         .pinnedRevisionId
@@ -1102,7 +1102,7 @@ describe("Verified offer fitment through real sessions, routes, and PostgreSQL",
     await approveOffer(f);
     await publish(f);
     const before = await match(f);
-    expect(before.data.data?.result ?? before.data.result).toBe("MATCH");
+    expect(before.data.data?.status ?? before.data.status).toBe("MATCH");
     const withdraw = await withdrawPolicyRoute(
       request(
         `/api/v1/staff/branches/${f.branchId}/fitment-policies/${policy.policyId}/withdraw`,

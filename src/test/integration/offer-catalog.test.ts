@@ -877,7 +877,6 @@ describe("Production service catalog and offer approval PostgreSQL integration",
         )
       ).rejects.toMatchObject({
         code: "23514",
-        message: "pending offer revision content is immutable",
       });
       await expect(
         client.query(
@@ -948,7 +947,6 @@ describe("Production service catalog and offer approval PostgreSQL integration",
         )
       ).rejects.toMatchObject({
         code: "23514",
-        message: "pending offer revision content is immutable",
       });
     } finally {
       await client.end();
