@@ -338,23 +338,10 @@ describe("Central Authorization DAL & Security Audit PostgreSQL Integration Suit
 
     const prisma = getPrisma();
     const count = await prisma.internalStaffMembership.count();
-    if (count > 0) {
-      const existingStaff = await prisma.internalStaffMembership.findMany({
-        select: { userId: true },
-      });
-      const userIds = existingStaff.map((s) => s.userId);
-      if (userIds.length > 0) {
-        await prisma.twoFactor.deleteMany({ where: { userId: { in: userIds } } });
-        await prisma.internalRoleAssignment.deleteMany({
-          where: { staffMembership: { userId: { in: userIds } } },
-        });
-        await prisma.internalStaffMembership.deleteMany({ where: { userId: { in: userIds } } });
-        await prisma.securityAuditEvent.deleteMany({ where: { actorUserId: { in: userIds } } });
-        await prisma.session.deleteMany({ where: { userId: { in: userIds } } });
-        await prisma.account.deleteMany({ where: { userId: { in: userIds } } });
-        await prisma.user.deleteMany({ where: { id: { in: userIds } } });
-      }
-    }
+    // Bootstrap must be tested on a disposable database before other suites
+    // create immutable provider/fitment history. Never delete unrelated staff
+    // and their referentially linked business records to make this test pass.
+    expect(count).toBe(0);
 
     const { headers, provisionResult } = await provisionAndActivateStaff({
       department: "ADMIN",

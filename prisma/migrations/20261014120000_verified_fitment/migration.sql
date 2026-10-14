@@ -9,7 +9,7 @@ ALTER TABLE "offer_revisions"
   ADD COLUMN "fitmentScopePriceAttested" BOOLEAN NOT NULL DEFAULT false,
   ADD CONSTRAINT "offer_revisions_fitment_evidence_check" CHECK (
     ("fitmentMode" IS NULL AND "fitmentEvidenceRef" IS NULL AND NOT "fitmentAllVariantsAttested" AND NOT "fitmentScopePriceAttested") OR
-    ("fitmentMode" IS NOT NULL AND "fitmentEvidenceRef" ~ '^[A-Za-z0-9_-]{3,128}$')
+    ("fitmentMode" IS NOT NULL AND "fitmentEvidenceRef" ~ '^[A-Za-z0-9][A-Za-z0-9_.:-]{2,127}$')
   );
 
 CREATE TABLE "offer_fitment_coverage" (
@@ -49,7 +49,7 @@ CREATE TABLE "branch_capability_versions" (
   CONSTRAINT "branch_capability_versions_pkey" PRIMARY KEY ("id"),
   CONSTRAINT "branch_capability_versions_shape_check" CHECK (
     "sequenceNumber" > 0 AND "version" > 0 AND
-    ("evidenceRef" IS NULL OR "evidenceRef" ~ '^[A-Za-z0-9_-]{3,128}$')
+    ("evidenceRef" IS NULL OR "evidenceRef" ~ '^[A-Za-z0-9][A-Za-z0-9_.:-]{2,127}$')
   ),
   CONSTRAINT "branch_capability_versions_state_check" CHECK (
     ("status" = 'DRAFT' AND "submittedByUserId" IS NULL AND "submittedAt" IS NULL AND "decidedByUserId" IS NULL AND "decidedAt" IS NULL AND "rejectionReason" IS NULL AND "withdrawnAt" IS NULL AND NOT "attested") OR

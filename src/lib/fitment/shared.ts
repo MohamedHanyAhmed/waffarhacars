@@ -13,7 +13,7 @@ export const opaqueRefSchema = z
   .trim()
   .min(3)
   .max(128)
-  .regex(/^[A-Za-z0-9_-]+$/);
+  .regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]*$/);
 const currentCairoYear = () =>
   Number(
     new Intl.DateTimeFormat("en-US", { timeZone: "Africa/Cairo", year: "numeric" }).format(
