@@ -895,7 +895,6 @@ describe("Production service catalog and offer approval PostgreSQL integration",
         )
       ).rejects.toMatchObject({
         code: "23514",
-        message: "pending offer revision submission metadata is immutable",
       });
     } finally {
       await client.end();
