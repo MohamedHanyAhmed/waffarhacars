@@ -1452,70 +1452,82 @@ describe("Published offer routes with real PostgreSQL and resolved staff session
     );
   });
 
-  it("serializes successor approval against replacement so only a previously approved revision may become pinned", async () => {
-    if (!databaseAvailable) throw new Error("PostgreSQL integration service unavailable.");
-    const fixture = await createApprovedFixture();
-    expect(
-      (await command(fixture.offerId, fixture.ops.cookie, "PUBLISH", 0, fixture.revisionId))
-        .response.status
-    ).toBe(200);
-    const successorId = await createPendingSuccessor(fixture, "70000");
-    const blocker = new pg.Client({ connectionString: TEST_DB_URL });
-    await blocker.connect();
-    await blocker.query("BEGIN");
-    await blocker.query("SELECT id FROM provider_organizations WHERE id = $1 FOR UPDATE", [
-      fixture.provider.id,
-    ]);
-    const approval = approveOfferHandler(
-      request(
-        `/api/v1/staff/ops/offers/${fixture.offerId}/revisions/${successorId}/approve`,
-        "POST",
-        fixture.ops.cookie,
-        {
-          expectedVersion: 3,
-          evidenceInspected: true,
-          priceVerified: true,
-          scopeVerified: true,
-          providerConsentVerified: true,
-          fitmentAllVariantsAttested: true,
-          fitmentScopePriceAttested: true,
-        }
-      ),
-      { params: Promise.resolve({ offerId: fixture.offerId, revisionId: successorId }) }
-    );
-    const replacement = command(fixture.offerId, fixture.ops.cookie, "REPLACE", 1, successorId);
-    let waiting = 0;
-    let results:
-      | [PromiseSettledResult<Response>, PromiseSettledResult<Awaited<ReturnType<typeof command>>>]
-      | null = null;
-    try {
-      waiting = await waitForBlockedRequests(blocker, 2);
-    } finally {
-      await blocker.query("COMMIT").finally(() => blocker.end());
-      results = await Promise.allSettled([approval, replacement]);
+  it.each(["APPROVAL_FIRST", "REPLACEMENT_FIRST"] as const)(
+    "serializes successor approval versus replacement in controlled %s ordering",
+    async (order) => {
+      if (!databaseAvailable) throw new Error("PostgreSQL integration service unavailable.");
+      const fixture = await createApprovedFixture();
+      expect(
+        (await command(fixture.offerId, fixture.ops.cookie, "PUBLISH", 0, fixture.revisionId))
+          .response.status
+      ).toBe(200);
+      const successorId = await createPendingSuccessor(fixture, "70000");
+      const blocker = new pg.Client({ connectionString: TEST_DB_URL });
+      await blocker.connect();
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT id FROM provider_organizations WHERE id = $1 FOR UPDATE", [
+        fixture.provider.id,
+      ]);
+      const approval = () =>
+        approveOfferHandler(
+          request(
+            `/api/v1/staff/ops/offers/${fixture.offerId}/revisions/${successorId}/approve`,
+            "POST",
+            fixture.ops.cookie,
+            {
+              expectedVersion: 3,
+              evidenceInspected: true,
+              priceVerified: true,
+              scopeVerified: true,
+              providerConsentVerified: true,
+              fitmentAllVariantsAttested: true,
+              fitmentScopePriceAttested: true,
+            }
+          ),
+          { params: Promise.resolve({ offerId: fixture.offerId, revisionId: successorId }) }
+        );
+      const replacement = () =>
+        command(fixture.offerId, fixture.ops.cookie, "REPLACE", 1, successorId);
+      const first = order === "APPROVAL_FIRST" ? approval : replacement;
+      const second = order === "APPROVAL_FIRST" ? replacement : approval;
+      let firstResult: Promise<Response | Awaited<ReturnType<typeof command>>> | undefined;
+      let secondResult: Promise<Response | Awaited<ReturnType<typeof command>>> | undefined;
+      let waiting = 0;
+      try {
+        firstResult = first();
+        waiting = await waitForBlockedRequests(blocker, 1);
+        expect(waiting).toBe(1);
+        secondResult = second();
+        waiting = await waitForBlockedRequests(blocker, 2);
+      } finally {
+        await blocker.query("COMMIT").finally(() => blocker.end());
+      }
+      expect(waiting).toBe(2);
+      const [firstValue, secondValue] = await Promise.all([firstResult!, secondResult!]);
+      const approvedResponse = (order === "APPROVAL_FIRST" ? firstValue : secondValue) as Response;
+      const replacementOutcome = (order === "APPROVAL_FIRST" ? secondValue : firstValue) as Awaited<
+        ReturnType<typeof command>
+      >;
+      expect(approvedResponse.status).toBe(200);
+      const persisted = await getPrisma().offerPublication.findUniqueOrThrow({
+        where: { offerId: fixture.offerId },
+      });
+      if (order === "APPROVAL_FIRST") {
+        expect(replacementOutcome.response.status).toBe(200);
+        expect(persisted.version).toBe(2);
+        expect(persisted.pinnedRevisionId).toBe(successorId);
+      } else {
+        expect(replacementOutcome.response.status).toBe(422);
+        expect(replacementOutcome.data.command.errorCode).toBe("REVISION_NOT_APPROVED");
+        expect(persisted.version).toBe(1);
+        expect(persisted.pinnedRevisionId).toBe(fixture.revisionId);
+      }
+      const approved = await getPrisma().offerRevision.findUniqueOrThrow({
+        where: { id: successorId },
+      });
+      expect(approved.status).toBe("APPROVED");
     }
-    expect(waiting).toBe(2);
-    if (!results || results[0].status === "rejected" || results[1].status === "rejected") {
-      throw new Error("Concurrent route promise did not settle successfully.");
-    }
-    expect(results[0].value.status).toBe(200);
-    expect([200, 422]).toContain(results[1].value.response.status);
-    const persisted = await getPrisma().offerPublication.findUniqueOrThrow({
-      where: { offerId: fixture.offerId },
-    });
-    if (results[1].value.response.status === 200) {
-      expect(persisted.version).toBe(2);
-      expect(persisted.pinnedRevisionId).toBe(successorId);
-    } else {
-      expect(results[1].value.data.command.errorCode).toBe("REVISION_NOT_APPROVED");
-      expect(persisted.version).toBe(1);
-      expect(persisted.pinnedRevisionId).toBe(fixture.revisionId);
-    }
-    const approved = await getPrisma().offerRevision.findUniqueOrThrow({
-      where: { id: successorId },
-    });
-    expect(approved.status).toBe("APPROVED");
-  });
+  );
 
   it("rolls back publication and command outcome when the real audit insert fails, then safely retries the same identity", async () => {
     if (!databaseAvailable) throw new Error("PostgreSQL integration service unavailable.");

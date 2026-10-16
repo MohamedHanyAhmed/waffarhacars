@@ -1036,36 +1036,52 @@ describe("Vehicle garage through real Better Auth session and PostgreSQL route b
     const list = await listGarage(req("/api/v1/garage?limit=1", "GET", other.cookie));
     expect(list.headers.get("cache-control")).toBe("no-store");
     expect(Object.keys(await list.json()).sort()).toEqual(["items", "nextCursor"]);
-    const publicMakes = await publicCatalog(req("/api/v1/vehicles/catalog"));
-    expect(publicMakes.headers.get("cache-control")).toBe("no-store");
-    const publicMakeDto = (await publicMakes.json()).items.find(
-      (row: { id: string }) => row.id === makeId
+    const findPaged = async (
+      base: string,
+      load: (path: string) => Promise<Response>,
+      id: string
+    ): Promise<Record<string, unknown>> => {
+      let cursor: string | null = null;
+      for (let page = 0; page < 100; page += 1) {
+        const separator = base.includes("?") ? "&" : "?";
+        const path = `${base}${separator}limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
+        const response = await load(path);
+        expect(response.status).toBe(200);
+        expect(response.headers.get("cache-control")).toBe("no-store");
+        const body = await response.json();
+        const found = body.items.find((row: { id: string }) => row.id === id);
+        if (found) return found;
+        if (!body.nextCursor) break;
+        cursor = body.nextCursor;
+      }
+      throw new Error("Synthetic catalog fixture was absent after complete cursor traversal");
+    };
+    const publicMakeDto = await findPaged(
+      "/api/v1/vehicles/catalog",
+      (path) => publicCatalog(req(path)),
+      makeId
     );
     expect(Object.keys(publicMakeDto).sort()).toEqual(["id", "code", "nameEn", "nameAr"].sort());
-    const publicModels = await publicCatalog(req(`/api/v1/vehicles/catalog?makeId=${makeId}`));
-    expect(publicModels.headers.get("cache-control")).toBe("no-store");
-    const publicModelDto = (await publicModels.json()).items.find(
-      (row: { id: string }) => row.id === modelId
+    const publicModelDto = await findPaged(
+      `/api/v1/vehicles/catalog?makeId=${makeId}`,
+      (path) => publicCatalog(req(path)),
+      modelId
     );
     expect(Object.keys(publicModelDto).sort()).toEqual(
       ["id", "makeId", "code", "nameEn", "nameAr"].sort()
     );
-    const privateMakes = await listMakeRoute(
-      req("/api/v1/staff/ops/vehicle-catalog/makes", "GET", ops.cookie)
-    );
-    expect(privateMakes.headers.get("cache-control")).toBe("no-store");
-    const privateMakeDto = (await privateMakes.json()).items.find(
-      (row: { id: string }) => row.id === makeId
+    const privateMakeDto = await findPaged(
+      "/api/v1/staff/ops/vehicle-catalog/makes",
+      (path) => listMakeRoute(req(path, "GET", ops.cookie)),
+      makeId
     );
     expect(Object.keys(privateMakeDto).sort()).toEqual(
       ["id", "code", "nameEn", "nameAr", "evidenceRef", "isActive", "version"].sort()
     );
-    const privateModels = await listModelRoute(
-      req(`/api/v1/staff/ops/vehicle-catalog/models?makeId=${makeId}`, "GET", ops.cookie)
-    );
-    expect(privateModels.headers.get("cache-control")).toBe("no-store");
-    const privateModelDto = (await privateModels.json()).items.find(
-      (row: { id: string }) => row.id === modelId
+    const privateModelDto = await findPaged(
+      `/api/v1/staff/ops/vehicle-catalog/models?makeId=${makeId}`,
+      (path) => listModelRoute(req(path, "GET", ops.cookie)),
+      modelId
     );
     expect(Object.keys(privateModelDto).sort()).toEqual(
       ["id", "makeId", "code", "nameEn", "nameAr", "evidenceRef", "isActive", "version"].sort()

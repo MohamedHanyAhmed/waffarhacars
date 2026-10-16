@@ -1033,6 +1033,101 @@ describe("Verified offer fitment through real sessions, routes, and PostgreSQL",
     ).toBe(f.revisionId);
   });
 
+  it.each(["DEACTIVATE_FIRST", "APPROVE_FIRST"] as const)(
+    "serializes catalog model deactivation versus assessed offer approval (%s) without approving inactive coverage",
+    async (order) => {
+      const f = await fixture();
+      const db = getPrisma();
+      const policy = await createPolicy(f);
+      await activatePolicy(f, policy.policyId);
+      expect((await setFitment(f)).status).toBe(200);
+      expect(
+        (
+          await submitOfferRoute(
+            request(
+              `/api/v1/staff/offers/${f.offerId}/revisions/${f.revisionId}/submit`,
+              "POST",
+              f.sales.session,
+              { expectedVersion: 2 }
+            ),
+            offerContext(f)
+          )
+        ).status
+      ).toBe(200);
+      const model = await db.vehicleModel.findUniqueOrThrow({ where: { id: f.modelId } });
+      const deactivate = () =>
+        updateModelRoute(
+          request(`/api/v1/staff/ops/vehicle-catalog/models/${f.modelId}`, "PATCH", f.ops.session, {
+            commandId: crypto.randomUUID(),
+            expectedVersion: model.version,
+            nameEn: model.nameEn,
+            nameAr: model.nameAr,
+            evidenceRef: model.evidenceRef,
+            isActive: false,
+          }),
+          { params: Promise.resolve({ id: f.modelId }) }
+        );
+      const approve = () =>
+        approveOfferRoute(
+          request(
+            `/api/v1/staff/ops/offers/${f.offerId}/revisions/${f.revisionId}/approve`,
+            "POST",
+            f.ops.session,
+            {
+              expectedVersion: 3,
+              evidenceInspected: true,
+              priceVerified: true,
+              scopeVerified: true,
+              providerConsentVerified: true,
+              fitmentAllVariantsAttested: true,
+              fitmentScopePriceAttested: true,
+            }
+          ),
+          offerContext(f)
+        );
+      const blocker = new pg.Client({ connectionString: databaseUrl });
+      let first: Promise<Response> | undefined;
+      let second: Promise<Response> | undefined;
+      await blocker.connect();
+      try {
+        await blocker.query("BEGIN");
+        const pid = Number((await blocker.query("SELECT pg_backend_pid() AS pid")).rows[0].pid);
+        expect(
+          (
+            await blocker.query("SELECT id FROM vehicle_makes WHERE id = $1::uuid FOR UPDATE", [
+              f.makeId,
+            ])
+          ).rowCount
+        ).toBe(1);
+        first = order === "DEACTIVATE_FIRST" ? deactivate() : approve();
+        await waitForBlocked(pid, 1);
+        second = order === "DEACTIVATE_FIRST" ? approve() : deactivate();
+        await waitForBlocked(pid, 2);
+        await blocker.query("COMMIT");
+        const [firstResponse, secondResponse] = await Promise.all([first, second]);
+        const approval = order === "DEACTIVATE_FIRST" ? secondResponse : firstResponse;
+        const deactivation = order === "DEACTIVATE_FIRST" ? firstResponse : secondResponse;
+        expect(deactivation.status).toBe(200);
+        expect(approval.status).toBe(order === "DEACTIVATE_FIRST" ? 422 : 200);
+        const persisted = await db.offerRevision.findUniqueOrThrow({ where: { id: f.revisionId } });
+        expect(persisted.status).toBe(order === "DEACTIVATE_FIRST" ? "PENDING_REVIEW" : "APPROVED");
+        expect(persisted.version).toBe(order === "DEACTIVATE_FIRST" ? 3 : 4);
+        expect(
+          (await db.vehicleModel.findUniqueOrThrow({ where: { id: f.modelId } })).isActive
+        ).toBe(false);
+        expect(
+          await db.securityAuditEvent.count({
+            where: { eventType: "OFFER_APPROVED", targetEntity: `offer_revision:${f.revisionId}` },
+          })
+        ).toBe(order === "DEACTIVATE_FIRST" ? 0 : 1);
+      } finally {
+        await blocker.query("ROLLBACK").catch(() => {});
+        await blocker.end().catch(() => {});
+        await Promise.allSettled([first, second].filter(Boolean) as Promise<Response>[]);
+      }
+    }
+  );
+
   it("rejects overlap and invalid model-parent coverage without any fitment content, receipt, or audit", async () => {
     const f = await fixture();
     const db = getPrisma();
@@ -1465,6 +1560,42 @@ describe("Verified offer fitment through real sessions, routes, and PostgreSQL",
         where: {
           eventType: "BRANCH_CAPABILITY_DRAFT_CREATED",
           targetEntity: `branch_capability:${a.command.policyId}`,
+        },
+      })
+    ).toBe(1);
+  });
+
+  it("serializes same-key competing capability submission to one transition, receipt and audit", async () => {
+    const f = await fixture();
+    const db = getPrisma();
+    const policy = await createPolicy(f);
+    const commandId = crypto.randomUUID();
+    const submit = () =>
+      submitPolicyRoute(
+        request(
+          `/api/v1/staff/branches/${f.branchId}/fitment-policies/${policy.policyId}/submit`,
+          "POST",
+          f.sales.session,
+          { commandId, expectedVersion: 1 }
+        ),
+        policyContext(f, policy.policyId)
+      );
+    const [first, second] = await orderedProviderRace(f.providerId, submit, submit);
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect((await first.json()).replayed).toBe(false);
+    expect((await second.json()).replayed).toBe(true);
+    const stored = await db.branchCapabilityVersion.findUniqueOrThrow({
+      where: { id: policy.policyId },
+    });
+    expect(stored.status).toBe("PENDING_REVIEW");
+    expect(stored.version).toBe(2);
+    expect(await db.fitmentCommand.count({ where: { commandId } })).toBe(1);
+    expect(
+      await db.securityAuditEvent.count({
+        where: {
+          eventType: "BRANCH_CAPABILITY_SUBMITTED",
+          targetEntity: `branch_capability:${policy.policyId}`,
         },
       })
     ).toBe(1);
