@@ -494,26 +494,32 @@ test("real UI and PostgreSQL: bilingual mobile offers, approval, explicit public
     await expect(opsPage.locator(`a[href="/staff/offers/${offerId}"]`)).toBeVisible();
     await opsPage.locator(`a[href="/staff/offers/${offerId}"]`).click();
     await expect(opsPage.getByText(raceWinner.titleEn).first()).toBeVisible();
-    const approvedViaOps = await opsContext.request.post(
-      new URL(
-        `/api/v1/staff/ops/offers/${offerId}/revisions/${draft.id}/approve`,
-        browserOrigin
-      ).toString(),
-      {
-        headers: { Origin: browserOrigin },
-        data: {
-          expectedVersion: 5,
-          evidenceInspected: true,
-          priceVerified: true,
-          scopeVerified: true,
-          providerConsentVerified: true,
-          fitmentAllVariantsAttested: true,
-          fitmentScopePriceAttested: true,
-        },
-      }
-    );
-    expect(approvedViaOps.status()).toBe(200);
-    await opsPage.reload();
+    const englishReview = opsPage.getByRole("region", {
+      name: "Fitment evidence for this revision",
+    });
+    await expect(englishReview).toContainText(`CI:E2E:OFFER_ALL_VARIANTS:${uid}`);
+    await expect(englishReview).toContainText(fitmentModel.id);
+    const englishApprove = opsPage.getByRole("button", { name: "Approve internally" });
+    await expect(englishApprove).toBeDisabled();
+    for (const label of [
+      "I inspected the evidence packet",
+      "I verified the normal and customer prices",
+      "I verified the bilingual service scope",
+      "I verified provider consent and commercial terms",
+    ]) {
+      await opsPage.getByRole("checkbox", { name: label }).check();
+    }
+    await expect(englishApprove).toBeDisabled();
+    await opsPage
+      .getByRole("checkbox", { name: /I inspected the provider-backed evidence/ })
+      .check();
+    await expect(englishApprove).toBeDisabled();
+    await opsPage.getByRole("checkbox", { name: /I verified the listed fitment scope/ }).check();
+    await expect(englishApprove).toBeEnabled();
+    await englishApprove.click();
+    await expect(
+      opsPage.getByRole("status").filter({ hasText: "Internal approval confirmed by the server." })
+    ).toBeVisible();
     const storedOffer = await prisma.offer.findUniqueOrThrow({ where: { id: offerId } });
     const approved = await prisma.offerRevision.findUniqueOrThrow({ where: { id: draft.id } });
     expect(approved.status).toBe("APPROVED");
@@ -833,26 +839,28 @@ test("real UI and PostgreSQL: bilingual mobile offers, approval, explicit public
       path: reviewScreenshot,
       contentType: "image/png",
     });
-    const arabicApproval = await opsContext.request.post(
-      new URL(
-        `/api/v1/staff/ops/offers/${arabicOfferId}/revisions/${arabicDraft.id}/approve`,
-        browserOrigin
-      ).toString(),
-      {
-        headers: { Origin: browserOrigin },
-        data: {
-          expectedVersion: 3,
-          evidenceInspected: true,
-          priceVerified: true,
-          scopeVerified: true,
-          providerConsentVerified: true,
-          fitmentAllVariantsAttested: true,
-          fitmentScopePriceAttested: true,
-        },
-      }
-    );
-    expect(arabicApproval.status()).toBe(200);
-    await opsPage.reload();
+    const arabicReview = opsPage.getByRole("region", {
+      name: "إثبات توافق السيارة لهذه النسخة",
+    });
+    await expect(arabicReview).toContainText(fitmentModel.id);
+    const arabicApprove = opsPage.getByRole("button", { name: "اعتماد داخلي" });
+    for (const label of [
+      "فحصت ملف الإثبات",
+      "تحققت من السعر المعتاد وسعر العميل",
+      "تحققت من نطاق الخدمة باللغتين",
+      "تحققت من موافقة المركز والاتفاق التجاري",
+    ]) {
+      await opsPage.getByRole("checkbox", { name: label }).check();
+    }
+    await expect(arabicApprove).toBeDisabled();
+    await opsPage.getByRole("checkbox", { name: /فحصت إثبات المركز وتحققت/ }).check();
+    await expect(arabicApprove).toBeDisabled();
+    await opsPage.getByRole("checkbox", { name: /تحققت من نطاق توافق السيارة/ }).check();
+    await expect(arabicApprove).toBeEnabled();
+    await arabicApprove.click();
+    await expect(
+      opsPage.getByRole("status").filter({ hasText: "أكد الخادم الاعتماد الداخلي." })
+    ).toBeVisible();
     const arabicApproved = await prisma.offerRevision.findUniqueOrThrow({
       where: { id: arabicDraft.id },
     });

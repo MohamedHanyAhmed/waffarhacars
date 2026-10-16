@@ -330,7 +330,16 @@ export async function capabilityCommand(
     await lockCommand(tx, input.commandId);
     const { provider, branch } = await lockBranch(tx, branchId);
     const existing = await tx.fitmentCommand.findUnique({ where: { commandId: input.commandId } });
-    if (existing) return replay(existing, actor.userId, action, hash, policyId);
+    if (existing) {
+      // The command fingerprint binds the policy but not its URL branch. A
+      // historical receipt must not be returned through a foreign branch path.
+      const policyOnBranch = await tx.branchCapabilityVersion.findFirst({
+        where: { id: policyId, branchId },
+        select: { id: true },
+      });
+      if (!policyOnBranch) throw new FitmentError(404, "POLICY_NOT_FOUND");
+      return replay(existing, actor.userId, action, hash, policyId);
+    }
     // EDIT alone obtains canonical catalog locks. Do so before category/policy
     // locks, avoiding an inversion with offer draft fitment submission.
     let editedCoverage: Awaited<ReturnType<typeof validateCoverage>> | null = null;

@@ -726,16 +726,151 @@ describe("Verified offer fitment through real sessions, routes, and PostgreSQL",
     expect(await db.offerFitmentCoverage.count({ where: { revisionId: f.revisionId } })).toBe(1);
   });
 
-  it("returns 404 for another customer's stored vehicle and never exposes private match details", async () => {
+  it("proves eligible owner matches, private/public DTO allowlists, and indistinguishable foreign/missing/archived denial", async () => {
     const f = await fixture();
+    const db = getPrisma();
+    const policy = await createPolicy(f);
+    await activatePolicy(f, policy.policyId);
+    await approveOffer(f);
+    await publish(f);
+
+    // The offer is genuinely matchable for both stored vehicles. A hidden
+    // draft would return 404 regardless of whether ownership was enforced.
+    const owner = await match(f);
+    const foreignOwner = await match(f, f.foreignVehicleId, f.foreignCustomer.session);
+    expect(owner.response.status).toBe(200);
+    expect(foreignOwner.response.status).toBe(200);
+    expect(owner.data.status).toBe("MATCH");
+    expect(foreignOwner.data.status).toBe("MATCH");
+    expect(Object.keys(owner.data).sort()).toEqual(
+      [
+        "offerId",
+        "vehicleId",
+        "status",
+        "reason",
+        "revisionId",
+        "vehicleVersion",
+        "capabilityVersionId",
+        "capabilityVersion",
+      ].sort()
+    );
+    expect(owner.data).toMatchObject({
+      offerId: f.offerId,
+      vehicleId: f.vehicleId,
+      revisionId: f.revisionId,
+      capabilityVersionId: policy.policyId,
+      reason: "VERIFIED_COVERAGE",
+    });
+    expect(owner.response.headers.get("cache-control")).toContain("no-store");
+
+    const publicCoverage = await publicCoverageRoute(
+      request(`/api/v1/offers/${f.offerId}/fitment`, "GET"),
+      { params: Promise.resolve({ offerId: f.offerId }) }
+    );
+    expect(publicCoverage.status).toBe(200);
+    expect(publicCoverage.headers.get("cache-control")).toContain("no-store");
+    const coverageBody = await publicCoverage.json();
+    expect(Object.keys(coverageBody).sort()).toEqual(
+      ["offerId", "revisionId", "capabilityVersionId", "coverage"].sort()
+    );
+    expect(coverageBody.coverage).toHaveLength(1);
+    expect(Object.keys(coverageBody.coverage[0]).sort()).toEqual(
+      ["make", "model", "yearFrom", "yearTo"].sort()
+    );
+    expect(Object.keys(coverageBody.coverage[0].make).sort()).toEqual(
+      ["id", "code", "nameEn", "nameAr"].sort()
+    );
+    expect(Object.keys(coverageBody.coverage[0].model).sort()).toEqual(
+      ["id", "code", "nameEn", "nameAr"].sort()
+    );
+
+    const archived = await addVehicle(f, f.modelId, 2022);
+    await db.customerVehicle.update({
+      where: { id: archived.id },
+      data: { archivedAt: new Date(), version: { increment: 1 } },
+    });
     const foreign = await match(f, f.foreignVehicleId, f.customer.session);
     const missing = await match(f, crypto.randomUUID(), f.customer.session);
+    const archivedMatch = await match(f, archived.id, f.customer.session);
     const anonymous = await match(f, f.vehicleId, "");
     const staffOnly = await match(f, f.vehicleId, f.ops.session);
     expect(foreign.response.status).toBe(404);
     expect(missing.response.status).toBe(404);
+    expect(archivedMatch.response.status).toBe(404);
+    expect(foreign.data).toEqual({ error: "NOT_FOUND" });
+    expect(missing.data).toEqual(foreign.data);
+    expect(archivedMatch.data).toEqual(foreign.data);
     expect(anonymous.response.status).toBe(401);
     expect(staffOnly.response.status).toBe(403);
+    expect(anonymous.data.error).toBe("UNAUTHENTICATED");
+    expect(staffOnly.data.error).toBe("CUSTOMER_REQUIRED");
+    for (const denied of [foreign, missing, archivedMatch, anonymous, staffOnly]) {
+      expect(denied.response.headers.get("cache-control")).toContain("no-store");
+      expect(Object.keys(denied.data).every((key) => ["error", "message"].includes(key))).toBe(
+        true
+      );
+    }
+
+    await db.session.updateMany({
+      where: { userId: f.customer.id },
+      data: { expiresAt: new Date(Date.now() - 60_000) },
+    });
+    const expired = await match(f, f.vehicleId, f.customer.session);
+    expect(expired.response.status).toBe(401);
+    expect(expired.data.error).toBe("UNAUTHENTICATED");
+    expect(expired.response.headers.get("cache-control")).toContain("no-store");
+    expect(Object.keys(expired.data).every((key) => ["error", "message"].includes(key))).toBe(true);
+  });
+
+  it("does not replay a capability command receipt through a foreign branch path", async () => {
+    const f = await fixture();
+    const other = await fixture();
+    const policy = await createPolicy(f);
+    const commandId = crypto.randomUUID();
+    const body = { commandId, expectedVersion: 1 };
+    const first = await submitPolicyRoute(
+      request(
+        `/api/v1/staff/branches/${f.branchId}/fitment-policies/${policy.policyId}/submit`,
+        "POST",
+        f.sales.session,
+        body
+      ),
+      policyContext(f, policy.policyId)
+    );
+    expect(first.status).toBe(200);
+    expect((await first.json()).replayed).toBe(false);
+
+    const crossed = await submitPolicyRoute(
+      request(
+        `/api/v1/staff/branches/${other.branchId}/fitment-policies/${policy.policyId}/submit`,
+        "POST",
+        f.sales.session,
+        body
+      ),
+      policyContext(other, policy.policyId)
+    );
+    expect(crossed.status).toBe(404);
+    expect(await crossed.json()).toEqual({ error: "POLICY_NOT_FOUND" });
+
+    const original = await submitPolicyRoute(
+      request(
+        `/api/v1/staff/branches/${f.branchId}/fitment-policies/${policy.policyId}/submit`,
+        "POST",
+        f.sales.session,
+        body
+      ),
+      policyContext(f, policy.policyId)
+    );
+    expect(original.status).toBe(200);
+    expect((await original.json()).replayed).toBe(true);
+    expect(
+      (
+        await getPrisma().branchCapabilityVersion.findUniqueOrThrow({
+          where: { id: policy.policyId },
+        })
+      ).version
+    ).toBe(2);
+    expect(await getPrisma().fitmentCommand.count({ where: { commandId } })).toBe(1);
   });
 
   it("does not publish an approved fitment without a reviewed active branch capability", async () => {
@@ -970,20 +1105,22 @@ describe("Verified offer fitment through real sessions, routes, and PostgreSQL",
     );
   });
 
-  it("serializes fitment edit before submit at a relevant provider lock without duplicate content or audit", async () => {
+  it("serializes assessed fitment edit before submit: stale submit conflicts and only the edited coverage persists", async () => {
     const f = await fixture();
     const db = getPrisma();
+    expect((await setFitment(f)).status).toBe(200);
     const commandId = crypto.randomUUID();
+    const editedCoverage = [{ ...f.coverage[0], yearTo: 2023 }];
     const [edit, submit] = await orderedProviderRace(
       f.providerId,
-      () => setFitment(f, {}, commandId),
+      () => setFitment(f, { expectedVersion: 2, coverage: editedCoverage }, commandId),
       () =>
         submitOfferRoute(
           request(
             `/api/v1/staff/offers/${f.offerId}/revisions/${f.revisionId}/submit`,
             "POST",
             f.sales.session,
-            { expectedVersion: 1 }
+            { expectedVersion: 2 }
           ),
           offerContext(f)
         )
@@ -992,14 +1129,25 @@ describe("Verified offer fitment through real sessions, routes, and PostgreSQL",
     expect(submit.status).toBe(409);
     const revision = await db.offerRevision.findUniqueOrThrow({ where: { id: f.revisionId } });
     expect(revision.status).toBe("DRAFT");
-    expect(revision.version).toBe(2);
-    expect(await db.offerFitmentCoverage.count({ where: { revisionId: f.revisionId } })).toBe(1);
+    expect(revision.version).toBe(3);
+    expect(
+      await db.offerFitmentCoverage.findMany({
+        where: { revisionId: f.revisionId },
+        select: { yearTo: true },
+      })
+    ).toEqual([{ yearTo: 2023 }]);
     expect(await db.fitmentCommand.count({ where: { commandId } })).toBe(1);
+    expect(
+      await db.securityAuditEvent.count({
+        where: { actorUserId: f.sales.id, eventType: "OFFER_FITMENT_UPDATED" },
+      })
+    ).toBe(2);
   });
 
-  it("serializes submit before fitment edit so a missing assessment cannot become pending by late mutation", async () => {
+  it("serializes successful assessed submit before fitment edit: pending evidence is frozen and late edit is rejected", async () => {
     const f = await fixture();
     const db = getPrisma();
+    expect((await setFitment(f)).status).toBe(200);
     const commandId = crypto.randomUUID();
     const [submit, edit] = await orderedProviderRace(
       f.providerId,
@@ -1009,19 +1157,34 @@ describe("Verified offer fitment through real sessions, routes, and PostgreSQL",
             `/api/v1/staff/offers/${f.offerId}/revisions/${f.revisionId}/submit`,
             "POST",
             f.sales.session,
-            { expectedVersion: 1 }
+            { expectedVersion: 2 }
           ),
           offerContext(f)
         ),
-      () => setFitment(f, {}, commandId)
+      () =>
+        setFitment(
+          f,
+          { expectedVersion: 2, coverage: [{ ...f.coverage[0], yearTo: 2023 }] },
+          commandId
+        )
     );
-    expect(submit.status).toBe(422);
-    expect(edit.status).toBe(200);
+    expect(submit.status).toBe(200);
+    expect([409, 422]).toContain(edit.status);
     const revision = await db.offerRevision.findUniqueOrThrow({ where: { id: f.revisionId } });
-    expect(revision.status).toBe("DRAFT");
-    expect(revision.version).toBe(2);
-    expect(await db.offerFitmentCoverage.count({ where: { revisionId: f.revisionId } })).toBe(1);
-    expect(await db.fitmentCommand.count({ where: { commandId } })).toBe(1);
+    expect(revision.status).toBe("PENDING_REVIEW");
+    expect(revision.version).toBe(3);
+    expect(
+      await db.offerFitmentCoverage.findMany({
+        where: { revisionId: f.revisionId },
+        select: { yearTo: true },
+      })
+    ).toEqual([{ yearTo: 2024 }]);
+    expect(await db.fitmentCommand.count({ where: { commandId } })).toBe(0);
+    expect(
+      await db.securityAuditEvent.count({
+        where: { actorUserId: f.sales.id, eventType: "OFFER_FITMENT_UPDATED" },
+      })
+    ).toBe(1);
   });
 
   it("rolls back fitment content and receipt on a real audit insertion failure, then safely retries the same key", async () => {
@@ -1175,5 +1338,288 @@ describe("Verified offer fitment through real sessions, routes, and PostgreSQL",
       (await db.offerPublication.findUniqueOrThrow({ where: { offerId: f.offerId } }))
         .pinnedRevisionId
     ).toBe(f.revisionId);
+  });
+
+  it("serializes same-key competing capability creation to one policy, receipt and audit", async () => {
+    const f = await fixture();
+    const db = getPrisma();
+    const commandId = crypto.randomUUID();
+    const [first, second] = await orderedProviderRace(
+      f.providerId,
+      () =>
+        createPolicyRoute(
+          request(
+            `/api/v1/staff/branches/${f.branchId}/fitment-policies`,
+            "POST",
+            f.sales.session,
+            {
+              commandId,
+              categoryId: f.categoryId,
+              evidenceRef: "CI:CAPABILITY:SAME_KEY",
+              coverage: f.coverage,
+            }
+          ),
+          { params: Promise.resolve({ branchId: f.branchId }) }
+        ),
+      () =>
+        createPolicyRoute(
+          request(
+            `/api/v1/staff/branches/${f.branchId}/fitment-policies`,
+            "POST",
+            f.sales.session,
+            {
+              commandId,
+              categoryId: f.categoryId,
+              evidenceRef: "CI:CAPABILITY:SAME_KEY",
+              coverage: f.coverage,
+            }
+          ),
+          { params: Promise.resolve({ branchId: f.branchId }) }
+        )
+    );
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(201);
+    const a = await first.json();
+    const b = await second.json();
+    expect(a.command.policyId).toBe(b.command.policyId);
+    expect(a.replayed).toBe(false);
+    expect(b.replayed).toBe(true);
+    expect(await db.fitmentCommand.count({ where: { commandId } })).toBe(1);
+    expect(
+      await db.branchCapabilityVersion.count({
+        where: { branchId: f.branchId, categoryId: f.categoryId },
+      })
+    ).toBe(1);
+    expect(
+      await db.securityAuditEvent.count({
+        where: {
+          eventType: "BRANCH_CAPABILITY_DRAFT_CREATED",
+          targetEntity: `branch_capability:${a.command.policyId}`,
+        },
+      })
+    ).toBe(1);
+  });
+
+  it.each(["REPLACE_FIRST", "WITHDRAW_FIRST"] as const)(
+    "serializes capability replacement versus withdrawal (%s) without clearing the successor or reviving the predecessor",
+    async (order) => {
+      const f = await fixture();
+      const db = getPrisma();
+      const old = await createPolicy(f);
+      await activatePolicy(f, old.policyId);
+      const next = await createPolicy(f, [{ ...f.coverage[0], modelId: f.otherModelId }]);
+      const submit = await submitPolicyRoute(
+        request(
+          `/api/v1/staff/branches/${f.branchId}/fitment-policies/${next.policyId}/submit`,
+          "POST",
+          f.sales.session,
+          { commandId: crypto.randomUUID(), expectedVersion: 1 }
+        ),
+        policyContext(f, next.policyId)
+      );
+      expect(submit.status).toBe(200);
+      const replacementKey = crypto.randomUUID();
+      const withdrawalKey = crypto.randomUUID();
+      const replace = () =>
+        approvePolicyRoute(
+          request(
+            `/api/v1/staff/branches/${f.branchId}/fitment-policies/${next.policyId}/approve`,
+            "POST",
+            f.ops.session,
+            { commandId: replacementKey, expectedVersion: 2, attested: true }
+          ),
+          policyContext(f, next.policyId)
+        );
+      const withdraw = () =>
+        withdrawPolicyRoute(
+          request(
+            `/api/v1/staff/branches/${f.branchId}/fitment-policies/${old.policyId}/withdraw`,
+            "POST",
+            f.ops.session,
+            { commandId: withdrawalKey, expectedVersion: 3 }
+          ),
+          policyContext(f, old.policyId)
+        );
+      const [first, second] = await orderedProviderRace(
+        f.providerId,
+        ...(order === "REPLACE_FIRST"
+          ? ([replace, withdraw] as const)
+          : ([withdraw, replace] as const))
+      );
+      expect(first.status).toBe(200);
+      if (order === "REPLACE_FIRST") expect([409, 422]).toContain(second.status);
+      else expect(second.status).toBe(200);
+      const pointer = await db.branchCapabilityCurrent.findUniqueOrThrow({
+        where: { branchId_categoryId: { branchId: f.branchId, categoryId: f.categoryId } },
+      });
+      expect(pointer.activeVersionId).toBe(next.policyId);
+      expect(
+        (await db.branchCapabilityVersion.findUniqueOrThrow({ where: { id: old.policyId } })).status
+      ).toBe("WITHDRAWN");
+      expect(
+        (await db.branchCapabilityVersion.findUniqueOrThrow({ where: { id: next.policyId } }))
+          .status
+      ).toBe("ACTIVE");
+      expect(await db.fitmentCommand.count({ where: { commandId: replacementKey } })).toBe(1);
+      expect(await db.fitmentCommand.count({ where: { commandId: withdrawalKey } })).toBe(
+        order === "REPLACE_FIRST" ? 0 : 1
+      );
+      expect(
+        await db.securityAuditEvent.count({
+          where: {
+            eventType: "BRANCH_CAPABILITY_APPROVED",
+            targetEntity: `branch_capability:${next.policyId}`,
+          },
+        })
+      ).toBe(1);
+      expect(
+        await db.securityAuditEvent.count({
+          where: {
+            eventType: "BRANCH_CAPABILITY_WITHDRAWN",
+            targetEntity: `branch_capability:${old.policyId}`,
+          },
+        })
+      ).toBe(1);
+    }
+  );
+
+  it("rolls back capability approval, pointer, receipt and audit on a real audit-storage failure, then applies the same key once", async () => {
+    const f = await fixture();
+    const db = getPrisma();
+    const policy = await createPolicy(f);
+    const submitted = await submitPolicyRoute(
+      request(
+        `/api/v1/staff/branches/${f.branchId}/fitment-policies/${policy.policyId}/submit`,
+        "POST",
+        f.sales.session,
+        { commandId: crypto.randomUUID(), expectedVersion: 1 }
+      ),
+      policyContext(f, policy.policyId)
+    );
+    expect(submitted.status).toBe(200);
+    const commandId = crypto.randomUUID();
+    const approve = () =>
+      approvePolicyRoute(
+        request(
+          `/api/v1/staff/branches/${f.branchId}/fitment-policies/${policy.policyId}/approve`,
+          "POST",
+          f.ops.session,
+          { commandId, expectedVersion: 2, attested: true }
+        ),
+        policyContext(f, policy.policyId)
+      );
+    const client = new pg.Client({ connectionString: databaseUrl });
+    const suffix = crypto.randomUUID().replaceAll("-", "");
+    const functionName = `fail_capability_audit_${suffix}`;
+    const triggerName = `fail_capability_audit_trigger_${suffix}`;
+    await client.connect();
+    try {
+      await client.query(
+        `CREATE FUNCTION ${functionName}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW."eventType" = 'BRANCH_CAPABILITY_APPROVED' AND NEW."actorUserId" = '${f.ops.id}'::uuid THEN RAISE EXCEPTION 'synthetic capability audit failure' USING ERRCODE = 'P0001'; END IF; RETURN NEW; END; $$`
+      );
+      await client.query(
+        `CREATE TRIGGER ${triggerName} BEFORE INSERT ON security_audit_events FOR EACH ROW EXECUTE FUNCTION ${functionName}()`
+      );
+      expect((await approve()).status).toBe(503);
+      expect(
+        (await db.branchCapabilityVersion.findUniqueOrThrow({ where: { id: policy.policyId } }))
+          .status
+      ).toBe("PENDING_REVIEW");
+      expect(
+        await db.branchCapabilityCurrent.count({
+          where: { branchId: f.branchId, categoryId: f.categoryId },
+        })
+      ).toBe(0);
+      expect(await db.fitmentCommand.count({ where: { commandId } })).toBe(0);
+      expect(
+        await db.securityAuditEvent.count({
+          where: {
+            eventType: "BRANCH_CAPABILITY_APPROVED",
+            targetEntity: `branch_capability:${policy.policyId}`,
+          },
+        })
+      ).toBe(0);
+    } finally {
+      await client
+        .query(`DROP TRIGGER IF EXISTS ${triggerName} ON security_audit_events`)
+        .catch(() => {});
+      await client.query(`DROP FUNCTION IF EXISTS ${functionName}()`).catch(() => {});
+      await client.end();
+    }
+    expect((await approve()).status).toBe(200);
+    expect(
+      (await db.branchCapabilityVersion.findUniqueOrThrow({ where: { id: policy.policyId } }))
+        .status
+    ).toBe("ACTIVE");
+    expect(
+      (
+        await db.branchCapabilityCurrent.findUniqueOrThrow({
+          where: { branchId_categoryId: { branchId: f.branchId, categoryId: f.categoryId } },
+        })
+      ).activeVersionId
+    ).toBe(policy.policyId);
+    expect(await db.fitmentCommand.count({ where: { commandId } })).toBe(1);
+    expect(
+      await db.securityAuditEvent.count({
+        where: {
+          eventType: "BRANCH_CAPABILITY_APPROVED",
+          targetEntity: `branch_capability:${policy.policyId}`,
+        },
+      })
+    ).toBe(1);
+  });
+
+  it("times out capability creation behind the provider lock without content, receipt or audit and accepts the same-key retry", async () => {
+    const f = await fixture();
+    const db = getPrisma();
+    const commandId = crypto.randomUUID();
+    const create = () =>
+      createPolicyRoute(
+        request(`/api/v1/staff/branches/${f.branchId}/fitment-policies`, "POST", f.sales.session, {
+          commandId,
+          categoryId: f.categoryId,
+          evidenceRef: "CI:CAPABILITY:RETRY",
+          coverage: f.coverage,
+        }),
+        { params: Promise.resolve({ branchId: f.branchId }) }
+      );
+    const blocker = new pg.Client({ connectionString: databaseUrl });
+    await blocker.connect();
+    try {
+      await blocker.query("BEGIN");
+      const pid = Number((await blocker.query("SELECT pg_backend_pid() AS pid")).rows[0].pid);
+      expect(
+        (
+          await blocker.query(
+            "SELECT id FROM provider_organizations WHERE id = $1::uuid FOR UPDATE",
+            [f.providerId]
+          )
+        ).rowCount
+      ).toBe(1);
+      const pending = create();
+      await waitForBlocked(pid, 1);
+      expect((await pending).status).toBe(503);
+      expect(
+        await db.branchCapabilityVersion.count({
+          where: { branchId: f.branchId, categoryId: f.categoryId },
+        })
+      ).toBe(0);
+      expect(await db.fitmentCommand.count({ where: { commandId } })).toBe(0);
+      expect(
+        await db.securityAuditEvent.count({
+          where: { eventType: "BRANCH_CAPABILITY_DRAFT_CREATED", actorUserId: f.sales.id },
+        })
+      ).toBe(0);
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => {});
+      await blocker.end();
+    }
+    expect((await create()).status).toBe(201);
+    expect(
+      await db.branchCapabilityVersion.count({
+        where: { branchId: f.branchId, categoryId: f.categoryId },
+      })
+    ).toBe(1);
+    expect(await db.fitmentCommand.count({ where: { commandId } })).toBe(1);
   });
 });

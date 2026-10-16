@@ -34,13 +34,19 @@ function signedCookie(token: string) {
   return `better-auth.session_token=${encodeURIComponent(`${token}.${signature}`)}`;
 }
 
-function makeRequest(path: string, method: string, cookie?: string, body?: unknown) {
+function makeRequest(
+  path: string,
+  method: string,
+  cookie?: string,
+  body?: unknown,
+  origin = "http://localhost:3000"
+) {
   const headers = new Headers({
     "content-type": "application/json",
     "x-forwarded-for": "198.51.100.10",
   });
   if (cookie) headers.set("cookie", cookie);
-  if (method !== "GET") headers.set("origin", "http://localhost:3000");
+  if (method !== "GET") headers.set("origin", origin);
   return new NextRequest(`http://localhost:3000${path}`, {
     method,
     headers,
@@ -373,6 +379,89 @@ describe("Production service catalog and offer approval PostgreSQL integration",
   afterAll(async () => {
     process.env = originalEnv;
     await disconnectDb().catch(() => {});
+  });
+
+  it("rejects foreign origins and oversized streamed bodies at existing create, edit, submit and approve routes without persistence", async () => {
+    if (!databaseAvailable)
+      throw new Error("PostgreSQL integration service unavailable; start npm run db:test:up.");
+    const sales = await createStaff("SALES_AGENT");
+    const ops = await createStaff("OPS_SUPERVISOR");
+    const draft = await createPendingOffer(sales.cookie, ops.cookie, sales.userId, ops.userId);
+    const db = getPrisma();
+    const context = {
+      params: Promise.resolve({ offerId: draft.offer.id, revisionId: draft.revision.id }),
+    };
+    const before = {
+      offers: await db.offer.count({ where: { providerOrganizationId: draft.provider.id } }),
+      revision: await db.offerRevision.findUniqueOrThrow({ where: { id: draft.revision.id } }),
+      fitment: await db.offerFitmentCoverage.findMany({ where: { revisionId: draft.revision.id } }),
+      audit: await db.securityAuditEvent.count({
+        where: { targetEntity: `offer_revision:${draft.revision.id}` },
+      }),
+    };
+    const oversized = { junk: "x".repeat(17_000) };
+    const paths = [
+      {
+        path: "/api/v1/staff/offers",
+        method: "POST",
+        cookie: sales.cookie,
+        body: draft.payload,
+        call: (req: NextRequest) => createOfferHandler(req),
+      },
+      {
+        path: `/api/v1/staff/offers/${draft.offer.id}/revisions/${draft.revision.id}`,
+        method: "PATCH",
+        cookie: sales.cookie,
+        body: { expectedVersion: 3, fields: draft.payload.fields },
+        call: (req: NextRequest) => updateDraftHandler(req, context),
+      },
+      {
+        path: `/api/v1/staff/offers/${draft.offer.id}/revisions/${draft.revision.id}/submit`,
+        method: "POST",
+        cookie: sales.cookie,
+        body: { expectedVersion: 3 },
+        call: (req: NextRequest) => submitOfferHandler(req, context),
+      },
+      {
+        path: `/api/v1/staff/ops/offers/${draft.offer.id}/revisions/${draft.revision.id}/approve`,
+        method: "POST",
+        cookie: ops.cookie,
+        body: trueAttestation,
+        call: (req: NextRequest) => approveOfferHandler(req, context),
+      },
+    ];
+    for (const boundary of paths) {
+      const foreign = await boundary.call(
+        makeRequest(
+          boundary.path,
+          boundary.method,
+          boundary.cookie,
+          boundary.body,
+          "https://untrusted.example"
+        )
+      );
+      expect(foreign.status, `${boundary.path} must reject foreign Origin`).toBe(403);
+      const tooLarge = await boundary.call(
+        makeRequest(boundary.path, boundary.method, boundary.cookie, oversized)
+      );
+      expect(tooLarge.status, `${boundary.path} must reject oversized body`).toBe(400);
+      expect(foreign.headers.get("cache-control")).toContain("no-store");
+      expect(tooLarge.headers.get("cache-control")).toContain("no-store");
+    }
+    expect(await db.offer.count({ where: { providerOrganizationId: draft.provider.id } })).toBe(
+      before.offers
+    );
+    expect(await db.offerRevision.findUniqueOrThrow({ where: { id: draft.revision.id } })).toEqual(
+      before.revision
+    );
+    expect(
+      await db.offerFitmentCoverage.findMany({ where: { revisionId: draft.revision.id } })
+    ).toEqual(before.fitment);
+    expect(
+      await db.securityAuditEvent.count({
+        where: { targetEntity: `offer_revision:${draft.revision.id}` },
+      })
+    ).toBe(before.audit);
   });
 
   it("creates, submits, approves, and retries an offer with one immutable current approval and one audit per transition", async () => {
