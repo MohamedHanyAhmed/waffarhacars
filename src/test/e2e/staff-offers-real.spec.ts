@@ -75,15 +75,12 @@ test("real UI and PostgreSQL: bilingual mobile offers, approval, explicit public
     .slice(0, 12)
     .replace(/[0-9]/g, (digit) => String.fromCharCode(65 + Number(digit)))
     .toUpperCase();
-  const emails: string[] = [];
-  let providerId: string | undefined;
   let offerId: string | undefined;
   const contexts = [] as Awaited<ReturnType<typeof browser.newContext>>[];
 
   async function staff(department: "SALES" | "OPERATIONS", role: "SALES_AGENT" | "OPS_SUPERVISOR") {
     if ((await prisma.internalStaffMembership.count()) === 0) {
       const bootstrapEmail = `offers-bootstrap-${uid}@test.eg`;
-      emails.push(bootstrapEmail);
       await provisionStaffMember({
         email: bootstrapEmail,
         password,
@@ -94,7 +91,6 @@ test("real UI and PostgreSQL: bilingual mobile offers, approval, explicit public
       });
     }
     const email = `offers-${department.toLowerCase()}-${uid}@test.eg`;
-    emails.push(email);
     const member = await provisionStaffMember({
       email,
       password,
@@ -140,7 +136,6 @@ test("real UI and PostgreSQL: bilingual mobile offers, approval, explicit public
         activatedAt: new Date(),
       },
     });
-    providerId = provider.id;
     const branch = await prisma.providerBranch.create({
       data: {
         providerOrganizationId: provider.id,
@@ -164,6 +159,33 @@ test("real UI and PostgreSQL: bilingual mobile offers, approval, explicit public
         vettedAt: new Date(),
       },
     });
+    // Engineering-only synthetic catalogue. Operational release requires real
+    // provider-backed all-variant evidence for each enumerated base vehicle.
+    const fitmentMake = await prisma.vehicleMake.create({
+      data: {
+        code: `OFFER_E2E_${uid}`,
+        nameEn: "Synthetic E2E make",
+        nameAr: "ماركة تجريبية",
+        evidenceRef: "CI:E2E:MAKE",
+      },
+    });
+    const fitmentModel = await prisma.vehicleModel.create({
+      data: {
+        makeId: fitmentMake.id,
+        code: "ALL_VARIANTS_TEST",
+        nameEn: "Synthetic all-variants model",
+        nameAr: "طراز تجريبي",
+        evidenceRef: "CI:E2E:MODEL",
+      },
+    });
+    const fitmentCoverage = [
+      {
+        makeId: fitmentMake.id,
+        modelId: fitmentModel.id,
+        yearFrom: 2020,
+        yearTo: 2024,
+      },
+    ];
 
     const opsContext = await browser.newContext({
       viewport: { width: 1440, height: 900 },
@@ -198,6 +220,39 @@ test("real UI and PostgreSQL: bilingual mobile offers, approval, explicit public
     contexts.push(salesContext);
     const salesPage = await salesContext.newPage();
     await login(salesPage, sales.email);
+    const browserOrigin = new URL(salesPage.url()).origin;
+    const capabilityPath = `/api/v1/staff/branches/${branch.id}/fitment-policies`;
+    const policyCreated = await salesContext.request.post(
+      new URL(capabilityPath, browserOrigin).toString(),
+      {
+        headers: { Origin: browserOrigin },
+        data: {
+          commandId: crypto.randomUUID(),
+          categoryId: category.id,
+          evidenceRef: `CI:E2E:BRANCH_CAPABILITY:${uid}`,
+          coverage: fitmentCoverage,
+        },
+      }
+    );
+    expect(policyCreated.status()).toBe(201);
+    const policyId = ((await policyCreated.json()) as { command: { policyId: string } }).command
+      .policyId;
+    const policySubmitted = await salesContext.request.post(
+      new URL(`${capabilityPath}/${policyId}/submit`, browserOrigin).toString(),
+      {
+        headers: { Origin: browserOrigin },
+        data: { commandId: crypto.randomUUID(), expectedVersion: 1 },
+      }
+    );
+    expect(policySubmitted.status()).toBe(200);
+    const policyApproved = await opsContext.request.post(
+      new URL(`${capabilityPath}/${policyId}/approve`, browserOrigin).toString(),
+      {
+        headers: { Origin: browserOrigin },
+        data: { commandId: crypto.randomUUID(), expectedVersion: 2, attested: true },
+      }
+    );
+    expect(policyApproved.status()).toBe(200);
     await salesPage.goto("/staff/offers/new");
     await expect(salesPage.locator("#offer-provider")).toBeVisible();
     await expect(salesPage.locator(`#offer-provider option[value="${provider.id}"]`)).toHaveCount(
@@ -401,6 +456,26 @@ test("real UI and PostgreSQL: bilingual mobile offers, approval, explicit public
         where: { eventType: "OFFER_DRAFT_UPDATED", targetEntity: `offer_revision:${draft.id}` },
       })
     ).toBe(2);
+    // Fitment UI is explicitly out of PR4B-B scope. Use the actual authenticated
+    // Sales API/session boundary to attach reviewed synthetic coverage before
+    // continuing the existing browser submission journey.
+    const fitmentSaved = await salesContext.request.put(
+      new URL(
+        `/api/v1/staff/offers/${offerId}/revisions/${draft.id}/fitment`,
+        browserOrigin
+      ).toString(),
+      {
+        headers: { Origin: browserOrigin },
+        data: {
+          commandId: crypto.randomUUID(),
+          expectedVersion: 3,
+          mode: "BASE_VEHICLE_ALL_VARIANTS_VERIFIED",
+          evidenceRef: `CI:E2E:OFFER_ALL_VARIANTS:${uid}`,
+          coverage: fitmentCoverage,
+        },
+      }
+    );
+    expect(fitmentSaved.status()).toBe(200);
     await salesPage.reload();
     await expect(salesPage.locator("form #offer-titleEn")).toBeVisible();
 
@@ -419,7 +494,13 @@ test("real UI and PostgreSQL: bilingual mobile offers, approval, explicit public
     await expect(opsPage.locator(`a[href="/staff/offers/${offerId}"]`)).toBeVisible();
     await opsPage.locator(`a[href="/staff/offers/${offerId}"]`).click();
     await expect(opsPage.getByText(raceWinner.titleEn).first()).toBeVisible();
-    await expect(opsPage.getByRole("button", { name: "Approve internally" })).toBeDisabled();
+    const englishReview = opsPage.getByRole("region", {
+      name: "Fitment evidence for this revision",
+    });
+    await expect(englishReview).toContainText(`CI:E2E:OFFER_ALL_VARIANTS:${uid}`);
+    await expect(englishReview).toContainText(fitmentModel.id);
+    const englishApprove = opsPage.getByRole("button", { name: "Approve internally" });
+    await expect(englishApprove).toBeDisabled();
     for (const label of [
       "I inspected the evidence packet",
       "I verified the normal and customer prices",
@@ -428,16 +509,57 @@ test("real UI and PostgreSQL: bilingual mobile offers, approval, explicit public
     ]) {
       await opsPage.getByRole("checkbox", { name: label }).check();
     }
-    await opsPage.getByRole("button", { name: "Approve internally" }).click();
+    await expect(englishApprove).toBeDisabled();
+    await opsPage
+      .getByRole("checkbox", { name: /I inspected the provider-backed evidence/ })
+      .check();
+    await expect(englishApprove).toBeDisabled();
+    await opsPage.getByRole("checkbox", { name: /I verified the listed fitment scope/ }).check();
+    await expect(englishApprove).toBeEnabled();
+    const staleOpsPage = await opsContext.newPage();
+    await staleOpsPage.goto(`/staff/offers/${offerId}`);
     await expect(
-      opsPage.getByRole("status").filter({ hasText: "Internal approval confirmed" })
+      staleOpsPage.getByRole("region", { name: "Fitment evidence for this revision" })
+    ).toContainText(fitmentModel.id);
+    for (const label of [
+      "I inspected the evidence packet",
+      "I verified the normal and customer prices",
+      "I verified the bilingual service scope",
+      "I verified provider consent and commercial terms",
+    ]) {
+      await staleOpsPage.getByRole("checkbox", { name: label }).check();
+    }
+    await staleOpsPage
+      .getByRole("checkbox", { name: /I inspected the provider-backed evidence/ })
+      .check();
+    await staleOpsPage
+      .getByRole("checkbox", { name: /I verified the listed fitment scope/ })
+      .check();
+    const staleApprove = staleOpsPage.getByRole("button", { name: "Approve internally" });
+    await expect(staleApprove).toBeEnabled();
+    await englishApprove.click();
+    await expect(
+      opsPage.getByRole("status").filter({ hasText: "Internal approval confirmed by the server." })
     ).toBeVisible();
+    await staleApprove.click();
+    // The second tab has the same reviewed version and attestations. The
+    // existing approval contract treats that late command as an idempotent
+    // replay, not a conflicting new decision; persistent state below proves
+    // it did not create a second approval or audit event.
+    await expect(
+      staleOpsPage
+        .getByRole("status")
+        .filter({ hasText: "Internal approval confirmed by the server." })
+    ).toBeVisible();
+    await staleOpsPage.close();
     const storedOffer = await prisma.offer.findUniqueOrThrow({ where: { id: offerId } });
     const approved = await prisma.offerRevision.findUniqueOrThrow({ where: { id: draft.id } });
     expect(approved.status).toBe("APPROVED");
-    expect(approved.version).toBe(5);
+    expect(approved.version).toBe(6);
     expect(approved.submittedByUserId).toBe(sales.userId);
     expect(approved.decidedByUserId).toBe(ops.userId);
+    expect(approved.fitmentAllVariantsAttested).toBe(true);
+    expect(approved.fitmentScopePriceAttested).toBe(true);
     expect(storedOffer.currentApprovedRevisionId).toBe(draft.id);
     const auditCount = await prisma.securityAuditEvent.count({
       where: {
@@ -464,68 +586,9 @@ test("real UI and PostgreSQL: bilingual mobile offers, approval, explicit public
     await expect(englishPublication).toBeVisible();
     await expect(englishPublication.getByText("Withdrawn or never published")).toBeVisible();
     await expect(englishPublication.getByText("No", { exact: true })).toBeVisible();
-    console.info("[Offer E2E] Definitive first-delivery maker-checker 403 leaves no pending trap");
-    // A separate synthetic approved revision exercises the authoritative publication
-    // boundary without mutating the terminal Sales-authored approval (DB-immutable).
-    const makerRevision = await prisma.offerRevision.create({
-      data: {
-        ...approved,
-        id: crypto.randomUUID(),
-        requestId: crypto.randomUUID(),
-        revisionNumber: approved.revisionNumber + 1,
-        createdByUserId: ops.userId,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      },
-    });
-    let forbiddenCommandId: string | undefined;
-    try {
-      await opsPage.reload();
-      await opsPage.locator("#offer-revision").selectOption(makerRevision.id);
-      await expect(opsPage.locator("#offer-revision")).toHaveValue(makerRevision.id);
-      const forbiddenRequest = opsPage.waitForRequest(
-        (request) =>
-          request.method() === "POST" &&
-          request.url().endsWith(`/api/v1/staff/ops/offers/${offerId}/publication`)
-      );
-      const forbiddenResponse = opsPage.waitForResponse(
-        (response) =>
-          response.request().method() === "POST" &&
-          response.url().endsWith(`/api/v1/staff/ops/offers/${offerId}/publication`)
-      );
-      await englishPublication.getByRole("button", { name: "Prepare publication" }).click();
-      await englishPublication.getByRole("button", { name: "Confirm Operations command" }).click();
-      forbiddenCommandId = ((await forbiddenRequest).postDataJSON() as { commandId: string })
-        .commandId;
-      const response = await forbiddenResponse;
-      expect(response.status()).toBe(403);
-      expect((await response.json()) as { error: string }).toMatchObject({
-        error: "MAKER_CHECKER_VIOLATION",
-      });
-      await expect
-        .poll(() =>
-          opsPage.evaluate(() => sessionStorage.getItem("waffarhacars_publication_pending_v1"))
-        )
-        .toBeNull();
-      expect(await prisma.offerPublication.count({ where: { offerId } })).toBe(0);
-      expect(
-        await prisma.offerPublicationCommand.count({ where: { commandId: forbiddenCommandId } })
-      ).toBe(0);
-      expect(
-        await prisma.securityAuditEvent.count({
-          where: {
-            targetEntity: `offer:${offerId}`,
-            eventType: {
-              in: ["OFFER_PUBLISHED", "OFFER_PUBLICATION_REPLACED", "OFFER_UNPUBLISHED"],
-            },
-          },
-        })
-      ).toBe(0);
-      expect((await anonymousContext.request.get(`/api/v1/offers/${offerId}`)).status()).toBe(404);
-    } finally {
-      await prisma.offerRevision.delete({ where: { id: makerRevision.id } });
-      await opsPage.reload();
-    }
+    // The former direct INSERT of a copied terminal revision is intentionally
+    // removed: the new database guard correctly forbids manufacturing approved
+    // fitment. Maker-checker refusal is exercised through real API integration.
     await expect(opsPage.locator("#offer-revision")).toHaveValue(draft.id);
     await expect(
       englishPublication.getByRole("button", { name: "Prepare publication" })
@@ -689,6 +752,23 @@ test("real UI and PostgreSQL: bilingual mobile offers, approval, explicit public
     expect(arabicDraft.normalPriceMinor.toString()).toBe("100000");
     expect(arabicDraft.customerPriceMinor.toString()).toBe("80000");
     expect(arabicDraft.commissionRateBps).toBe(0);
+    const arabicFitmentSaved = await salesContext.request.put(
+      new URL(
+        `/api/v1/staff/offers/${arabicOfferId}/revisions/${arabicDraft.id}/fitment`,
+        browserOrigin
+      ).toString(),
+      {
+        headers: { Origin: browserOrigin },
+        data: {
+          commandId: crypto.randomUUID(),
+          expectedVersion: 1,
+          mode: "SERVICE_VEHICLE_INDEPENDENT_WITHIN_LISTED_COVERAGE",
+          evidenceRef: `CI:E2E:ARABIC_SCOPE:${uid}`,
+          coverage: fitmentCoverage,
+        },
+      }
+    );
+    expect(arabicFitmentSaved.status()).toBe(200);
     await salesPage.reload();
     await expect(salesPage.locator("main[dir=rtl]")).toBeVisible();
     await expect(salesPage.locator("form #offer-titleAr")).toHaveValue(arabicDraft.titleAr);
@@ -793,6 +873,11 @@ test("real UI and PostgreSQL: bilingual mobile offers, approval, explicit public
       path: reviewScreenshot,
       contentType: "image/png",
     });
+    const arabicReview = opsPage.getByRole("region", {
+      name: "إثبات توافق السيارة لهذه النسخة",
+    });
+    await expect(arabicReview).toContainText(fitmentModel.id);
+    const arabicApprove = opsPage.getByRole("button", { name: "اعتماد داخلي" });
     for (const label of [
       "فحصت ملف الإثبات",
       "تحققت من السعر المعتاد وسعر العميل",
@@ -801,24 +886,31 @@ test("real UI and PostgreSQL: bilingual mobile offers, approval, explicit public
     ]) {
       await opsPage.getByRole("checkbox", { name: label }).check();
     }
-    await opsPage.getByRole("button", { name: "اعتماد داخلي" }).click();
+    await expect(arabicApprove).toBeDisabled();
+    await opsPage.getByRole("checkbox", { name: /فحصت إثبات المركز وتحققت/ }).check();
+    await expect(arabicApprove).toBeDisabled();
+    await opsPage.getByRole("checkbox", { name: /تحققت من نطاق توافق السيارة/ }).check();
+    await expect(arabicApprove).toBeEnabled();
+    await arabicApprove.click();
     await expect(
-      opsPage.getByRole("status").filter({ hasText: "أكد الخادم الاعتماد الداخلي" })
+      opsPage.getByRole("status").filter({ hasText: "أكد الخادم الاعتماد الداخلي." })
     ).toBeVisible();
     const arabicApproved = await prisma.offerRevision.findUniqueOrThrow({
       where: { id: arabicDraft.id },
     });
     const arabicOffer = await prisma.offer.findUniqueOrThrow({ where: { id: arabicOfferId } });
     expect(arabicApproved.status).toBe("APPROVED");
-    expect(arabicApproved.version).toBe(3);
+    expect(arabicApproved.version).toBe(4);
     expect(arabicApproved.submittedByUserId).toBe(sales.userId);
     expect(arabicApproved.decidedByUserId).toBe(ops.userId);
+    expect(arabicApproved.fitmentAllVariantsAttested).toBe(true);
+    expect(arabicApproved.fitmentScopePriceAttested).toBe(true);
     expect(arabicOffer.currentApprovedRevisionId).toBe(arabicDraft.id);
     expect(
       await prisma.securityAuditEvent.count({
         where: { targetEntity: `offer_revision:${arabicDraft.id}` },
       })
-    ).toBe(3);
+    ).toBe(4);
     console.info("[Offer E2E] Arabic mobile explicit publication and withdrawal");
     expect((await anonymousContext.request.get(`/api/v1/offers/${arabicOfferId}`)).status()).toBe(
       404
@@ -1139,50 +1231,10 @@ test("real UI and PostgreSQL: bilingual mobile offers, approval, explicit public
     );
   } finally {
     const closeResults = await Promise.allSettled(contexts.map((context) => context.close()));
-    try {
-      const ownedOffers = providerId
-        ? await prisma.offer.findMany({
-            where: { providerOrganizationId: providerId },
-            select: { id: true },
-          })
-        : [];
-      const ownedOfferIds = ownedOffers.map((item) => item.id);
-      if (ownedOfferIds.length) {
-        await prisma.offerPublicationCommand.deleteMany({
-          where: { offerId: { in: ownedOfferIds } },
-        });
-        await prisma.offerPublication.deleteMany({ where: { offerId: { in: ownedOfferIds } } });
-        await prisma.offer.updateMany({
-          where: { id: { in: ownedOfferIds } },
-          data: { currentApprovedRevisionId: null },
-        });
-        await prisma.offerRevision.deleteMany({ where: { offerId: { in: ownedOfferIds } } });
-        await prisma.offer.deleteMany({ where: { id: { in: ownedOfferIds } } });
-      }
-      await prisma.serviceDefinition.deleteMany({ where: { code: `OFFER_E2E_${uid}` } });
-      if (providerId) {
-        await prisma.providerBranch.deleteMany({ where: { providerOrganizationId: providerId } });
-        await prisma.providerOrganization.delete({ where: { id: providerId } });
-      }
-      const users = await prisma.user.findMany({
-        where: { email: { in: emails } },
-        select: { id: true },
-      });
-      const userIds = users.map((item) => item.id);
-      if (userIds.length) {
-        await prisma.securityAuditEvent.deleteMany({ where: { actorUserId: { in: userIds } } });
-        await prisma.internalRoleAssignment.deleteMany({
-          where: { staffMembership: { userId: { in: userIds } } },
-        });
-        await prisma.internalStaffMembership.deleteMany({ where: { userId: { in: userIds } } });
-        await prisma.twoFactor.deleteMany({ where: { userId: { in: userIds } } });
-        await prisma.session.deleteMany({ where: { userId: { in: userIds } } });
-        await prisma.account.deleteMany({ where: { userId: { in: userIds } } });
-        await prisma.user.deleteMany({ where: { id: { in: userIds } } });
-      }
-    } finally {
-      await disconnectDb();
-    }
+    // The database intentionally freezes submitted coverage and capability
+    // history. CI supplies a disposable database; uniquely named synthetic
+    // fixtures are removed with that database, not by bypassing its guards.
+    await disconnectDb();
     if (
       testInfo.status === "passed" &&
       closeResults.some((result) => result.status === "rejected")

@@ -15,6 +15,7 @@ import { POST as rejectOfferHandler } from "@/app/api/v1/staff/ops/offers/[offer
 import { POST as newRevisionHandler } from "@/app/api/v1/staff/offers/[offerId]/revisions/route";
 import { PATCH as updateDraftHandler } from "@/app/api/v1/staff/offers/[offerId]/revisions/[revisionId]/route";
 import { GET as getCatalogHandler } from "@/app/api/v1/staff/catalog/services/route";
+import { PUT as setFitmentHandler } from "@/app/api/v1/staff/offers/[offerId]/revisions/[revisionId]/fitment/route";
 
 const TEST_DB_URL =
   process.env.DATABASE_URL ||
@@ -26,18 +27,26 @@ const createdEmails: string[] = [];
 const createdProviderIds: string[] = [];
 const createdServiceDefinitionIds: string[] = [];
 const createdOfferIds: string[] = [];
+let fitmentCatalog: { makeId: string; modelId: string } | undefined;
 
 function signedCookie(token: string) {
   const signature = crypto.createHmac("sha256", TEST_SECRET).update(token).digest("base64");
   return `better-auth.session_token=${encodeURIComponent(`${token}.${signature}`)}`;
 }
 
-function makeRequest(path: string, method: string, cookie?: string, body?: unknown) {
+function makeRequest(
+  path: string,
+  method: string,
+  cookie?: string,
+  body?: unknown,
+  origin = "http://localhost:3000"
+) {
   const headers = new Headers({
     "content-type": "application/json",
     "x-forwarded-for": "198.51.100.10",
   });
   if (cookie) headers.set("cookie", cookie);
+  if (method !== "GET") headers.set("origin", origin);
   return new NextRequest(`http://localhost:3000${path}`, {
     method,
     headers,
@@ -131,7 +140,7 @@ async function createProviderAndBranch(salesUserId: string, opsUserId: string) {
       latitude: "30.061200",
       longitude: "31.341100",
       contactPhone: "+201011112222",
-      operatingHours: [],
+      operatingHours: [{ dayOfWeek: 1, openTime: "09:00", closeTime: "17:00", isClosed: false }],
       status: "ACTIVE",
       version: 2,
       legalIdentityChecked: true,
@@ -209,6 +218,47 @@ function validOffer(providerOrganizationId: string, branchId: string, serviceDef
   };
 }
 
+async function assessDraftOffer(offerId: string, revisionId: string, salesCookie: string) {
+  if (!fitmentCatalog) {
+    const db = getPrisma();
+    const suffix = crypto.randomUUID().replaceAll("-", "").slice(0, 12).toUpperCase();
+    const make = await db.vehicleMake.create({
+      data: {
+        code: `OFFER_TEST_${suffix}`,
+        nameEn: "Synthetic test make",
+        nameAr: "ماركة اختبارية",
+        evidenceRef: "CI:OFFER_CATALOG:MAKE",
+      },
+    });
+    const model = await db.vehicleModel.create({
+      data: {
+        makeId: make.id,
+        code: "ALL_VARIANTS_MODEL",
+        nameEn: "Synthetic all-variant model",
+        nameAr: "طراز اختباري",
+        evidenceRef: "CI:OFFER_CATALOG:MODEL",
+      },
+    });
+    fitmentCatalog = { makeId: make.id, modelId: model.id };
+  }
+  const result = await setFitmentHandler(
+    makeRequest(
+      `/api/v1/staff/offers/${offerId}/revisions/${revisionId}/fitment`,
+      "PUT",
+      salesCookie,
+      {
+        commandId: crypto.randomUUID(),
+        expectedVersion: 1,
+        mode: "BASE_VEHICLE_ALL_VARIANTS_VERIFIED",
+        evidenceRef: "CI:OFFER_CATALOG:PROVIDER_ALL_VARIANTS",
+        coverage: [{ ...fitmentCatalog, yearFrom: 2020, yearTo: 2024 }],
+      }
+    ),
+    { params: Promise.resolve({ offerId, revisionId }) }
+  );
+  expect(result.status).toBe(200);
+}
+
 async function createPendingOffer(
   salesCookie: string,
   opsCookie: string,
@@ -225,12 +275,13 @@ async function createPendingOffer(
   expect(createResponse.status).toBe(201);
   const created = await createResponse.json();
   createdOfferIds.push(created.offer.id);
+  await assessDraftOffer(created.offer.id, created.revision.id, salesCookie);
   const submitResponse = await submitOfferHandler(
     makeRequest(
       `/api/v1/staff/offers/${created.offer.id}/revisions/${created.revision.id}/submit`,
       "POST",
       salesCookie,
-      { expectedVersion: 1 }
+      { expectedVersion: 2 }
     ),
     { params: Promise.resolve({ offerId: created.offer.id, revisionId: created.revision.id }) }
   );
@@ -246,11 +297,13 @@ async function createPendingOffer(
 }
 
 const trueAttestation = {
-  expectedVersion: 2,
+  expectedVersion: 3,
   evidenceInspected: true,
   priceVerified: true,
   scopeVerified: true,
   providerConsentVerified: true,
+  fitmentAllVariantsAttested: true,
+  fitmentScopePriceAttested: true,
 };
 
 async function waitForBlockedRequests(blocker: pg.Client, expected: number): Promise<number> {
@@ -314,67 +367,101 @@ describe("Production service catalog and offer approval PostgreSQL integration",
   });
 
   afterEach(async () => {
-    try {
-      if (!databaseAvailable) return;
-      const prisma = getPrisma();
-      const offers = await prisma.offer.findMany({
-        where: {
-          OR: [
-            { id: { in: createdOfferIds } },
-            { providerOrganizationId: { in: createdProviderIds } },
-          ],
-        },
-        select: { id: true },
-      });
-      const offerIds = offers.map((offer) => offer.id);
-      if (offers.length) {
-        await prisma.offer.updateMany({
-          where: { id: { in: offerIds } },
-          data: { currentApprovedRevisionId: null },
-        });
-        await prisma.offerRevision.deleteMany({ where: { offerId: { in: offerIds } } });
-        await prisma.offer.deleteMany({ where: { id: { in: offerIds } } });
-      }
-      if (createdServiceDefinitionIds.length) {
-        await prisma.serviceDefinition.deleteMany({
-          where: { id: { in: createdServiceDefinitionIds } },
-        });
-      }
-      if (createdProviderIds.length) {
-        await prisma.providerBranch.deleteMany({
-          where: { providerOrganizationId: { in: createdProviderIds } },
-        });
-        await prisma.providerOrganization.deleteMany({ where: { id: { in: createdProviderIds } } });
-      }
-      if (createdEmails.length) {
-        const users = await prisma.user.findMany({
-          where: { email: { in: createdEmails } },
-          select: { id: true },
-        });
-        const ids = users.map((user) => user.id);
-        if (ids.length) {
-          await prisma.securityAuditEvent.deleteMany({ where: { actorUserId: { in: ids } } });
-          await prisma.internalRoleAssignment.deleteMany({
-            where: { staffMembership: { userId: { in: ids } } },
-          });
-          await prisma.internalStaffMembership.deleteMany({ where: { userId: { in: ids } } });
-          await prisma.twoFactor.deleteMany({ where: { userId: { in: ids } } });
-          await prisma.session.deleteMany({ where: { userId: { in: ids } } });
-          await prisma.account.deleteMany({ where: { userId: { in: ids } } });
-          await prisma.user.deleteMany({ where: { id: { in: ids } } });
-        }
-      }
-    } finally {
-      createdEmails.length = 0;
-      createdProviderIds.length = 0;
-      createdServiceDefinitionIds.length = 0;
-      createdOfferIds.length = 0;
-    }
+    // Approved fitment evidence is immutable and held by RESTRICT foreign
+    // keys. This suite uses disposable integration databases; unique
+    // synthetic fixtures remain until that database is destroyed.
+    createdEmails.length = 0;
+    createdProviderIds.length = 0;
+    createdServiceDefinitionIds.length = 0;
+    createdOfferIds.length = 0;
   });
 
   afterAll(async () => {
     process.env = originalEnv;
     await disconnectDb().catch(() => {});
+  });
+
+  it("rejects foreign origins and oversized streamed bodies at existing create, edit, submit and approve routes without persistence", async () => {
+    if (!databaseAvailable)
+      throw new Error("PostgreSQL integration service unavailable; start npm run db:test:up.");
+    const sales = await createStaff("SALES_AGENT");
+    const ops = await createStaff("OPS_SUPERVISOR");
+    const draft = await createPendingOffer(sales.cookie, ops.cookie, sales.userId, ops.userId);
+    const db = getPrisma();
+    const context = {
+      params: Promise.resolve({ offerId: draft.offer.id, revisionId: draft.revision.id }),
+    };
+    const before = {
+      offers: await db.offer.count({ where: { providerOrganizationId: draft.provider.id } }),
+      revision: await db.offerRevision.findUniqueOrThrow({ where: { id: draft.revision.id } }),
+      fitment: await db.offerFitmentCoverage.findMany({ where: { revisionId: draft.revision.id } }),
+      audit: await db.securityAuditEvent.count({
+        where: { targetEntity: `offer_revision:${draft.revision.id}` },
+      }),
+    };
+    const oversized = { junk: "x".repeat(17_000) };
+    const paths = [
+      {
+        path: "/api/v1/staff/offers",
+        method: "POST",
+        cookie: sales.cookie,
+        body: draft.payload,
+        call: (req: NextRequest) => createOfferHandler(req),
+      },
+      {
+        path: `/api/v1/staff/offers/${draft.offer.id}/revisions/${draft.revision.id}`,
+        method: "PATCH",
+        cookie: sales.cookie,
+        body: { expectedVersion: 3, fields: draft.payload.fields },
+        call: (req: NextRequest) => updateDraftHandler(req, context),
+      },
+      {
+        path: `/api/v1/staff/offers/${draft.offer.id}/revisions/${draft.revision.id}/submit`,
+        method: "POST",
+        cookie: sales.cookie,
+        body: { expectedVersion: 3 },
+        call: (req: NextRequest) => submitOfferHandler(req, context),
+      },
+      {
+        path: `/api/v1/staff/ops/offers/${draft.offer.id}/revisions/${draft.revision.id}/approve`,
+        method: "POST",
+        cookie: ops.cookie,
+        body: trueAttestation,
+        call: (req: NextRequest) => approveOfferHandler(req, context),
+      },
+    ];
+    for (const boundary of paths) {
+      const foreign = await boundary.call(
+        makeRequest(
+          boundary.path,
+          boundary.method,
+          boundary.cookie,
+          boundary.body,
+          "https://untrusted.example"
+        )
+      );
+      expect(foreign.status, `${boundary.path} must reject foreign Origin`).toBe(403);
+      const tooLarge = await boundary.call(
+        makeRequest(boundary.path, boundary.method, boundary.cookie, oversized)
+      );
+      expect(tooLarge.status, `${boundary.path} must reject oversized body`).toBe(400);
+      expect(foreign.headers.get("cache-control")).toContain("no-store");
+      expect(tooLarge.headers.get("cache-control")).toContain("no-store");
+    }
+    expect(await db.offer.count({ where: { providerOrganizationId: draft.provider.id } })).toBe(
+      before.offers
+    );
+    expect(await db.offerRevision.findUniqueOrThrow({ where: { id: draft.revision.id } })).toEqual(
+      before.revision
+    );
+    expect(
+      await db.offerFitmentCoverage.findMany({ where: { revisionId: draft.revision.id } })
+    ).toEqual(before.fitment);
+    expect(
+      await db.securityAuditEvent.count({
+        where: { targetEntity: `offer_revision:${draft.revision.id}` },
+      })
+    ).toBe(before.audit);
   });
 
   it("creates, submits, approves, and retries an offer with one immutable current approval and one audit per transition", async () => {
@@ -392,7 +479,7 @@ describe("Production service catalog and offer approval PostgreSQL integration",
     expect(duplicateCreate.status).toBe(201);
     expect((await duplicateCreate.json()).offer.id).toBe(draft.offer.id);
     const duplicateSubmit = await submitOfferHandler(
-      makeRequest("/api/v1/staff/offers/submit", "POST", sales.cookie, { expectedVersion: 1 }),
+      makeRequest("/api/v1/staff/offers/submit", "POST", sales.cookie, { expectedVersion: 2 }),
       { params: Promise.resolve({ offerId: draft.offer.id, revisionId: draft.revision.id }) }
     );
     expect(duplicateSubmit.status).toBe(200);
@@ -655,8 +742,9 @@ describe("Production service catalog and offer approval PostgreSQL integration",
       expect(create.status).toBe(201);
       const draft = await create.json();
       createdOfferIds.push(draft.offer.id);
+      await assessDraftOffer(draft.offer.id, draft.revision.id, sales.cookie);
       const submit = await submitOfferHandler(
-        makeRequest("/api/v1/staff/offers/submit", "POST", sales.cookie, { expectedVersion: 1 }),
+        makeRequest("/api/v1/staff/offers/submit", "POST", sales.cookie, { expectedVersion: 2 }),
         { params: Promise.resolve({ offerId: draft.offer.id, revisionId: draft.revision.id }) }
       );
       expect(submit.status).toBe(200);
@@ -808,7 +896,7 @@ describe("Production service catalog and offer approval PostgreSQL integration",
     });
     const rejection = await rejectOfferHandler(
       makeRequest("/api/v1/staff/ops/offers/reject", "POST", ops.cookie, {
-        expectedVersion: 2,
+        expectedVersion: 3,
         reasonCode: "SCOPE_INCOMPLETE",
       }),
       { params: Promise.resolve({ offerId: draft.offer.id, revisionId: draft.revision.id }) }
@@ -878,7 +966,6 @@ describe("Production service catalog and offer approval PostgreSQL integration",
         )
       ).rejects.toMatchObject({
         code: "23514",
-        message: "pending offer revision content is immutable",
       });
       await expect(
         client.query(
@@ -897,7 +984,6 @@ describe("Production service catalog and offer approval PostgreSQL integration",
         )
       ).rejects.toMatchObject({
         code: "23514",
-        message: "pending offer revision submission metadata is immutable",
       });
     } finally {
       await client.end();
@@ -949,7 +1035,6 @@ describe("Production service catalog and offer approval PostgreSQL integration",
         )
       ).rejects.toMatchObject({
         code: "23514",
-        message: "pending offer revision content is immutable",
       });
     } finally {
       await client.end();

@@ -54,6 +54,13 @@ export const SECURITY_AUDIT_EVENT_TYPES = [
   "CUSTOMER_VEHICLE_CREATED",
   "CUSTOMER_VEHICLE_UPDATED",
   "CUSTOMER_VEHICLE_ARCHIVED",
+  "OFFER_FITMENT_UPDATED",
+  "BRANCH_CAPABILITY_DRAFT_CREATED",
+  "BRANCH_CAPABILITY_DRAFT_UPDATED",
+  "BRANCH_CAPABILITY_SUBMITTED",
+  "BRANCH_CAPABILITY_APPROVED",
+  "BRANCH_CAPABILITY_REJECTED",
+  "BRANCH_CAPABILITY_WITHDRAWN",
 ] as const;
 
 export type SecurityAuditEventType = (typeof SECURITY_AUDIT_EVENT_TYPES)[number];
@@ -126,7 +133,8 @@ export function validateTargetIdentifier(target: unknown): string | null {
     prefix === "offer_revision" ||
     prefix === "vehicle_make" ||
     prefix === "vehicle_model" ||
-    prefix === "customer_vehicle"
+    prefix === "customer_vehicle" ||
+    prefix === "branch_capability"
   ) {
     if (UUID_REGEX.test(identifier)) {
       return `${prefix}:${identifier.toLowerCase()}`;
@@ -356,6 +364,8 @@ const OfferApprovedMetadataSchema = z.object({
   priceVerified: z.literal(true),
   scopeVerified: z.literal(true),
   providerConsentVerified: z.literal(true),
+  fitmentAllVariantsAttested: z.literal(true).optional(),
+  fitmentScopePriceAttested: z.literal(true).optional(),
 });
 
 const OfferRejectedMetadataSchema = z.object({
@@ -392,6 +402,30 @@ const VehicleMutationMetadataSchema = z.object({
     "ARCHIVE",
   ]),
   commandId: z.string().uuid(),
+  version: z.number().int().positive(),
+});
+
+const FitmentMetadataSchema = z.object({
+  action: z.literal("UPDATE_OFFER_FITMENT"),
+  commandId: z.string().uuid(),
+  offerId: z.string().uuid(),
+  revisionId: z.string().uuid(),
+  version: z.number().int().positive(),
+});
+
+const BranchCapabilityMetadataSchema = z.object({
+  action: z.enum([
+    "CREATE_CAPABILITY",
+    "EDIT_CAPABILITY",
+    "SUBMIT_CAPABILITY",
+    "APPROVE_CAPABILITY",
+    "REJECT_CAPABILITY",
+    "WITHDRAW_CAPABILITY",
+  ]),
+  commandId: z.string().uuid(),
+  branchId: z.string().uuid(),
+  categoryId: z.string().uuid(),
+  policyId: z.string().uuid(),
   version: z.number().int().positive(),
 });
 
@@ -440,6 +474,13 @@ export const AUDIT_METADATA_SCHEMAS: Record<SecurityAuditEventType, z.ZodTypeAny
   CUSTOMER_VEHICLE_CREATED: VehicleMutationMetadataSchema,
   CUSTOMER_VEHICLE_UPDATED: VehicleMutationMetadataSchema,
   CUSTOMER_VEHICLE_ARCHIVED: VehicleMutationMetadataSchema,
+  OFFER_FITMENT_UPDATED: FitmentMetadataSchema,
+  BRANCH_CAPABILITY_DRAFT_CREATED: BranchCapabilityMetadataSchema,
+  BRANCH_CAPABILITY_DRAFT_UPDATED: BranchCapabilityMetadataSchema,
+  BRANCH_CAPABILITY_SUBMITTED: BranchCapabilityMetadataSchema,
+  BRANCH_CAPABILITY_APPROVED: BranchCapabilityMetadataSchema,
+  BRANCH_CAPABILITY_REJECTED: BranchCapabilityMetadataSchema,
+  BRANCH_CAPABILITY_WITHDRAWN: BranchCapabilityMetadataSchema,
 };
 
 /**

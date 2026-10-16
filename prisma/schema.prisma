@@ -44,6 +44,10 @@ model User {
   vehicleCatalogChanges VehicleCatalogEntry[] @relation("VehicleCatalogActor")
   customerVehicles CustomerVehicle[]
   vehicleCommands VehicleCommand[]
+  createdCapabilityVersions BranchCapabilityVersion[] @relation("CapabilityCreatedBy")
+  submittedCapabilityVersions BranchCapabilityVersion[] @relation("CapabilitySubmittedBy")
+  decidedCapabilityVersions BranchCapabilityVersion[] @relation("CapabilityDecidedBy")
+  fitmentCommands FitmentCommand[]
 
   @@unique([email])
   @@unique([phoneNumber])
@@ -166,6 +170,8 @@ model VehicleMake {
   updatedAt DateTime @updatedAt
   models VehicleModel[]
   vehicles CustomerVehicle[]
+  offerFitmentCoverage OfferFitmentCoverage[]
+  capabilityCoverage BranchCapabilityCoverage[]
   @@index([isActive, code])
   @@map("vehicle_makes")
 }
@@ -183,6 +189,8 @@ model VehicleModel {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   vehicles CustomerVehicle[]
+  offerFitmentCoverage OfferFitmentCoverage[]
+  capabilityCoverage BranchCapabilityCoverage[]
   // Code is unique per make, not globally.
   @@unique([makeId, code])
   @@unique([id, makeId])
@@ -368,6 +376,19 @@ enum OfferRevisionStatus {
   REJECTED
 }
 
+enum OfferFitmentMode {
+  BASE_VEHICLE_ALL_VARIANTS_VERIFIED
+  SERVICE_VEHICLE_INDEPENDENT_WITHIN_LISTED_COVERAGE
+}
+
+enum BranchCapabilityStatus {
+  DRAFT
+  PENDING_REVIEW
+  ACTIVE
+  REJECTED
+  WITHDRAWN
+}
+
 enum OfferBookingRule {
   APPOINTMENT_REQUIRED
   WALK_IN_ALLOWED
@@ -481,6 +502,8 @@ model ProviderBranch {
   createdAt              DateTime             @default(now())
   updatedAt              DateTime             @updatedAt
   offers Offer[]
+  capabilityVersions BranchCapabilityVersion[]
+  currentCapabilities BranchCapabilityCurrent[]
 
   @@unique([providerOrganizationId, branchCode])
   @@unique([id, providerOrganizationId])
@@ -498,6 +521,8 @@ model ServiceCategory {
   createdAt   DateTime            @default(now())
   updatedAt   DateTime            @updatedAt
   definitions ServiceDefinition[]
+  capabilityVersions BranchCapabilityVersion[]
+  currentCapabilities BranchCapabilityCurrent[]
 
   @@index([isActive, sortOrder])
   @@map("service_categories")
@@ -597,6 +622,11 @@ model OfferRevision {
   commercialTermsAgreedAt DateTime
   commissionBasis         OfferCommissionBasis
   commissionRateBps       Int
+  fitmentMode             OfferFitmentMode?
+  fitmentEvidenceRef      String?                @db.VarChar(128)
+  fitmentAllVariantsAttested Boolean             @default(false)
+  fitmentScopePriceAttested Boolean              @default(false)
+  fitmentCoverage         OfferFitmentCoverage[]
   createdByUserId         String                 @db.Uuid
   createdByUser           User                   @relation("OfferRevisionCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
   submittedByUserId       String?                @db.Uuid
@@ -661,4 +691,101 @@ model OfferPublicationCommand {
   @@index([offerId, createdAt])
   @@index([actorUserId, createdAt])
   @@map("offer_publication_commands")
+}
+
+model OfferFitmentCoverage {
+  id         String        @id @default(dbgenerated("pg_catalog.gen_random_uuid()")) @db.Uuid
+  revisionId String        @db.Uuid
+  revision   OfferRevision @relation(fields: [revisionId], references: [id], onDelete: Restrict)
+  makeId     String        @db.Uuid
+  make       VehicleMake   @relation(fields: [makeId], references: [id], onDelete: Restrict)
+  modelId    String        @db.Uuid
+  model      VehicleModel  @relation(fields: [modelId, makeId], references: [id, makeId], onDelete: Restrict)
+  yearFrom   Int
+  yearTo     Int
+  createdAt  DateTime      @default(now())
+
+  @@index([revisionId, modelId, yearFrom, yearTo])
+  @@map("offer_fitment_coverage")
+}
+
+model BranchCapabilityVersion {
+  id                String                 @id @default(dbgenerated("pg_catalog.gen_random_uuid()")) @db.Uuid
+  branchId          String                 @db.Uuid
+  branch            ProviderBranch         @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  categoryId        String                 @db.Uuid
+  category          ServiceCategory        @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  sequenceNumber    Int
+  status            BranchCapabilityStatus @default(DRAFT)
+  version           Int                    @default(1)
+  evidenceRef       String?                @db.VarChar(128)
+  attested          Boolean                @default(false)
+  createdByUserId   String                 @db.Uuid
+  createdByUser     User                   @relation("CapabilityCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  submittedByUserId String?                @db.Uuid
+  submittedByUser   User?                  @relation("CapabilitySubmittedBy", fields: [submittedByUserId], references: [id], onDelete: Restrict)
+  submittedAt       DateTime?
+  decidedByUserId   String?                @db.Uuid
+  decidedByUser     User?                  @relation("CapabilityDecidedBy", fields: [decidedByUserId], references: [id], onDelete: Restrict)
+  decidedAt         DateTime?
+  rejectionReason   String?                @db.VarChar(1000)
+  withdrawnAt       DateTime?
+  createdAt         DateTime               @default(now())
+  updatedAt         DateTime               @updatedAt
+  coverage          BranchCapabilityCoverage[]
+  currentFor        BranchCapabilityCurrent[] @relation("CurrentCapabilityVersion")
+
+  @@unique([branchId, categoryId, sequenceNumber])
+  @@unique([id, branchId, categoryId])
+  @@index([branchId, categoryId, status])
+  @@map("branch_capability_versions")
+}
+
+model BranchCapabilityCoverage {
+  id        String                  @id @default(dbgenerated("pg_catalog.gen_random_uuid()")) @db.Uuid
+  versionId String                  @db.Uuid
+  version   BranchCapabilityVersion @relation(fields: [versionId], references: [id], onDelete: Restrict)
+  makeId    String                  @db.Uuid
+  make      VehicleMake             @relation(fields: [makeId], references: [id], onDelete: Restrict)
+  modelId   String                  @db.Uuid
+  model     VehicleModel            @relation(fields: [modelId, makeId], references: [id, makeId], onDelete: Restrict)
+  yearFrom  Int
+  yearTo    Int
+  createdAt DateTime                @default(now())
+
+  @@index([versionId, modelId, yearFrom, yearTo])
+  @@map("branch_capability_coverage")
+}
+
+model BranchCapabilityCurrent {
+  branchId        String                   @db.Uuid
+  branch          ProviderBranch           @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  categoryId      String                   @db.Uuid
+  category        ServiceCategory          @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  activeVersionId String?                  @db.Uuid
+  activeVersion   BranchCapabilityVersion? @relation("CurrentCapabilityVersion", fields: [activeVersionId, branchId, categoryId], references: [id, branchId, categoryId], onDelete: Restrict)
+  version         Int                      @default(1)
+  updatedAt       DateTime                 @updatedAt
+
+  @@id([branchId, categoryId])
+  @@index([activeVersionId])
+  @@map("branch_capability_current")
+}
+
+model FitmentCommand {
+  commandId     String   @id @db.Uuid
+  actorUserId   String   @db.Uuid
+  actor         User     @relation(fields: [actorUserId], references: [id], onDelete: Restrict)
+  domain        String   @db.VarChar(16)
+  action        String   @db.VarChar(32)
+  resourceId    String   @db.Uuid
+  fingerprint   String   @db.VarChar(64)
+  outcome       String   @db.VarChar(16)
+  httpStatus    Int
+  errorCode     String?  @db.VarChar(64)
+  resultVersion Int?
+  createdAt     DateTime @default(now())
+
+  @@index([actorUserId, domain, resourceId, createdAt])
+  @@map("fitment_commands")
 }

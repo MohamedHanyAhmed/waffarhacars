@@ -122,6 +122,8 @@ export const ApproveOfferSchema = z.object({
   priceVerified: z.literal(true),
   scopeVerified: z.literal(true),
   providerConsentVerified: z.literal(true),
+  fitmentAllVariantsAttested: z.literal(true),
+  fitmentScopePriceAttested: z.literal(true),
 });
 
 export const RejectOfferSchema = z.object({

@@ -34,13 +34,28 @@ const attestations = [
   "priceVerified",
   "scopeVerified",
   "providerConsentVerified",
+  "fitmentAllVariantsAttested",
+  "fitmentScopePriceAttested",
 ] as const;
 const attestationLabels = {
   evidenceInspected: "staffOffers.attestEvidence",
   priceVerified: "staffOffers.attestPrice",
   scopeVerified: "staffOffers.attestScope",
   providerConsentVerified: "staffOffers.attestConsent",
+  fitmentAllVariantsAttested: "staffOffers.attestFitmentVariants",
+  fitmentScopePriceAttested: "staffOffers.attestFitmentScopePrice",
 } as const;
+type OfferFitmentReview = {
+  offerId: string;
+  revisionId: string;
+  version: number;
+  mode:
+    | "BASE_VEHICLE_ALL_VARIANTS_VERIFIED"
+    | "SERVICE_VEHICLE_INDEPENDENT_WITHIN_LISTED_COVERAGE"
+    | null;
+  evidenceRef: string | null;
+  coverage: Array<{ makeId: string; modelId: string; yearFrom: number; yearTo: number }>;
+};
 const reasons = [
   "PRICE_EVIDENCE_UNAVAILABLE",
   "PRICE_NOT_VERIFIED",
@@ -92,7 +107,14 @@ export default function StaffOfferDetailPage() {
     priceVerified: false,
     scopeVerified: false,
     providerConsentVerified: false,
+    fitmentAllVariantsAttested: false,
+    fitmentScopePriceAttested: false,
   });
+  const [fitmentReview, setFitmentReview] = useState<{
+    snapshotIdentity: string;
+    data: OfferFitmentReview;
+  } | null>(null);
+  const [fitmentLoadError, setFitmentLoadError] = useState(false);
   const [reason, setReason] = useState("");
   const [reload, setReload] = useState(0);
   const [publication, setPublication] = useState<StaffPublicationDto | null>(null);
@@ -267,6 +289,51 @@ export default function StaffOfferDetailPage() {
   const latest = revisions[0] ?? null;
   const snapshotIdentity = selected ? `${selected.id}:${selected.version}` : null;
   useEffect(() => {
+    if (
+      !snapshotIdentity ||
+      selected?.status !== "PENDING_REVIEW" ||
+      staff?.department !== "OPERATIONS"
+    )
+      return;
+    const controller = new AbortController();
+    let active = true;
+    queueMicrotask(() => {
+      if (!active) return;
+      setFitmentReview(null);
+      setFitmentLoadError(false);
+    });
+    void offerApi<{ data: OfferFitmentReview }>(
+      `/api/v1/staff/offers/${offerId}/revisions/${selected.id}/fitment`,
+      { signal: controller.signal }
+    )
+      .then((response) => {
+        if (!active || controller.signal.aborted) return;
+        if (!response.ok) {
+          if (response.status === 401) router.replace("/staff/login");
+          setFitmentLoadError(true);
+          return;
+        }
+        setFitmentReview({ snapshotIdentity, data: response.data.data });
+      })
+      .catch(() => {
+        if (active && !controller.signal.aborted) setFitmentLoadError(true);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [offerId, router, selected?.id, selected?.status, snapshotIdentity, staff?.department]);
+  const reviewedFitment =
+    fitmentReview?.snapshotIdentity === snapshotIdentity &&
+    fitmentReview.data.revisionId === selected?.id &&
+    fitmentReview.data.offerId === offerId &&
+    fitmentReview.data.version === selected?.version
+      ? fitmentReview.data
+      : null;
+  const fitmentReady = Boolean(
+    reviewedFitment?.mode && reviewedFitment.evidenceRef && reviewedFitment.coverage.length > 0
+  );
+  useEffect(() => {
     if (attestedSnapshot.current === snapshotIdentity) return;
     attestedSnapshot.current = snapshotIdentity;
     setChecks({
@@ -274,6 +341,8 @@ export default function StaffOfferDetailPage() {
       priceVerified: false,
       scopeVerified: false,
       providerConsentVerified: false,
+      fitmentAllVariantsAttested: false,
+      fitmentScopePriceAttested: false,
     });
   }, [snapshotIdentity]);
   const isSalesOwner =
@@ -521,6 +590,10 @@ export default function StaffOfferDetailPage() {
       setError(t("staffOffers.conflict"));
       return;
     }
+    if (kind === "approve" && (!fitmentReady || !attestations.every((key) => checks[key]))) {
+      setError(t("staffOffers.fitmentBlocked"));
+      return;
+    }
     if (readPendingOfferOperation()) {
       setUnknown(true);
       setManual(true);
@@ -582,6 +655,8 @@ export default function StaffOfferDetailPage() {
             priceVerified: false,
             scopeVerified: false,
             providerConsentVerified: false,
+            fitmentAllVariantsAttested: false,
+            fitmentScopePriceAttested: false,
           });
           setReload((value) => value + 1);
         } else setError(offerFailureMessage(response, t));
@@ -596,6 +671,8 @@ export default function StaffOfferDetailPage() {
         priceVerified: false,
         scopeVerified: false,
         providerConsentVerified: false,
+        fitmentAllVariantsAttested: false,
+        fitmentScopePriceAttested: false,
       });
       setMessage(
         t(
@@ -773,6 +850,8 @@ export default function StaffOfferDetailPage() {
                     priceVerified: false,
                     scopeVerified: false,
                     providerConsentVerified: false,
+                    fitmentAllVariantsAttested: false,
+                    fitmentScopePriceAttested: false,
                   });
                 }}
                 className="ms-2 rounded-lg border p-2"
@@ -983,6 +1062,68 @@ export default function StaffOfferDetailPage() {
             <section className="space-y-4 rounded-2xl border bg-white p-5">
               <h2 className="text-lg font-bold">{t("staffOffers.pendingOffers")}</h2>
               <p className="text-sm text-slate-600">{t("staffOffers.packetHelp")}</p>
+              <section
+                aria-label={t("staffOffers.fitmentSnapshot")}
+                className="space-y-3 rounded-xl border border-slate-200 bg-slate-50 p-4"
+              >
+                <h3 className="font-semibold">{t("staffOffers.fitmentSnapshot")}</h3>
+                <p className="text-sm">
+                  {t("staffOffers.revision")} #{selected.revisionNumber} · v{selected.version}
+                </p>
+                {reviewedFitment ? (
+                  <>
+                    {detail(
+                      t("staffOffers.fitmentMode"),
+                      reviewedFitment.mode
+                        ? t(
+                            reviewedFitment.mode === "BASE_VEHICLE_ALL_VARIANTS_VERIFIED"
+                              ? "staffOffers.fitmentModeAllVariants"
+                              : "staffOffers.fitmentModeIndependent"
+                          )
+                        : null
+                    )}
+                    {detail(t("staffOffers.fitmentEvidence"), reviewedFitment.evidenceRef, true)}
+                    <div>
+                      <h4 className="text-xs font-semibold text-slate-600">
+                        {t("staffOffers.fitmentCoverage")}
+                      </h4>
+                      {reviewedFitment.coverage.length > 0 ? (
+                        <ul className="mt-2 list-disc space-y-2 ps-5 text-sm">
+                          {reviewedFitment.coverage.map((row) => (
+                            <li key={`${row.modelId}:${row.yearFrom}:${row.yearTo}`}>
+                              <bdi dir="ltr">
+                                {t("staffOffers.fitmentMakeId")}: {row.makeId} ·{" "}
+                                {t("staffOffers.fitmentModelId")}: {row.modelId} · {row.yearFrom}–
+                                {row.yearTo}
+                              </bdi>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p className="mt-1 text-sm">{t("staffOffers.fitmentNoCoverage")}</p>
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  <p role="status" className="text-sm">
+                    {fitmentLoadError
+                      ? t("staffOffers.fitmentUnavailable")
+                      : t("staffOffers.loading")}
+                  </p>
+                )}
+                {!fitmentReady && (
+                  <p role="alert" className="text-sm font-semibold text-rose-700">
+                    {t("staffOffers.fitmentBlocked")}
+                  </p>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setReload((value) => value + 1)}
+                  className="rounded-xl border px-4 py-2 text-sm font-semibold"
+                >
+                  {t("staffOffers.refresh")}
+                </button>
+              </section>
               <fieldset>
                 <legend className="font-semibold">{t("staffOffers.checkAnswers")}</legend>
                 <div className="mt-3 space-y-3">
@@ -991,6 +1132,7 @@ export default function StaffOfferDetailPage() {
                       <input
                         type="checkbox"
                         checked={checks[key]}
+                        disabled={!fitmentReady}
                         onChange={(event) =>
                           setChecks((previous) => ({ ...previous, [key]: event.target.checked }))
                         }
@@ -1003,17 +1145,21 @@ export default function StaffOfferDetailPage() {
               </fieldset>
               <button
                 type="button"
-                disabled={actionDisabled || !attestations.every((key) => checks[key])}
+                disabled={
+                  actionDisabled || !fitmentReady || !attestations.every((key) => checks[key])
+                }
                 onClick={() =>
                   void mutate(
                     "approve",
                     `/api/v1/staff/ops/offers/${offerId}/revisions/${selected.id}/approve`,
                     {
                       expectedVersion: selected.version,
-                      evidenceInspected: true,
-                      priceVerified: true,
-                      scopeVerified: true,
-                      providerConsentVerified: true,
+                      evidenceInspected: checks.evidenceInspected,
+                      priceVerified: checks.priceVerified,
+                      scopeVerified: checks.scopeVerified,
+                      providerConsentVerified: checks.providerConsentVerified,
+                      fitmentAllVariantsAttested: checks.fitmentAllVariantsAttested,
+                      fitmentScopePriceAttested: checks.fitmentScopePriceAttested,
                     },
                     selected
                   )
