@@ -14,6 +14,7 @@ import { POST as createPolicyRoute } from "@/app/api/v1/staff/branches/[branchId
 import { POST as submitPolicyRoute } from "@/app/api/v1/staff/branches/[branchId]/fitment-policies/[policyId]/submit/route";
 import { POST as approvePolicyRoute } from "@/app/api/v1/staff/branches/[branchId]/fitment-policies/[policyId]/approve/route";
 import { POST as withdrawPolicyRoute } from "@/app/api/v1/staff/branches/[branchId]/fitment-policies/[policyId]/withdraw/route";
+import { GET as policyReceiptRoute } from "@/app/api/v1/staff/branches/[branchId]/fitment-policies/commands/[commandId]/route";
 import { GET as matchOfferRoute } from "@/app/api/v1/garage/[id]/offer-matches/[offerId]/route";
 import { GET as publicCoverageRoute } from "@/app/api/v1/offers/[offerId]/fitment/route";
 import { GET as publicOfferRoute } from "@/app/api/v1/offers/[offerId]/route";
@@ -1105,6 +1106,75 @@ describe("Verified offer fitment through real sessions, routes, and PostgreSQL",
     );
   });
 
+  it.each(["INSERT", "UPDATE", "DELETE"] as const)(
+    "serializes direct child %s behind a successful submit and rejects the late SQL mutation",
+    async (action) => {
+      const f = await fixture();
+      const db = getPrisma();
+      expect((await setFitment(f)).status).toBe(200);
+      const row = await db.offerFitmentCoverage.findFirstOrThrow({
+        where: { revisionId: f.revisionId },
+      });
+      const blocker = new pg.Client({ connectionString: databaseUrl });
+      const child = new pg.Client({ connectionString: databaseUrl });
+      await blocker.connect();
+      await child.connect();
+      let submit: Promise<Response> | undefined;
+      let sql: Promise<pg.QueryResult> | undefined;
+      try {
+        await blocker.query("BEGIN");
+        const pid = Number((await blocker.query("SELECT pg_backend_pid() AS pid")).rows[0].pid);
+        expect(
+          (
+            await blocker.query("SELECT id FROM offer_revisions WHERE id = $1::uuid FOR UPDATE", [
+              f.revisionId,
+            ])
+          ).rowCount
+        ).toBe(1);
+        submit = submitOfferRoute(
+          request(
+            `/api/v1/staff/offers/${f.offerId}/revisions/${f.revisionId}/submit`,
+            "POST",
+            f.sales.session,
+            { expectedVersion: 2 }
+          ),
+          offerContext(f)
+        );
+        await waitForBlocked(pid, 1);
+        sql =
+          action === "INSERT"
+            ? child.query(
+                'INSERT INTO offer_fitment_coverage ("revisionId", "makeId", "modelId", "yearFrom", "yearTo") VALUES ($1::uuid, $2::uuid, $3::uuid, 2020, 2024)',
+                [f.revisionId, f.makeId, f.otherModelId]
+              )
+            : action === "UPDATE"
+              ? child.query(
+                  'UPDATE offer_fitment_coverage SET "yearTo" = 2023 WHERE id = $1::uuid',
+                  [row.id]
+                )
+              : child.query("DELETE FROM offer_fitment_coverage WHERE id = $1::uuid", [row.id]);
+        await waitForBlocked(pid, 2);
+        await blocker.query("COMMIT");
+        expect((await submit).status).toBe(200);
+        await expect(sql).rejects.toThrow();
+        const revision = await db.offerRevision.findUniqueOrThrow({ where: { id: f.revisionId } });
+        expect(revision.status).toBe("PENDING_REVIEW");
+        expect(revision.version).toBe(3);
+        expect(
+          await db.offerFitmentCoverage.findMany({
+            where: { revisionId: f.revisionId },
+            select: { modelId: true, yearTo: true },
+          })
+        ).toEqual([{ modelId: f.modelId, yearTo: 2024 }]);
+      } finally {
+        await blocker.query("ROLLBACK").catch(() => {});
+        await blocker.end().catch(() => {});
+        await Promise.allSettled([submit, sql].filter(Boolean) as Promise<unknown>[]);
+        await child.end().catch(() => {});
+      }
+    }
+  );
+
   it("serializes assessed fitment edit before submit: stale submit conflicts and only the edited coverage persists", async () => {
     const f = await fixture();
     const db = getPrisma();
@@ -1621,5 +1691,85 @@ describe("Verified offer fitment through real sessions, routes, and PostgreSQL",
       })
     ).toBe(1);
     expect(await db.fitmentCommand.count({ where: { commandId } })).toBe(1);
+  });
+
+  it("resolves an actor- and branch-bound lost capability approval receipt without replay reactivating a later withdrawal", async () => {
+    const f = await fixture();
+    const other = await fixture();
+    const db = getPrisma();
+    const policy = await createPolicy(f);
+    const submitted = await submitPolicyRoute(
+      request(
+        `/api/v1/staff/branches/${f.branchId}/fitment-policies/${policy.policyId}/submit`,
+        "POST",
+        f.sales.session,
+        { commandId: crypto.randomUUID(), expectedVersion: 1 }
+      ),
+      policyContext(f, policy.policyId)
+    );
+    expect(submitted.status).toBe(200);
+    const commandId = crypto.randomUUID();
+    const approvalBody = { commandId, expectedVersion: 2, attested: true };
+    const approve = () =>
+      approvePolicyRoute(
+        request(
+          `/api/v1/staff/branches/${f.branchId}/fitment-policies/${policy.policyId}/approve`,
+          "POST",
+          f.ops.session,
+          approvalBody
+        ),
+        policyContext(f, policy.policyId)
+      );
+    const committed = await approve();
+    expect(committed.status).toBe(200);
+    // Simulate loss of the response: resolve by the original actor/resource
+    // receipt rather than deciding to send a fresh mutation identity.
+    const receiptPath = `/api/v1/staff/branches/${f.branchId}/fitment-policies/commands/${commandId}`;
+    const receipt = await policyReceiptRoute(request(receiptPath, "GET", f.ops.session), {
+      params: Promise.resolve({ branchId: f.branchId, commandId }),
+    });
+    expect(receipt.status).toBe(200);
+    expect((await receipt.json()).command.policyId).toBe(policy.policyId);
+    const foreignActor = await policyReceiptRoute(request(receiptPath, "GET", other.ops.session), {
+      params: Promise.resolve({ branchId: f.branchId, commandId }),
+    });
+    const foreignBranch = await policyReceiptRoute(request(receiptPath, "GET", f.ops.session), {
+      params: Promise.resolve({ branchId: other.branchId, commandId }),
+    });
+    expect(foreignActor.status).toBe(404);
+    expect(foreignBranch.status).toBe(404);
+    const withdrawal = await withdrawPolicyRoute(
+      request(
+        `/api/v1/staff/branches/${f.branchId}/fitment-policies/${policy.policyId}/withdraw`,
+        "POST",
+        f.ops.session,
+        { commandId: crypto.randomUUID(), expectedVersion: 3 }
+      ),
+      policyContext(f, policy.policyId)
+    );
+    expect(withdrawal.status).toBe(200);
+    const lateReplay = await approve();
+    expect(lateReplay.status).toBe(200);
+    expect((await lateReplay.json()).replayed).toBe(true);
+    expect(
+      (await db.branchCapabilityVersion.findUniqueOrThrow({ where: { id: policy.policyId } }))
+        .status
+    ).toBe("WITHDRAWN");
+    expect(
+      (
+        await db.branchCapabilityCurrent.findUniqueOrThrow({
+          where: { branchId_categoryId: { branchId: f.branchId, categoryId: f.categoryId } },
+        })
+      ).activeVersionId
+    ).toBeNull();
+    expect(await db.fitmentCommand.count({ where: { commandId } })).toBe(1);
+    expect(
+      await db.securityAuditEvent.count({
+        where: {
+          eventType: "BRANCH_CAPABILITY_APPROVED",
+          targetEntity: `branch_capability:${policy.policyId}`,
+        },
+      })
+    ).toBe(1);
   });
 });
