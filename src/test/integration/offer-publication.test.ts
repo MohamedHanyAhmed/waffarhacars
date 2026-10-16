@@ -474,11 +474,26 @@ async function publicDetail(offerId: string) {
   return { response, data: await response.json() };
 }
 
+async function allVisibleOfferIds() {
+  const ids = new Set<string>();
+  let cursor: string | undefined;
+  for (let pageNumber = 0; pageNumber < 100; pageNumber += 1) {
+    const page = await publicList(
+      cursor ? `?limit=20&cursor=${encodeURIComponent(cursor)}` : "?limit=20"
+    );
+    expect(page.response.status).toBe(200);
+    for (const item of page.data.items as Array<{ offerId: string }>) ids.add(item.offerId);
+    if (!page.data.nextCursor) return ids;
+    cursor = page.data.nextCursor;
+  }
+  throw new Error("Public discovery cursor traversal exceeded the test safety bound");
+}
+
 async function assertHidden(offerId: string) {
   const list = await publicList();
   const detail = await publicDetail(offerId);
   expect(list.response.status).toBe(200);
-  expect(JSON.stringify(list.data.items)).not.toContain(offerId);
+  expect((await allVisibleOfferIds()).has(offerId)).toBe(false);
   expect(detail.response.status).toBe(404);
   expect(list.response.headers.get("cache-control")).toContain("no-store");
   expect(detail.response.headers.get("cache-control")).toContain("no-store");
@@ -488,7 +503,7 @@ async function assertVisible(offerId: string) {
   const list = await publicList();
   const detail = await publicDetail(offerId);
   expect(list.response.status).toBe(200);
-  expect(JSON.stringify(list.data.items)).toContain(offerId);
+  expect((await allVisibleOfferIds()).has(offerId)).toBe(true);
   expect(detail.response.status).toBe(200);
 }
 
