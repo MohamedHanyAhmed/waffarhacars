@@ -961,7 +961,7 @@ describe("Verified offer fitment through real sessions, routes, and PostgreSQL",
     expect(await db.offerFitmentCoverage.count({ where: { revisionId: f.revisionId } })).toBe(2);
   });
 
-  it("returns UNKNOWN for an inactive stored model while another active covered model keeps the offer visible", async () => {
+  it("matches consistently before and after an actual catalog deactivation while another covered model keeps the offer visible", async () => {
     const f = await fixture();
     const both = [
       ...f.coverage,
@@ -1008,17 +1008,42 @@ describe("Verified offer fitment through real sessions, routes, and PostgreSQL",
     const before = await match(f);
     expect(before.data.data?.status ?? before.data.status).toBe("MATCH");
     const model = await getPrisma().vehicleModel.findUniqueOrThrow({ where: { id: f.modelId } });
-    const deactivate = await updateModelRoute(
-      request(`/api/v1/staff/ops/vehicle-catalog/models/${f.modelId}`, "PATCH", f.ops.session, {
-        commandId: crypto.randomUUID(),
-        expectedVersion: model.version,
-        nameEn: model.nameEn,
-        nameAr: model.nameAr,
-        evidenceRef: model.evidenceRef,
-        isActive: false,
-      }),
-      { params: Promise.resolve({ id: f.modelId }) }
-    );
+    const blocker = new pg.Client({ connectionString: databaseUrl });
+    await blocker.connect();
+    let deactivation: Promise<Response> | undefined;
+    let deactivate: Response;
+    try {
+      await blocker.query("BEGIN");
+      const pid = Number((await blocker.query("SELECT pg_backend_pid() AS pid")).rows[0].pid);
+      expect(
+        (
+          await blocker.query("SELECT id FROM vehicle_makes WHERE id = $1::uuid FOR UPDATE", [
+            f.makeId,
+          ])
+        ).rowCount
+      ).toBe(1);
+      deactivation = updateModelRoute(
+        request(`/api/v1/staff/ops/vehicle-catalog/models/${f.modelId}`, "PATCH", f.ops.session, {
+          commandId: crypto.randomUUID(),
+          expectedVersion: model.version,
+          nameEn: model.nameEn,
+          nameAr: model.nameAr,
+          evidenceRef: model.evidenceRef,
+          isActive: false,
+        }),
+        { params: Promise.resolve({ id: f.modelId }) }
+      );
+      await waitForBlocked(pid, 1);
+      const concurrentRead = await match(f);
+      expect(concurrentRead.response.status).toBe(200);
+      expect(concurrentRead.data.status).toBe("MATCH");
+      await blocker.query("COMMIT");
+      deactivate = await deactivation;
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => {});
+      await blocker.end().catch(() => {});
+      if (deactivation) await Promise.allSettled([deactivation]);
+    }
     expect(deactivate.status).toBe(200);
     const detail = await publicOfferRoute(request(`/api/v1/offers/${f.offerId}`, "GET"), {
       params: Promise.resolve({ offerId: f.offerId }),
