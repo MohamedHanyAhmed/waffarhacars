@@ -516,16 +516,44 @@ test("real UI and PostgreSQL: bilingual mobile offers, approval, explicit public
     await expect(englishApprove).toBeDisabled();
     await opsPage.getByRole("checkbox", { name: /I verified the listed fitment scope/ }).check();
     await expect(englishApprove).toBeEnabled();
+    const staleOpsPage = await opsContext.newPage();
+    await staleOpsPage.goto(`/staff/offers/${offerId}`);
+    await expect(
+      staleOpsPage.getByRole("region", { name: "Fitment evidence for this revision" })
+    ).toContainText(fitmentModel.id);
+    for (const label of [
+      "I inspected the evidence packet",
+      "I verified the normal and customer prices",
+      "I verified the bilingual service scope",
+      "I verified provider consent and commercial terms",
+    ]) {
+      await staleOpsPage.getByRole("checkbox", { name: label }).check();
+    }
+    await staleOpsPage
+      .getByRole("checkbox", { name: /I inspected the provider-backed evidence/ })
+      .check();
+    await staleOpsPage
+      .getByRole("checkbox", { name: /I verified the listed fitment scope/ })
+      .check();
+    const staleApprove = staleOpsPage.getByRole("button", { name: "Approve internally" });
+    await expect(staleApprove).toBeEnabled();
     await englishApprove.click();
     await expect(
       opsPage.getByRole("status").filter({ hasText: "Internal approval confirmed by the server." })
     ).toBeVisible();
+    await staleApprove.click();
+    await expect(
+      staleOpsPage.getByRole("alert").filter({ hasText: "This record changed." }).first()
+    ).toBeVisible();
+    await staleOpsPage.close();
     const storedOffer = await prisma.offer.findUniqueOrThrow({ where: { id: offerId } });
     const approved = await prisma.offerRevision.findUniqueOrThrow({ where: { id: draft.id } });
     expect(approved.status).toBe("APPROVED");
     expect(approved.version).toBe(6);
     expect(approved.submittedByUserId).toBe(sales.userId);
     expect(approved.decidedByUserId).toBe(ops.userId);
+    expect(approved.fitmentAllVariantsAttested).toBe(true);
+    expect(approved.fitmentScopePriceAttested).toBe(true);
     expect(storedOffer.currentApprovedRevisionId).toBe(draft.id);
     const auditCount = await prisma.securityAuditEvent.count({
       where: {
@@ -869,6 +897,8 @@ test("real UI and PostgreSQL: bilingual mobile offers, approval, explicit public
     expect(arabicApproved.version).toBe(4);
     expect(arabicApproved.submittedByUserId).toBe(sales.userId);
     expect(arabicApproved.decidedByUserId).toBe(ops.userId);
+    expect(arabicApproved.fitmentAllVariantsAttested).toBe(true);
+    expect(arabicApproved.fitmentScopePriceAttested).toBe(true);
     expect(arabicOffer.currentApprovedRevisionId).toBe(arabicDraft.id);
     expect(
       await prisma.securityAuditEvent.count({
