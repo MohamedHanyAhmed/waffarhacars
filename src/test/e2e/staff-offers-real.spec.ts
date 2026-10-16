@@ -542,8 +542,14 @@ test("real UI and PostgreSQL: bilingual mobile offers, approval, explicit public
       opsPage.getByRole("status").filter({ hasText: "Internal approval confirmed by the server." })
     ).toBeVisible();
     await staleApprove.click();
+    // The second tab has the same reviewed version and attestations. The
+    // existing approval contract treats that late command as an idempotent
+    // replay, not a conflicting new decision; persistent state below proves
+    // it did not create a second approval or audit event.
     await expect(
-      staleOpsPage.getByRole("alert").filter({ hasText: "This record changed." }).first()
+      staleOpsPage
+        .getByRole("status")
+        .filter({ hasText: "Internal approval confirmed by the server." })
     ).toBeVisible();
     await staleOpsPage.close();
     const storedOffer = await prisma.offer.findUniqueOrThrow({ where: { id: offerId } });
