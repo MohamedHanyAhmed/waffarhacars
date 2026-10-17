@@ -1013,7 +1013,17 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
                   </div>
 
                   {/* Branch Action Buttons */}
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    {currentStaff?.state === "ACTIVE" &&
+                      (currentStaff.department === "SALES" ||
+                        currentStaff.department === "OPERATIONS") && (
+                        <Link
+                          href={`/staff/providers/${provider.id}/branches/${branch.id}/capabilities`}
+                          className="inline-flex min-h-11 items-center rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+                        >
+                          {t("capabilities.open")}
+                        </Link>
+                      )}
                     {/* Sales edit button */}
                     {provider.status === "DRAFT" && branch.status === "DRAFT" && (
                       <Link

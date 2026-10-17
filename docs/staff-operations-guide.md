@@ -1,7 +1,28 @@
 # WaffarhaCars Internal Staff Operations Guide
 
-> **Audience:** Platform Administrators, DevOps, HR coordinators
-> **Scope:** Staff provisioning, authentication lifecycle, TOTP MFA, suspension, and recovery procedures
+## Branch vehicle capability workspace (PR 4B-C1)
+
+Open **Vehicle capability** on a provider branch card. This workflow records the branch's category-scoped vehicle capability; it does not publish an offer or permit a customer booking. Sales sees its own policy content; a minimal current-pointer summary may refer to another maker's version without revealing their evidence or coverage.
+
+Sales chooses an active service category, adds 1–50 canonical make/model and inclusive-year ranges, and records an opaque company-controlled evidence reference. Make/model lists support **Load more**; changing a make clears its model. Save the draft, make any needed corrections, then submit the saved version. Category and branch cannot change after creation. Only the creator may edit/submit a draft. Creation needs active provider/branch dependencies; an existing draft may still be edited/submitted when those dependencies are paused, subject to server validation.
+
+A distinct Operations checker selects the submitted version, inspects the real evidence outside the app, checks the explicit version-bound attestation, then confirms approval or rejection. Approval requires active provider/branch/category and the existing evidence-repository readiness gate. It makes the target version current and atomically withdraws whichever predecessor is current at commit; the confirmation does not reserve a particular predecessor. Observed target or pointer changes invalidate the confirmation. Rejection requires a safe bounded reason. Rejected and withdrawn versions are terminal: corrections need an explicit new Sales draft and fresh review.
+
+Operations may explicitly withdraw an active capability even while the provider/branch is paused. No previous version is reactivated automatically. Recorded **Active** status is separate from dependency availability; inspect current state rather than assuming an old receipt proves current activation. Saved inactive catalogue selections remain visible as history, not availability.
+
+### Unknown outcome and recovery
+
+- A timeout, connection abort, reload or 5xx does not prove rollback. Pending/unknown commands block competing actions. Do not clear tab storage to bypass them.
+- Use **Recheck command** as the original authenticated staff member in the original branch workspace. A committed receipt is historical evidence; the screen refreshes current state separately before resolving the command.
+- No receipt is not proof of absence. Retry only the identical request with the original command ID. Exact content is held in memory only. After reload, **Restore original request** requires deliberate re-entry matching the original fingerprint; evidence, ranges and rejection text are not persisted in the browser journal.
+- If exact re-entry is impossible, leave the command unresolved and ask Operations to inspect the actor-bound receipt, current records and audit trail through approved support procedures. Do not issue a new intent or assume that a later version identifies which command won.
+- A different account or branch cannot inspect, reuse or clear the original command. Return to the original account/workspace. If recovery storage is unavailable, no new command is sent.
+- Refresh preserves dirty input and marks stale versions; deliberately discard before taking a new action on a changed saved version. Re-review after a conflict rather than silently rebinding the decision to a newer version.
+
+No real provider fixtures, uploads, evidence links, external integrations, bookings, payments or launch-gate changes are introduced by this workspace. Frontend rollback does not undo saved approvals or receipts. Offer-fitment editing remains a separate subsequent slice.
+
+> **Audience:** Sales, Operations, Platform Administrators, DevOps, HR coordinators
+> **Scope:** Staff provisioning/authentication, provider and offer operations, branch vehicle capabilities, and recovery procedures
 
 ---
 
