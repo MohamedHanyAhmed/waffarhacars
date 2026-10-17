@@ -79,7 +79,7 @@ async function fixture() {
   const sales = await identity("SALES_AGENT");
   const foreign = await identity("SALES_AGENT");
   const ops = await identity("OPS_SUPERVISOR");
-  const suffix = crypto.randomUUID().slice(0, 12);
+  const suffix = crypto.randomUUID().replaceAll("-", "").slice(0, 12).toUpperCase();
   const provider = await db.providerOrganization.create({
     data: {
       nameEn: "Synthetic provider",
