@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { useI18n } from "@/context/I18nContext";
 import FitmentCoverageEditor from "@/components/staff/FitmentCoverageEditor";
 import { useCapabilityCommand } from "@/components/staff/useCapabilityCommand";
+import { protectCapabilityNavigation } from "@/components/staff/CapabilityNavigationBoundary";
 import { offerApi } from "@/lib/offer/client-api";
 import type { ServiceCategoryDto } from "@/lib/offer/client";
 import type { StaffAuthStatusResponse } from "@/lib/staff/status-contract";
@@ -339,11 +340,11 @@ function Workspace({ providerId, branchId }: { providerId: string; branchId: str
       setValidation(command.locked ? "capabilities.unresolved" : "capabilities.dirty");
     };
     window.addEventListener("beforeunload", beforeUnload);
-    window.addEventListener("popstate", restoreWorkspace, true);
+    const releaseNavigation = protectCapabilityNavigation(restoreWorkspace);
     document.addEventListener("click", followLink, true);
     return () => {
       window.removeEventListener("beforeunload", beforeUnload);
-      window.removeEventListener("popstate", restoreWorkspace, true);
+      releaseNavigation();
       document.removeEventListener("click", followLink, true);
     };
   }, [dirty, reason, command.locked]);
