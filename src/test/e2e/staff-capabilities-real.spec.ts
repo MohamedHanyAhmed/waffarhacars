@@ -284,13 +284,13 @@ test("real capability controls: bilingual lifecycle, exact-command recovery, sta
     async function create(page: Page, evidence: string) {
       await page.getByTestId("capability-new").click();
       await page.locator("#capability-category").selectOption(category.id);
-      if (firstCreate) await expect(page.getByRole("alert").first()).toBeVisible();
+      if (firstCreate) await expect(page.locator('main [role="alert"]').first()).toBeVisible();
       await fill(page, evidence);
       if (firstCreate) {
         firstCreate = false;
         await page.locator("#fitment-yearTo-0").fill("2019");
         await page.getByTestId("capability-create").click();
-        await expect(page.getByRole("alert").first()).toBeVisible();
+        await expect(page.locator('main [role="alert"]').first()).toBeVisible();
         expect(await prisma.branchCapabilityVersion.count({ where: { branchId: branch.id } })).toBe(
           0
         );
@@ -310,7 +310,7 @@ test("real capability controls: bilingual lifecycle, exact-command recovery, sta
         await page.locator("#fitment-yearFrom-1").fill("2022");
         await page.locator("#fitment-yearTo-1").fill("2024");
         await page.getByTestId("capability-create").click();
-        await expect(page.getByRole("alert").first()).toBeVisible();
+        await expect(page.locator('main [role="alert"]').first()).toBeVisible();
         expect(await prisma.branchCapabilityVersion.count({ where: { branchId: branch.id } })).toBe(
           0
         );
@@ -326,7 +326,7 @@ test("real capability controls: bilingual lifecycle, exact-command recovery, sta
         // work must survive it, while a deliberate discard restores clean Back.
         const routerStateKeys = await page.evaluate(() => Object.keys(window.history.state).sort());
         await page.evaluate(() => window.history.back());
-        await expect(page.getByRole("alert")).toHaveText(
+        await expect(page.locator('main [role="alert"]').first()).toHaveText(
           "You have unsaved changes. Discard them to leave this version?"
         );
         await expect(page).toHaveURL(new RegExp(`${branch.id}/capabilities$`));
@@ -463,7 +463,7 @@ test("real capability controls: bilingual lifecycle, exact-command recovery, sta
     );
     await opsPage.getByTestId("capability-confirm").click();
     expect((await staleDecision).status()).toBe(409);
-    await expect(opsPage.getByRole("alert").first()).toBeVisible();
+    await expect(opsPage.locator('main [role="alert"]').first()).toBeVisible();
     await opsPage.getByTestId("capability-refresh").click();
     await expect(opsPage.getByTestId("capability-approve")).toHaveCount(0);
     await expect(opsPage.getByTestId("capability-confirm")).toHaveCount(0);
@@ -508,7 +508,9 @@ test("real capability controls: bilingual lifecycle, exact-command recovery, sta
     expect(journal).not.toContain("LOST_CREATE");
     expect(journal).not.toContain("evidenceRef");
     await salesPage.evaluate(() => window.history.back());
-    await expect(salesPage.getByRole("alert").first()).toContainText("Resolve the pending command");
+    await expect(salesPage.locator('main [role="alert"]').first()).toContainText(
+      "Resolve the pending command"
+    );
     await expect(salesPage).toHaveURL(new RegExp(`${branch.id}/capabilities$`));
     expect(await salesPage.evaluate((key) => sessionStorage.getItem(key), journalKey)).toBe(
       journal
@@ -553,7 +555,7 @@ test("real capability controls: bilingual lifecycle, exact-command recovery, sta
     };
     salesPage.on("request", countMismatch);
     await salesPage.getByTestId("capability-retry").click();
-    await expect(salesPage.getByRole("alert").first()).toBeVisible();
+    await expect(salesPage.locator('main [role="alert"]').first()).toBeVisible();
     expect(mismatchedRequests).toBe(0);
     salesPage.off("request", countMismatch);
     await salesPage.locator("#capability-evidence").fill("CI:CAP:UNDELIVERED_EDIT");
@@ -615,7 +617,7 @@ test("real capability controls: bilingual lifecycle, exact-command recovery, sta
       evidenceRef: "CI:CAP:FIRST_WINNER",
     });
     expect(await receiptCount(deliveredCommand.resourceId, "EDIT")).toBe(2);
-    await expect(otherSales.getByRole("alert").first()).toBeVisible();
+    await expect(otherSales.locator('main [role="alert"]').first()).toBeVisible();
     await otherSales.close();
 
     // Actual audit insertion failure rolls the draft creation back. Same-key recovery succeeds.
@@ -768,7 +770,7 @@ test("real capability controls: bilingual lifecycle, exact-command recovery, sta
       value: journal!,
     });
     await foreignJournalPage.reload();
-    await expect(foreignJournalPage.getByRole("alert").first()).toBeVisible();
+    await expect(foreignJournalPage.locator('main [role="alert"]').first()).toBeVisible();
     expect(
       await foreignJournalPage.evaluate((key) => sessionStorage.getItem(key), journalKey)
     ).toBe(journal);
@@ -865,7 +867,7 @@ test("real capability controls: bilingual lifecycle, exact-command recovery, sta
       where: { branchId: branch.id },
     });
     await salesPage.getByTestId("capability-create").click();
-    await expect(salesPage.getByRole("alert").first()).toBeVisible();
+    await expect(salesPage.locator('main [role="alert"]').first()).toBeVisible();
     expect(storageRequests).toBe(0);
     expect(await prisma.branchCapabilityVersion.count({ where: { branchId: branch.id } })).toBe(
       beforeStorage
@@ -927,7 +929,7 @@ test("real capability controls: bilingual lifecycle, exact-command recovery, sta
     };
     salesPage.on("request", countForeignReceipt);
     await salesPage.getByTestId("capability-recheck").click();
-    await expect(salesPage.getByRole("alert").first()).toBeVisible();
+    await expect(salesPage.locator('main [role="alert"]').first()).toBeVisible();
     expect(foreignReceiptRequests).toBe(0);
     expect(await salesPage.evaluate((key) => sessionStorage.getItem(key), journalKey)).toBe(
       accountJournal
@@ -1030,12 +1032,32 @@ test("real capability controls: bilingual lifecycle, exact-command recovery, sta
       evidenceRef: "CI:CAP:LATE_RESPONSE",
     });
 
+    const unrelatedProvider = await prisma.providerOrganization.create({
+      data: {
+        nameEn: `Unrelated parent ${uid}`,
+        nameAr: "مقدم خدمة آخر للاختبار",
+        legalName: `Unrelated parent ${uid}`,
+        taxRegistrationNumber: String(crypto.randomInt(100000000, 999999999)),
+        commercialRegistrationNumber: `CAP-OTHER-${uid}`,
+        primaryCluster: "NASR_CITY_HELIOPOLIS",
+        status: "ACTIVE",
+        contactPersonName: "Synthetic Contact",
+        contactEmail: `cap-other-${uid}@test.eg`,
+        contactPhone: "+201011112222",
+        createdByUserId: sales.userId,
+      },
+    });
     const mismatchedBranchPage = await opsContext.newPage();
+    let mismatchedCapabilityReads = 0;
+    mismatchedBranchPage.on("request", (request) => {
+      if (request.url().endsWith(api)) mismatchedCapabilityReads++;
+    });
     await mismatchedBranchPage.goto(
-      `/staff/providers/${crypto.randomUUID()}/branches/${branch.id}/capabilities`
+      `/staff/providers/${unrelatedProvider.id}/branches/${branch.id}/capabilities`
     );
-    await expect(mismatchedBranchPage.getByRole("alert").first()).toBeVisible();
+    await expect(mismatchedBranchPage.locator('main [role="alert"]').first()).toBeVisible();
     await expect(mismatchedBranchPage.getByTestId("capability-policy")).toHaveCount(0);
+    expect(mismatchedCapabilityReads).toBe(0);
     expect((await current()).activeVersionId).toBe(arabic);
     await mismatchedBranchPage.close();
 
@@ -1054,7 +1076,7 @@ test("real capability controls: bilingual lifecycle, exact-command recovery, sta
         state: "MFA_ENROLLMENT_PENDING",
         canAccessStaffApp: false,
       });
-      await expect(deniedPage.getByRole("alert").first()).toBeVisible();
+      await expect(deniedPage.locator('main [role="alert"]').first()).toBeVisible();
       await expect(deniedPage.getByTestId("capability-policy")).toHaveCount(0);
     } finally {
       await prisma.twoFactor.updateMany({
@@ -1072,7 +1094,7 @@ test("real capability controls: bilingual lifecycle, exact-command recovery, sta
         data: { isActive: false },
       });
       await deniedPage.reload();
-      await expect(deniedPage.getByRole("alert").first()).toBeVisible();
+      await expect(deniedPage.locator('main [role="alert"]').first()).toBeVisible();
       await expect(deniedPage.getByTestId("capability-policy")).toHaveCount(0);
       expect((await current()).activeVersionId).toBe(arabic);
     } finally {
