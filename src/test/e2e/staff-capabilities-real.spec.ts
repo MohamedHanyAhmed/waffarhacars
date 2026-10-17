@@ -5,6 +5,7 @@ import { createOTP } from "@better-auth/utils/otp";
 import { symmetricEncrypt } from "better-auth/crypto";
 import { getPrisma, disconnectDb } from "@/lib/db";
 import { provisionStaffMember } from "@/lib/staff/provisioning";
+import ar from "@/i18n/ar.json";
 
 const databaseUrl =
   process.env.DATABASE_URL ??
@@ -908,8 +909,10 @@ test("real capability controls: bilingual lifecycle, exact-command recovery, sta
     // page use its journal under the new actor, even before that page rerenders.
     await choose(salesPage, deliveredCommand.resourceId);
     await salesPage.locator("#capability-evidence").fill("CI:CAP:ACCOUNT_CHANGE");
+    let accountBody: Record<string, unknown> | undefined;
     await salesPage.route(`**${api}/${deliveredCommand.resourceId}`, async (route) => {
       if (route.request().method() !== "PUT") return route.continue();
+      accountBody = route.request().postDataJSON() as Record<string, unknown>;
       await route.abort("failed");
     });
     await salesPage.getByTestId("capability-save").click();
@@ -918,6 +921,14 @@ test("real capability controls: bilingual lifecycle, exact-command recovery, sta
     const accountJournal = await salesPage.evaluate(
       (key) => sessionStorage.getItem(key),
       journalKey
+    );
+    expect(accountJournal).not.toBeNull();
+    expect(accountBody).toBeDefined();
+    const accountCommandId = String(accountBody!.commandId);
+    const accountReceiptsBefore = await receiptCount(deliveredCommand.resourceId, "EDIT");
+    const accountAuditsBefore = await auditCount(
+      deliveredCommand.resourceId,
+      "BRANCH_CAPABILITY_DRAFT_UPDATED"
     );
     await salesPage.unroute(`**${api}/${deliveredCommand.resourceId}`);
     await salesContext.clearCookies();
@@ -928,8 +939,41 @@ test("real capability controls: bilingual lifecycle, exact-command recovery, sta
       if (request.url().includes(`${api}/commands/`)) foreignReceiptRequests++;
     };
     salesPage.on("request", countForeignReceipt);
+    // Hold a genuine authorized workspace response: the foreign-owner alert
+    // appears before the refresh's final session check and is not a readiness signal.
+    const releaseForeignWorkspace = deferred();
+    releaseBarriers.push(releaseForeignWorkspace.resolve);
+    let foreignWorkspaceHeld = false;
+    await salesPage.route(`**${api}`, async (route) => {
+      if (route.request().method() !== "GET") return route.continue();
+      const response = await route.fetch();
+      expect(response.status()).toBe(200);
+      foreignWorkspaceHeld = true;
+      await releaseForeignWorkspace.promise;
+      await route.fulfill({ response });
+    });
     await salesPage.getByTestId("capability-recheck").click();
-    await expect(salesPage.locator('main [role="alert"]').first()).toBeVisible();
+    await expect.poll(() => foreignWorkspaceHeld).toBe(true);
+    const foreignOwnerAlert = salesPage.getByRole("alert").filter({
+      hasText: ar.capabilities.otherOwner,
+    });
+    await expect(foreignOwnerAlert).toBeVisible();
+    await expect(salesPage.getByTestId("capability-refresh")).toBeDisabled();
+    await expect(salesPage.getByTestId("capability-policy")).toHaveCount(0);
+    const finalForeignAuth = salesPage.waitForResponse(
+      (response) => new URL(response.url()).pathname === "/api/v1/staff/auth/status"
+    );
+    releaseForeignWorkspace.resolve();
+    const foreignAuthResponse = await finalForeignAuth;
+    expect(foreignAuthResponse.status()).toBe(200);
+    expect(await foreignAuthResponse.json()).toMatchObject({
+      state: "ACTIVE",
+      userId: ops.userId,
+    });
+    await expect(salesPage.getByTestId("capability-refresh")).toBeEnabled();
+    await expect(foreignOwnerAlert).toBeVisible();
+    await expect(salesPage.getByTestId("capability-policy")).toBeVisible();
+    await salesPage.unroute(`**${api}`);
     expect(foreignReceiptRequests).toBe(0);
     expect(await salesPage.evaluate((key) => sessionStorage.getItem(key), journalKey)).toBe(
       accountJournal
@@ -938,19 +982,50 @@ test("real capability controls: bilingual lifecycle, exact-command recovery, sta
       version: 3,
       evidenceRef: "CI:CAP:FIRST_WINNER",
     });
+    expect(await prisma.fitmentCommand.count({ where: { commandId: accountCommandId } })).toBe(0);
+    expect(await receiptCount(deliveredCommand.resourceId, "EDIT")).toBe(accountReceiptsBefore);
+    expect(await auditCount(deliveredCommand.resourceId, "BRANCH_CAPABILITY_DRAFT_UPDATED")).toBe(
+      accountAuditsBefore
+    );
     salesPage.off("request", countForeignReceipt);
     await salesContext.clearCookies();
     await login(accountTab, sales.email);
+    const restoredAuth = await salesContext.request.get(
+      new URL("/api/v1/staff/auth/status", accountTab.url()).href
+    );
+    expect(restoredAuth.status()).toBe(200);
+    expect(await restoredAuth.json()).toMatchObject({ state: "ACTIVE", userId: sales.userId });
     await accountTab.close();
-    await salesPage.reload();
+    // Return to the intended resource, not whichever URL an auth redirect left behind.
+    await salesPage.goto(workspace);
+    await expect(salesPage.getByTestId("capability-refresh")).toBeEnabled();
+    expect(await salesPage.evaluate((key) => sessionStorage.getItem(key), journalKey)).toBe(
+      accountJournal
+    );
     await salesPage.getByTestId("capability-recheck").click();
     await salesPage.getByTestId("capability-restore").click();
     await fill(salesPage, "CI:CAP:ACCOUNT_CHANGE");
-    await command(salesPage, "capability-retry", `/${deliveredCommand.resourceId}`);
+    const accountRetryRequest = salesPage.waitForRequest(
+      (request) =>
+        request.url().endsWith(`${api}/${deliveredCommand.resourceId}`) &&
+        request.method() === "PUT"
+    );
+    const accountRecovery = await command(
+      salesPage,
+      "capability-retry",
+      `/${deliveredCommand.resourceId}`
+    );
+    expect((await accountRetryRequest).postDataJSON()).toEqual(accountBody);
+    expect(accountRecovery.command.commandId).toBe(accountCommandId);
     expect(await policy(deliveredCommand.resourceId)).toMatchObject({
       version: 4,
       evidenceRef: "CI:CAP:ACCOUNT_CHANGE",
     });
+    expect(await prisma.fitmentCommand.count({ where: { commandId: accountCommandId } })).toBe(1);
+    expect(await receiptCount(deliveredCommand.resourceId, "EDIT")).toBe(accountReceiptsBefore + 1);
+    expect(await auditCount(deliveredCommand.resourceId, "BRANCH_CAPABILITY_DRAFT_UPDATED")).toBe(
+      accountAuditsBefore + 1
+    );
 
     // Storage can change while a real response is in flight. A late callback
     // must not clear a newer identity, even if it belongs to the same actor.
