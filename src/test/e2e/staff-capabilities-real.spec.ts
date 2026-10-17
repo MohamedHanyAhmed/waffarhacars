@@ -5,7 +5,7 @@ import { createOTP } from "@better-auth/utils/otp";
 import { symmetricEncrypt } from "better-auth/crypto";
 import { getPrisma, disconnectDb } from "@/lib/db";
 import { provisionStaffMember } from "@/lib/staff/provisioning";
-import ar from "@/i18n/ar.json";
+import ar from "@/i18n/ar.json" with { type: "json" };
 
 const databaseUrl =
   process.env.DATABASE_URL ??
