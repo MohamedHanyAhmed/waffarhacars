@@ -504,30 +504,128 @@ export async function capabilityCommand(
 export async function getCapabilityVersions(actor: AuthorizedStaffContext, branchId: string) {
   if (actor.grantedPermission !== "branch_fitment:read")
     throw new FitmentError(403, "PERMISSION_DENIED");
-  const branch = await getPrisma().providerBranch.findUnique({
-    where: { id: branchId },
-    select: { id: true },
-  });
-  if (!branch) throw new FitmentError(404, "BRANCH_NOT_FOUND");
-  // Sales can inspect only policies they made; Ops review has cross-maker scope.
-  // Evidence references are internal review material, never a public DTO.
-  const makerScope =
-    actor.roleAssignment.role === "OPS_SUPERVISOR" ? {} : { createdByUserId: actor.userId };
-  const policies = await getPrisma().branchCapabilityVersion.findMany({
-    where: { branchId, ...makerScope },
-    orderBy: [{ categoryId: "asc" }, { sequenceNumber: "desc" }],
-    select: {
-      id: true,
-      categoryId: true,
-      sequenceNumber: true,
-      status: true,
-      version: true,
-      evidenceRef: true,
-      attested: true,
-      coverage: { select: { makeId: true, modelId: true, yearFrom: true, yearTo: true } },
+  // All projection queries share one committed snapshot, including the current
+  // pointer. A concurrent replacement cannot splice old policy state into a
+  // newer pointer. This read takes no mutation locks and changes no lifecycle.
+  return getPrisma().$transaction(
+    async (tx) => {
+      const branch = await tx.providerBranch.findUnique({
+        where: { id: branchId },
+        select: {
+          id: true,
+          status: true,
+          providerOrganizationId: true,
+          providerOrganization: { select: { status: true } },
+        },
+      });
+      if (!branch) throw new FitmentError(404, "BRANCH_NOT_FOUND");
+      // Sales can inspect only policies they made; Ops review has cross-maker scope.
+      // Evidence references are internal review material, never a public DTO.
+      const makerScope =
+        actor.roleAssignment.role === "OPS_SUPERVISOR" ? {} : { createdByUserId: actor.userId };
+      const labelSelect = { id: true, nameEn: true, nameAr: true, isActive: true } as const;
+      const categorySelect = { ...labelSelect, code: true } as const;
+      const policies = await tx.branchCapabilityVersion.findMany({
+        where: { branchId, ...makerScope },
+        orderBy: [{ categoryId: "asc" }, { sequenceNumber: "desc" }],
+        select: {
+          id: true,
+          categoryId: true,
+          sequenceNumber: true,
+          status: true,
+          version: true,
+          evidenceRef: true,
+          attested: true,
+          createdByUserId: true,
+          submittedByUserId: true,
+          submittedAt: true,
+          decidedAt: true,
+          rejectionReason: true,
+          withdrawnAt: true,
+          createdAt: true,
+          updatedAt: true,
+          category: { select: categorySelect },
+          coverage: {
+            orderBy: [{ makeId: "asc" }, { modelId: "asc" }, { yearFrom: "asc" }],
+            select: {
+              makeId: true,
+              modelId: true,
+              yearFrom: true,
+              yearTo: true,
+              make: { select: labelSelect },
+              model: { select: labelSelect },
+            },
+          },
+        },
+      });
+      const pointers = await tx.branchCapabilityCurrent.findMany({
+        where: { branchId },
+        orderBy: { categoryId: "asc" },
+        select: {
+          categoryId: true,
+          activeVersionId: true,
+          version: true,
+          category: { select: categorySelect },
+          activeVersion: { select: { version: true, sequenceNumber: true, status: true } },
+        },
+      });
+      const sales = actor.roleAssignment.role === "SALES_AGENT";
+      const ops = actor.roleAssignment.role === "OPS_SUPERVISOR";
+      const branchActive =
+        branch.status === "ACTIVE" && branch.providerOrganization.status === "ACTIVE";
+      return {
+        context: {
+          branchId: branch.id,
+          providerOrganizationId: branch.providerOrganizationId,
+          providerStatus: branch.providerOrganization.status,
+          branchStatus: branch.status,
+          canCreate: sales && branchActive,
+        },
+        policies: policies.map(({ createdByUserId, submittedByUserId, ...policy }) => {
+          const owned = createdByUserId === actor.userId;
+          const distinctChecker = !owned && submittedByUserId !== actor.userId;
+          const isCurrent = pointers.some((pointer) => pointer.activeVersionId === policy.id);
+          return {
+            ...policy,
+            isCurrent,
+            eligibility: {
+              edit: sales && owned && policy.status === "DRAFT",
+              submit:
+                sales &&
+                owned &&
+                policy.status === "DRAFT" &&
+                !!policy.evidenceRef &&
+                policy.coverage.length > 0,
+              approve:
+                ops &&
+                distinctChecker &&
+                policy.status === "PENDING_REVIEW" &&
+                branchActive &&
+                policy.category.isActive &&
+                getServerEnv().OFFER_EVIDENCE_PACKET_REPOSITORY_READY &&
+                !!policy.evidenceRef &&
+                policy.coverage.length > 0,
+              reject: ops && distinctChecker && policy.status === "PENDING_REVIEW",
+              withdraw: ops && policy.status === "ACTIVE" && isCurrent,
+            },
+          };
+        }),
+        // Deliberately minimal across makers: never expose evidence, coverage,
+        // rejection text, actor identity, or contact information via this summary.
+        currentByCategory: pointers.map(({ activeVersion, ...pointer }) => ({
+          ...pointer,
+          activePolicyVersion: activeVersion?.version ?? null,
+          activePolicySequenceNumber: activeVersion?.sequenceNumber ?? null,
+          activePolicyStatus: activeVersion?.status ?? null,
+        })),
+      };
     },
-  });
-  return { policies };
+    {
+      isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead,
+      maxWait: 4000,
+      timeout: 8000,
+    }
+  );
 }
 
 export async function getCapabilityCommand(

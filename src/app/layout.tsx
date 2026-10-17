@@ -4,6 +4,7 @@ import { I18nProvider } from "../context/I18nContext";
 import { DemoStateProvider } from "../context/DemoStateContext";
 import { DemoBanner } from "../components/common/DemoBanner";
 import { LocalizedFooter } from "../components/common/LocalizedFooter";
+import CapabilityNavigationBoundary from "../components/staff/CapabilityNavigationBoundary";
 
 export const metadata: Metadata = {
   title: "WaffarhaCars | Cairo Car Care Marketplace Demo",
@@ -19,6 +20,7 @@ export default function RootLayout({
   return (
     <html lang="en" dir="ltr">
       <body className="font-sans min-h-screen flex flex-col bg-slate-50 text-slate-900 selection:bg-brand-500 selection:text-white">
+        <CapabilityNavigationBoundary />
         <I18nProvider>
           <DemoStateProvider>
             <DemoBanner />
