@@ -33,7 +33,7 @@ export default defineConfig({
     },
     {
       name: "PostgreSQL Real Staff Offers",
-      testMatch: /staff-offers-real\.spec\.ts/,
+      testMatch: /(staff-offers-real|offer-fitment-real)\.spec\.ts/,
       use: { ...devices["Desktop Chrome"], viewport: { width: 1440, height: 900 } },
     },
     {

@@ -174,3 +174,13 @@ jobs:
           path: test-results/**/capability-*.png
           if-no-files-found: error
           retention-days: 7
+
+      - name: Upload Synthetic Offer Fitment Evidence
+        # actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: success()
+        with:
+          name: staff-offer-fitment-evidence
+          path: test-results/**/offer-fitment-*.png
+          if-no-files-found: error
+          retention-days: 7

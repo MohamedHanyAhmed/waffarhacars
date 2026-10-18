@@ -6,6 +6,7 @@ import { symmetricEncrypt } from "better-auth/crypto";
 import { getPrisma, disconnectDb } from "@/lib/db";
 import { provisionStaffMember } from "@/lib/staff/provisioning";
 import { utcToCairoInput } from "@/lib/offer/client";
+import { OFFER_FITMENT_JOURNAL_KEY } from "@/lib/fitment/offer-client";
 
 const databaseUrl =
   process.env.DATABASE_URL ??
@@ -25,6 +26,48 @@ async function login(page: Page, email: string) {
   await page.waitForURL(
     (url) => !url.pathname.includes("/mfa/") && !url.pathname.endsWith("/login")
   );
+}
+
+/** Use the real paginated canonical picker, never bypass it with assigned DOM values. */
+async function enterFitment(
+  page: Page,
+  input: {
+    mode:
+      "BASE_VEHICLE_ALL_VARIANTS_VERIFIED" | "SERVICE_VEHICLE_INDEPENDENT_WITHIN_LISTED_COVERAGE";
+    evidenceRef: string;
+    makeId: string;
+    modelId: string;
+  }
+) {
+  if (!(await page.getByTestId("offer-fitment-mode").isVisible())) {
+    await page.getByTestId("offer-editor-fitment").click();
+  }
+  await page.getByTestId("offer-fitment-mode").selectOption(input.mode);
+  await page.getByTestId("offer-fitment-evidence").fill(input.evidenceRef);
+  if ((await page.locator("#fitment-make-0").count()) === 0) {
+    await page.getByTestId("fitment-add-range").click();
+  }
+  const makeOption = page.locator(`#fitment-make-0 option[value="${input.makeId}"]`);
+  await expect
+    .poll(async () => {
+      if ((await makeOption.count()) > 0) return true;
+      const more = page.getByTestId("fitment-more-makes");
+      if ((await more.isVisible()) && (await more.isEnabled())) {
+        const response = page.waitForResponse(
+          (item) =>
+            item.request().method() === "GET" && item.url().includes("/api/v1/vehicles/catalog?")
+        );
+        await more.click();
+        expect((await response).status()).toBe(200);
+      }
+      return (await makeOption.count()) > 0;
+    })
+    .toBe(true);
+  await page.locator("#fitment-make-0").selectOption(input.makeId);
+  await expect(page.locator(`#fitment-model-0 option[value="${input.modelId}"]`)).toHaveCount(1);
+  await page.locator("#fitment-model-0").selectOption(input.modelId);
+  await page.locator("#fitment-yearFrom-0").fill("2020");
+  await page.locator("#fitment-yearTo-0").fill("2024");
 }
 
 async function waitForBlockedRequests(blocker: pg.Client, expected: number): Promise<number> {
@@ -219,6 +262,9 @@ test("real UI and PostgreSQL: bilingual mobile offers, approval, explicit public
     console.info("[Offer E2E] Sales offer form");
     contexts.push(salesContext);
     const salesPage = await salesContext.newPage();
+    // Reloads below deliberately confirm leaving an unresolved screen; the
+    // persisted identity, not bypassed browser storage, enables recovery.
+    salesPage.on("dialog", (dialog) => dialog.accept());
     await login(salesPage, sales.email);
     const browserOrigin = new URL(salesPage.url()).origin;
     const capabilityPath = `/api/v1/staff/branches/${branch.id}/fitment-policies`;
@@ -442,7 +488,10 @@ test("real UI and PostgreSQL: bilingual mobile offers, approval, explicit public
         const results = await Promise.all(
           pages.map(async (page) => ({
             saved: await page.getByText("Saved from the server record.").count(),
-            conflict: await page.getByText("This record changed.", { exact: false }).count(),
+            conflict: Number(
+              (await page.getByRole("alert").filter({ hasText: "This record changed." }).count()) >
+                0
+            ),
           }))
         );
         return {
@@ -456,28 +505,165 @@ test("real UI and PostgreSQL: bilingual mobile offers, approval, explicit public
         where: { eventType: "OFFER_DRAFT_UPDATED", targetEntity: `offer_revision:${draft.id}` },
       })
     ).toBe(2);
-    // Fitment UI is explicitly out of PR4B-B scope. Use the actual authenticated
-    // Sales API/session boundary to attach reviewed synthetic coverage before
-    // continuing the existing browser submission journey.
-    const fitmentSaved = await salesContext.request.put(
-      new URL(
-        `/api/v1/staff/offers/${offerId}/revisions/${draft.id}/fitment`,
-        browserOrigin
-      ).toString(),
-      {
-        headers: { Origin: browserOrigin },
-        data: {
-          commandId: crypto.randomUUID(),
-          expectedVersion: 3,
-          mode: "BASE_VEHICLE_ALL_VARIANTS_VERIFIED",
-          evidenceRef: `CI:E2E:OFFER_ALL_VARIANTS:${uid}`,
-          coverage: fitmentCoverage,
-        },
-      }
-    );
-    expect(fitmentSaved.status()).toBe(200);
+    // Reload deliberately discards the losing commercial contender. Fitment is
+    // entered through genuine controls, using the authoritative shared version.
     await salesPage.reload();
     await expect(salesPage.locator("form #offer-titleEn")).toBeVisible();
+    await salesPage.getByTestId("offer-editor-fitment").click();
+    await expect(salesPage.getByTestId("offer-fitment-mode")).toHaveValue("");
+    await expect(
+      salesPage
+        .locator("section")
+        .filter({ hasText: "Submit for Operations review" })
+        .getByRole("button", { name: "Check answers" })
+    ).toBeDisabled();
+    const fitmentInput = {
+      mode: "BASE_VEHICLE_ALL_VARIANTS_VERIFIED" as const,
+      evidenceRef: `CI:E2E:OFFER_ALL_VARIANTS:${uid}`,
+      makeId: fitmentMake.id,
+      modelId: fitmentModel.id,
+    };
+    await enterFitment(salesPage, fitmentInput);
+    await expect(salesPage.getByTestId("offer-editor-commercial")).toBeDisabled();
+    const fitmentScreenshot = testInfo.outputPath("offer-fitment-english-mobile.png");
+    await salesPage.getByTestId("offer-fitment-mode").scrollIntoViewIfNeeded();
+    await salesPage.screenshot({ path: fitmentScreenshot, fullPage: true });
+    await testInfo.attach("offer-fitment-english-mobile", {
+      path: fitmentScreenshot,
+      contentType: "image/png",
+    });
+
+    const fitmentPath = `/api/v1/staff/offers/${offerId}/revisions/${draft.id}/fitment`;
+    const fitmentRoute = `**${fitmentPath}`;
+    let fitmentDispatches = 0;
+    const observeFitment = (request: import("@playwright/test").Request) => {
+      if (request.method() === "PUT" && new URL(request.url()).pathname === fitmentPath)
+        fitmentDispatches += 1;
+    };
+    salesPage.on("request", observeFitment);
+    await salesPage.evaluate((key) => {
+      const original = Storage.prototype.setItem;
+      Object.defineProperty(window, "__restoreFitmentStorage", {
+        configurable: true,
+        value: () => {
+          Storage.prototype.setItem = original;
+        },
+      });
+      Storage.prototype.setItem = function (name, value) {
+        if (name === key) throw new DOMException("Synthetic storage refusal", "QuotaExceededError");
+        return original.call(this, name, value);
+      };
+    }, OFFER_FITMENT_JOURNAL_KEY);
+    await salesPage.getByTestId("offer-fitment-save").click();
+    await expect(
+      salesPage
+        .getByRole("alert")
+        .filter({ hasText: /storage/i })
+        .first()
+    ).toBeVisible();
+    expect(fitmentDispatches).toBe(0);
+    await salesPage.evaluate(() => {
+      (window as unknown as { __restoreFitmentStorage: () => void }).__restoreFitmentStorage();
+    });
+    let originalFitmentBody: string | null = null;
+    await salesPage.route(fitmentRoute, async (route) => {
+      if (route.request().method() !== "PUT") return route.continue();
+      originalFitmentBody = route.request().postData();
+      await route.abort("failed"); // Actual API never receives the original request.
+    });
+    await salesPage.getByTestId("offer-fitment-save").click();
+    await expect(salesPage.getByTestId("offer-fitment-recheck")).toBeVisible();
+    const journalRaw = await salesPage.evaluate(
+      (key) => sessionStorage.getItem(key),
+      OFFER_FITMENT_JOURNAL_KEY
+    );
+    const fitmentJournal = JSON.parse(journalRaw!) as {
+      commandId: string;
+      expectedVersion: number;
+      actorId: string;
+      offerId: string;
+      revisionId: string;
+    };
+    expect(fitmentJournal).toMatchObject({
+      expectedVersion: 3,
+      actorId: sales.userId,
+      offerId,
+      revisionId: draft.id,
+    });
+    expect(journalRaw).not.toContain(fitmentInput.evidenceRef);
+    expect(journalRaw).not.toContain(fitmentModel.id);
+    expect(journalRaw).not.toContain(fitmentInput.mode);
+    expect(
+      await prisma.fitmentCommand.count({ where: { commandId: fitmentJournal.commandId } })
+    ).toBe(0);
+    await salesPage.unroute(fitmentRoute);
+    await salesPage.reload();
+    await salesPage.getByTestId("offer-fitment-recheck").click();
+    await expect(salesPage.getByTestId("offer-fitment-restore")).toBeVisible();
+    await salesPage.getByTestId("offer-fitment-restore").click();
+    await enterFitment(salesPage, { ...fitmentInput, evidenceRef: "CI:E2E:WRONG_ORIGINAL" });
+    await salesPage.getByTestId("offer-fitment-retry").click();
+    await expect(salesPage.getByRole("alert").filter({ hasText: /match/i }).first()).toBeVisible();
+    expect(fitmentDispatches).toBe(1);
+    expect(
+      await salesPage.evaluate((key) => sessionStorage.getItem(key), OFFER_FITMENT_JOURNAL_KEY)
+    ).toBe(journalRaw);
+    await salesPage.getByTestId("offer-fitment-evidence").fill(fitmentInput.evidenceRef);
+    let fitmentCommitted = false;
+    await salesPage.route(fitmentRoute, async (route) => {
+      if (route.request().method() !== "PUT") return route.continue();
+      expect(route.request().postData()).toBe(originalFitmentBody);
+      const actual = await route.fetch();
+      expect(actual.status()).toBe(200);
+      fitmentCommitted = true;
+      await route.abort("failed"); // Lose only a response from an actual committed transaction.
+    });
+    await salesPage.getByTestId("offer-fitment-retry").click();
+    await expect.poll(() => fitmentCommitted).toBe(true);
+    await expect(salesPage.getByTestId("offer-fitment-recheck")).toBeEnabled();
+    await salesPage.unroute(fitmentRoute);
+    await salesPage.reload();
+    await salesPage.getByTestId("offer-fitment-recheck").click();
+    await expect
+      .poll(() =>
+        salesPage.evaluate((key) => sessionStorage.getItem(key), OFFER_FITMENT_JOURNAL_KEY)
+      )
+      .toBeNull();
+    salesPage.off("request", observeFitment);
+    const fitmentApplied = await prisma.offerRevision.findUniqueOrThrow({
+      where: { id: draft.id },
+      include: { fitmentCoverage: true },
+    });
+    expect(fitmentApplied.version).toBe(4);
+    expect(fitmentApplied.titleEn).toBe(raceWinner.titleEn);
+    expect(fitmentApplied.status).toBe("DRAFT");
+    expect(fitmentApplied.fitmentMode).toBe(fitmentInput.mode);
+    expect(fitmentApplied.fitmentEvidenceRef).toBe(fitmentInput.evidenceRef);
+    expect(
+      fitmentApplied.fitmentCoverage.map(({ makeId, modelId, yearFrom, yearTo }) => ({
+        makeId,
+        modelId,
+        yearFrom,
+        yearTo,
+      }))
+    ).toEqual(fitmentCoverage);
+    expect(fitmentApplied.fitmentAllVariantsAttested).toBe(false);
+    expect(fitmentApplied.fitmentScopePriceAttested).toBe(false);
+    expect(
+      await prisma.fitmentCommand.count({
+        where: {
+          commandId: fitmentJournal.commandId,
+          resultVersion: 4,
+          outcome: "APPLIED",
+          actorUserId: sales.userId,
+        },
+      })
+    ).toBe(1);
+    expect(
+      await prisma.securityAuditEvent.count({
+        where: { eventType: "OFFER_FITMENT_UPDATED", targetEntity: `offer_revision:${draft.id}` },
+      })
+    ).toBe(1);
 
     console.info("[Offer E2E] Sales submission");
     const submitSection = salesPage
@@ -498,6 +684,8 @@ test("real UI and PostgreSQL: bilingual mobile offers, approval, explicit public
       name: "Fitment evidence for this revision",
     });
     await expect(englishReview).toContainText(`CI:E2E:OFFER_ALL_VARIANTS:${uid}`);
+    await expect(englishReview).toContainText(fitmentMake.nameEn);
+    await expect(englishReview).toContainText(fitmentModel.nameEn);
     await expect(englishReview).toContainText(fitmentModel.id);
     const englishApprove = opsPage.getByRole("button", { name: "Approve internally" });
     await expect(englishApprove).toBeDisabled();
@@ -752,23 +940,86 @@ test("real UI and PostgreSQL: bilingual mobile offers, approval, explicit public
     expect(arabicDraft.normalPriceMinor.toString()).toBe("100000");
     expect(arabicDraft.customerPriceMinor.toString()).toBe("80000");
     expect(arabicDraft.commissionRateBps).toBe(0);
-    const arabicFitmentSaved = await salesContext.request.put(
-      new URL(
-        `/api/v1/staff/offers/${arabicOfferId}/revisions/${arabicDraft.id}/fitment`,
-        browserOrigin
-      ).toString(),
-      {
-        headers: { Origin: browserOrigin },
-        data: {
-          commandId: crypto.randomUUID(),
-          expectedVersion: 1,
-          mode: "SERVICE_VEHICLE_INDEPENDENT_WITHIN_LISTED_COVERAGE",
-          evidenceRef: `CI:E2E:ARABIC_SCOPE:${uid}`,
-          coverage: fitmentCoverage,
-        },
-      }
+    await salesPage.getByTestId("offer-editor-fitment").click();
+    await expect(salesPage.getByTestId("offer-fitment-mode")).toHaveValue("");
+    await enterFitment(salesPage, {
+      mode: "SERVICE_VEHICLE_INDEPENDENT_WITHIN_LISTED_COVERAGE",
+      evidenceRef: `CI:E2E:ARABIC_SCOPE:${uid}`,
+      makeId: fitmentMake.id,
+      modelId: fitmentModel.id,
+    });
+    await expect(salesPage.locator("#fitment-make-0").locator("option:checked")).toHaveText(
+      fitmentMake.nameAr
     );
-    expect(arabicFitmentSaved.status()).toBe(200);
+    await expect(salesPage.locator("#fitment-model-0").locator("option:checked")).toHaveText(
+      fitmentModel.nameAr
+    );
+    expect(
+      await salesPage.evaluate(
+        () =>
+          Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) <=
+          innerWidth + 1
+      )
+    ).toBe(true);
+    const arabicFitmentScreenshot = testInfo.outputPath("offer-fitment-arabic-mobile.png");
+    await salesPage.getByTestId("offer-fitment-mode").scrollIntoViewIfNeeded();
+    await salesPage.screenshot({ path: arabicFitmentScreenshot, fullPage: true });
+    await testInfo.attach("offer-fitment-arabic-mobile", {
+      path: arabicFitmentScreenshot,
+      contentType: "image/png",
+    });
+    const arabicFitmentRequest = salesPage.waitForRequest(
+      (request) =>
+        request.method() === "PUT" &&
+        request.url().endsWith(`/offers/${arabicOfferId}/revisions/${arabicDraft.id}/fitment`)
+    );
+    await salesPage.getByTestId("offer-fitment-save").click();
+    const arabicFitmentBody = (await arabicFitmentRequest).postDataJSON() as { commandId: string };
+    await expect
+      .poll(
+        async () =>
+          (await prisma.offerRevision.findUniqueOrThrow({ where: { id: arabicDraft.id } })).version
+      )
+      .toBe(2);
+    await expect
+      .poll(() =>
+        salesPage.evaluate((key) => sessionStorage.getItem(key), OFFER_FITMENT_JOURNAL_KEY)
+      )
+      .toBeNull();
+    const arabicFitmentPersisted = await prisma.offerRevision.findUniqueOrThrow({
+      where: { id: arabicDraft.id },
+      include: { fitmentCoverage: true },
+    });
+    expect(arabicFitmentPersisted.fitmentMode).toBe(
+      "SERVICE_VEHICLE_INDEPENDENT_WITHIN_LISTED_COVERAGE"
+    );
+    expect(arabicFitmentPersisted.fitmentEvidenceRef).toBe(`CI:E2E:ARABIC_SCOPE:${uid}`);
+    expect(
+      arabicFitmentPersisted.fitmentCoverage.map(({ makeId, modelId, yearFrom, yearTo }) => ({
+        makeId,
+        modelId,
+        yearFrom,
+        yearTo,
+      }))
+    ).toEqual(fitmentCoverage);
+    expect(
+      await prisma.fitmentCommand.count({
+        where: {
+          commandId: arabicFitmentBody.commandId,
+          actorUserId: sales.userId,
+          resultVersion: 2,
+          outcome: "APPLIED",
+        },
+      })
+    ).toBe(1);
+    expect(
+      await prisma.securityAuditEvent.count({
+        where: {
+          eventType: "OFFER_FITMENT_UPDATED",
+          targetEntity: `offer_revision:${arabicDraft.id}`,
+        },
+      })
+    ).toBe(1);
     await salesPage.reload();
     await expect(salesPage.locator("main[dir=rtl]")).toBeVisible();
     await expect(salesPage.locator("form #offer-titleAr")).toHaveValue(arabicDraft.titleAr);
@@ -877,6 +1128,8 @@ test("real UI and PostgreSQL: bilingual mobile offers, approval, explicit public
       name: "إثبات توافق السيارة لهذه النسخة",
     });
     await expect(arabicReview).toContainText(fitmentModel.id);
+    await expect(arabicReview).toContainText(fitmentMake.nameAr);
+    await expect(arabicReview).toContainText(fitmentModel.nameAr);
     const arabicApprove = opsPage.getByRole("button", { name: "اعتماد داخلي" });
     for (const label of [
       "فحصت ملف الإثبات",

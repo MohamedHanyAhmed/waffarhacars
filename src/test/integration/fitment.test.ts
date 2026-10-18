@@ -6,7 +6,10 @@ import { getPrisma, disconnectDb } from "@/lib/db";
 import { resetAuth } from "@/lib/auth";
 import { resetServerEnvCache } from "@/lib/env";
 import { POST as createOfferRoute } from "@/app/api/v1/staff/offers/route";
-import { PUT as setFitmentRoute } from "@/app/api/v1/staff/offers/[offerId]/revisions/[revisionId]/fitment/route";
+import {
+  GET as readFitmentRoute,
+  PUT as setFitmentRoute,
+} from "@/app/api/v1/staff/offers/[offerId]/revisions/[revisionId]/fitment/route";
 import { GET as offerFitmentReceiptRoute } from "@/app/api/v1/staff/offers/[offerId]/revisions/[revisionId]/fitment/commands/[commandId]/route";
 import { POST as submitOfferRoute } from "@/app/api/v1/staff/offers/[offerId]/revisions/[revisionId]/submit/route";
 import { POST as approveOfferRoute } from "@/app/api/v1/staff/ops/offers/[offerId]/revisions/[revisionId]/approve/route";
@@ -521,6 +524,157 @@ describe("Verified offer fitment through real sessions, routes, and PostgreSQL",
     const revision = await db.offerRevision.findUniqueOrThrow({ where: { id: f.revisionId } });
     expect(revision.fitmentMode).toBeNull();
     expect(await db.offerPublication.count({ where: { offerId: f.offerId } })).toBe(0);
+  });
+
+  it("returns saved bilingual inactive fitment labels only to authorized revision readers without changing evidence", async () => {
+    const f = await fixture();
+    const db = getPrisma();
+    expect((await setFitment(f)).status).toBe(200);
+    await db.vehicleMake.update({ where: { id: f.makeId }, data: { isActive: false } });
+    await db.vehicleModel.update({ where: { id: f.modelId }, data: { isActive: false } });
+    await db.providerOrganization.update({
+      where: { id: f.providerId },
+      data: { status: "PAUSED" },
+    });
+    await db.providerBranch.update({ where: { id: f.branchId }, data: { status: "PAUSED" } });
+    await db.serviceDefinition.update({ where: { id: f.serviceId }, data: { isActive: false } });
+    const before = await db.offerRevision.findUniqueOrThrow({ where: { id: f.revisionId } });
+    const receiptsBefore = await db.fitmentCommand.count({ where: { resourceId: f.revisionId } });
+    const auditsBefore = await db.securityAuditEvent.count({
+      where: { targetEntity: `offer_revision:${f.revisionId}` },
+    });
+    const path = `/api/v1/staff/offers/${f.offerId}/revisions/${f.revisionId}/fitment`;
+    for (const reader of [f.sales, f.ops]) {
+      const response = await readFitmentRoute(
+        request(path, "GET", reader.session),
+        offerContext(f)
+      );
+      expect(response.status).toBe(200);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      expect(await response.json()).toEqual({
+        data: {
+          revisionId: f.revisionId,
+          offerId: f.offerId,
+          version: 2,
+          mode: "BASE_VEHICLE_ALL_VARIANTS_VERIFIED",
+          evidenceRef: "CI:PROVIDER:ALL_VARIANTS:001",
+          context: {
+            providerStatus: "PAUSED",
+            branchStatus: "PAUSED",
+            serviceIsActive: false,
+            categoryIsActive: true,
+          },
+          coverage: [
+            {
+              ...f.coverage[0],
+              make: {
+                id: f.makeId,
+                nameEn: "Synthetic make",
+                nameAr: "ماركة اختبارية",
+                isActive: false,
+              },
+              model: {
+                id: f.modelId,
+                nameEn: "Synthetic model A",
+                nameAr: "طراز أ اختباري",
+                isActive: false,
+              },
+            },
+          ],
+        },
+      });
+    }
+    const foreignSales = await identity("SALES_AGENT");
+    expect(
+      (await readFitmentRoute(request(path, "GET", foreignSales.session), offerContext(f))).status
+    ).toBe(404);
+    expect((await readFitmentRoute(request(path, "GET"), offerContext(f))).status).toBe(401);
+    const wrongParent = {
+      params: Promise.resolve({ offerId: crypto.randomUUID(), revisionId: f.revisionId }),
+    };
+    expect((await readFitmentRoute(request(path, "GET", f.ops.session), wrongParent)).status).toBe(
+      404
+    );
+    expect(await db.offerRevision.findUniqueOrThrow({ where: { id: f.revisionId } })).toEqual(
+      before
+    );
+    expect(await db.fitmentCommand.count({ where: { resourceId: f.revisionId } })).toBe(
+      receiptsBefore
+    );
+    expect(
+      await db.securityAuditEvent.count({
+        where: { targetEntity: `offer_revision:${f.revisionId}` },
+      })
+    ).toBe(auditsBefore);
+  });
+
+  it("reads revision version, coverage and labels from one snapshot while a real concurrent transaction replaces draft evidence", async () => {
+    const f = await fixture();
+    expect((await setFitment(f)).status).toBe(200);
+    const path = `/api/v1/staff/offers/${f.offerId}/revisions/${f.revisionId}/fitment`;
+    const blocker = new pg.Client({ connectionString: databaseUrl });
+    let pending: Promise<Response> | undefined;
+    try {
+      await blocker.connect();
+      await blocker.query("BEGIN");
+      const pid = Number((await blocker.query("SELECT pg_backend_pid() AS pid")).rows[0].pid);
+      // Hold the canonical label read after the Repeatable Read transaction has
+      // established its snapshot; release by an observed real engine waiter.
+      await blocker.query("LOCK TABLE vehicle_makes IN ACCESS EXCLUSIVE MODE");
+      pending = readFitmentRoute(request(path, "GET", f.sales.session), offerContext(f));
+      await waitForBlocked(pid, 1);
+      // Synthetic DRAFT fixture replacement, atomically committed while the read
+      // is in flight; no immutable guards or production mutation hooks bypassed.
+      await blocker.query(
+        'UPDATE offer_revisions SET version = 3, "fitmentEvidenceRef" = $2 WHERE id = $1::uuid',
+        [f.revisionId, "CI:SNAPSHOT:NEW"]
+      );
+      await blocker.query(
+        'UPDATE offer_fitment_coverage SET "yearFrom" = 2021 WHERE "revisionId" = $1::uuid',
+        [f.revisionId]
+      );
+      await blocker.query(
+        'UPDATE vehicle_makes SET "nameEn" = $2, "nameAr" = $3, "isActive" = false WHERE id = $1::uuid',
+        [f.makeId, "Synthetic renamed make", "ماركة جديدة اختبارية"]
+      );
+      await blocker.query('UPDATE service_definitions SET "isActive" = false WHERE id = $1::uuid', [
+        f.serviceId,
+      ]);
+      await blocker.query("COMMIT");
+      const beforeCommit = await pending;
+      expect(beforeCommit.status).toBe(200);
+      expect((await beforeCommit.json()).data).toMatchObject({
+        version: 2,
+        evidenceRef: "CI:PROVIDER:ALL_VARIANTS:001",
+        context: {
+          providerStatus: "ACTIVE",
+          branchStatus: "ACTIVE",
+          serviceIsActive: true,
+          categoryIsActive: true,
+        },
+        coverage: [{ yearFrom: 2020, make: { nameEn: "Synthetic make", isActive: true } }],
+      });
+      const afterCommit = await readFitmentRoute(
+        request(path, "GET", f.sales.session),
+        offerContext(f)
+      );
+      expect(afterCommit.status).toBe(200);
+      expect((await afterCommit.json()).data).toMatchObject({
+        version: 3,
+        evidenceRef: "CI:SNAPSHOT:NEW",
+        context: {
+          providerStatus: "ACTIVE",
+          branchStatus: "ACTIVE",
+          serviceIsActive: false,
+          categoryIsActive: true,
+        },
+        coverage: [{ yearFrom: 2021, make: { nameEn: "Synthetic renamed make", isActive: false } }],
+      });
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => {});
+      await blocker.end().catch(() => {});
+      await pending?.catch(() => {});
+    }
   });
 
   it("accepts independently evidenced service scope only with explicit enumerated coverage", async () => {

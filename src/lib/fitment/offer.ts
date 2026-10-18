@@ -1,5 +1,6 @@
 import "server-only";
 import { z } from "zod";
+import { Prisma } from "@/generated/prisma/client";
 import { getPrisma } from "@/lib/db";
 import type { AuthorizedStaffContext } from "@/lib/dal";
 import { logAuditEvent } from "@/lib/dal/audit";
@@ -26,13 +27,27 @@ export const OfferFitmentSchema = z
   .strict();
 export type OfferFitmentInput = z.infer<typeof OfferFitmentSchema>;
 
+type VehicleLabel = { id: string; nameEn: string; nameAr: string; isActive: boolean };
+
 function publicResult(revision: {
   id: string;
   offerId: string;
   version: number;
   fitmentMode: string | null;
   fitmentEvidenceRef: string | null;
-  fitmentCoverage?: Array<{ makeId: string; modelId: string; yearFrom: number; yearTo: number }>;
+  offer: {
+    providerOrganization: { status: string };
+    branch: { status: string };
+  };
+  serviceDefinition: { isActive: boolean; category: { isActive: boolean } };
+  fitmentCoverage: Array<{
+    makeId: string;
+    modelId: string;
+    yearFrom: number;
+    yearTo: number;
+    make: VehicleLabel;
+    model: VehicleLabel;
+  }>;
 }) {
   return {
     revisionId: revision.id,
@@ -40,12 +55,20 @@ function publicResult(revision: {
     version: revision.version,
     mode: revision.fitmentMode,
     evidenceRef: revision.fitmentEvidenceRef,
+    context: {
+      providerStatus: revision.offer.providerOrganization.status,
+      branchStatus: revision.offer.branch.status,
+      serviceIsActive: revision.serviceDefinition.isActive,
+      categoryIsActive: revision.serviceDefinition.category.isActive,
+    },
     coverage:
       revision.fitmentCoverage?.map((row) => ({
         makeId: row.makeId,
         modelId: row.modelId,
         yearFrom: row.yearFrom,
         yearTo: row.yearTo,
+        make: row.make,
+        model: row.model,
       })) ?? [],
   };
 }
@@ -55,14 +78,47 @@ export async function readOfferFitment(
   offerId: string,
   revisionId: string
 ) {
-  const row = await getPrisma().offerRevision.findFirst({
-    where: { id: revisionId, offerId },
-    include: { fitmentCoverage: true },
-  });
-  if (!row) throw new FitmentError(404, "NOT_FOUND");
-  if (actor.roleAssignment.role === "SALES_AGENT" && row.createdByUserId !== actor.userId)
-    throw new FitmentError(404, "NOT_FOUND");
-  return publicResult(row);
+  // Prisma may resolve included relations in separate queries. Keep revision CAS,
+  // coverage and canonical labels in the same MVCC snapshot, including inactive
+  // historical choices that are deliberately absent from the active catalogue.
+  return getPrisma().$transaction(
+    async (tx) => {
+      // Bound actual PostgreSQL waits as well as Prisma's interactive lifetime;
+      // adapter cancellation alone is not a database lock-wait deadline.
+      await tx.$queryRaw`SELECT set_config('lock_timeout', '3000ms', true)`;
+      await tx.$queryRaw`SELECT set_config('statement_timeout', '7000ms', true)`;
+      const labels = { id: true, nameEn: true, nameAr: true, isActive: true } as const;
+      const row = await tx.offerRevision.findFirst({
+        where: {
+          id: revisionId,
+          offerId,
+          ...(actor.roleAssignment.role === "SALES_AGENT" ? { createdByUserId: actor.userId } : {}),
+        },
+        include: {
+          offer: {
+            select: {
+              providerOrganization: { select: { status: true } },
+              branch: { select: { status: true } },
+            },
+          },
+          serviceDefinition: {
+            select: { isActive: true, category: { select: { isActive: true } } },
+          },
+          fitmentCoverage: {
+            orderBy: [{ makeId: "asc" }, { modelId: "asc" }, { yearFrom: "asc" }],
+            include: { make: { select: labels }, model: { select: labels } },
+          },
+        },
+      });
+      if (!row) throw new FitmentError(404, "NOT_FOUND");
+      return publicResult(row);
+    },
+    {
+      isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead,
+      maxWait: 4000,
+      timeout: 8000,
+    }
+  );
 }
 
 export async function offerFitmentReceipt(
