@@ -1466,11 +1466,18 @@ export default function StaffOfferDetailPage() {
                         <ul className="mt-2 list-disc space-y-2 ps-5 text-sm">
                           {reviewedFitment.coverage.map((row) => (
                             <li key={`${row.modelId}:${row.yearFrom}:${row.yearTo}`}>
-                              <bdi dir="ltr">
+                              <span>
                                 {locale === "ar" ? row.make.nameAr : row.make.nameEn} ·{" "}
-                                {locale === "ar" ? row.model.nameAr : row.model.nameEn} ·{" "}
+                                {locale === "ar" ? row.model.nameAr : row.model.nameEn}
+                              </span>{" "}
+                              <bdi dir="ltr">
                                 {row.yearFrom}–{row.yearTo}
                               </bdi>
+                              <p className="break-all text-xs text-slate-500">
+                                <bdi dir="ltr">
+                                  {row.makeId} / {row.modelId}
+                                </bdi>
+                              </p>
                             </li>
                           ))}
                         </ul>

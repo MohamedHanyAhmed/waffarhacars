@@ -13,6 +13,20 @@ const secret = "JBSWY3DPEHPK3PXP";
 const databaseUrl =
   process.env.DATABASE_URL ??
   "postgresql://test_user:test_password@localhost:5432/waffarhacars_test";
+// Independent real-login contexts must not consume one another's production
+// sign-in limits. CI trusts these reserved benchmark addresses only on its
+// loopback ingress; each context keeps its identity through account switching.
+const assignedContextAddresses = new Map<string, string>();
+function contextAddress(role: "sales" | "ops") {
+  // Test identity remains stable when Playwright restarts a failed worker.
+  const identity = `${test.info().testId}:${role}`;
+  const digest = crypto.createHash("sha256").update(identity).digest();
+  const address = `198.18.${digest[0]}.${digest[1]}`;
+  const owner = assignedContextAddresses.get(address);
+  if (owner && owner !== identity) throw new Error("Synthetic login address collision");
+  assignedContextAddresses.set(address, identity);
+  return address;
+}
 
 function deferred() {
   let resolve!: () => void;
@@ -25,12 +39,30 @@ async function login(page: Page, email: string) {
   await page.goto("/staff/login");
   await page.locator("input[type=email]").fill(email);
   await page.locator("input[type=password]").fill(password);
+  const signInResponse = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname === "/api/auth/sign-in/email"
+  );
   await page.locator("button[type=submit]").click();
+  expect(
+    (await signInResponse).status(),
+    "Real staff password sign-in must succeed before waiting for MFA navigation"
+  ).toBe(200);
   await page.waitForURL("**/staff/mfa/verify");
   await page
     .locator("input[type=text]")
     .fill(await createOTP(secret, { digits: 6, period: 30 }).totp());
+  const totpResponse = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname === "/api/auth/two-factor/verify-totp"
+  );
   await page.locator("button[type=submit]").click();
+  expect(
+    (await totpResponse).status(),
+    "Real staff TOTP verification must succeed before waiting for the authenticated workspace"
+  ).toBe(200);
   await page.waitForURL(
     (url) => !url.pathname.includes("/mfa/") && !url.pathname.endsWith("/login")
   );
@@ -248,7 +280,7 @@ async function createDraft(context: BrowserContext, f: Fixture) {
 type Draft = Awaited<ReturnType<typeof createDraft>>;
 async function newSession(browser: Browser, f: Fixture, contexts: BrowserContext[]) {
   const context = await browser.newContext({
-    extraHTTPHeaders: { "x-forwarded-for": "198.51.100.94" },
+    extraHTTPHeaders: { "x-forwarded-for": contextAddress("sales") },
   });
   contexts.push(context);
   const page = await context.newPage();
@@ -295,7 +327,7 @@ const approvalLabels = [
 ];
 async function opsSession(browser: Browser, f: Fixture, contexts: BrowserContext[]) {
   const context = await browser.newContext({
-    extraHTTPHeaders: { "x-forwarded-for": "198.51.100.95" },
+    extraHTTPHeaders: { "x-forwarded-for": contextAddress("ops") },
   });
   contexts.push(context);
   const page = await context.newPage();
