@@ -1,6 +1,6 @@
 "use client";
 
-import { useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useLayoutEffect, useRef, useState } from "react";
 import { offerApi } from "@/lib/offer/client-api";
 import {
   capabilityCommandPath,
@@ -18,6 +18,20 @@ import {
 } from "@/lib/fitment/client";
 
 type Content = { evidenceRef?: string; coverage?: CapabilityCoverage[]; reason?: string };
+export type CapabilityHydrationTicket = Readonly<{
+  token: number;
+  actorId: string;
+  branchId: string;
+  commandId: string;
+  policyId: string;
+  resultVersion: number;
+}>;
+export type CapabilityHydrationView = {
+  actorId: string;
+  branchId: string;
+  policyId: string;
+  version: number;
+};
 const contentActions: CapabilityAction[] = ["CREATE", "EDIT", "REJECT"];
 function errorKey(status: number) {
   if (status === 401) return "capabilities.authentication";
@@ -60,6 +74,15 @@ export function useCapabilityCommand({
   const [hasFrozenBody, setHasFrozenBody] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [receipt, setReceipt] = useState<CapabilityReceipt | null>(null);
+  const [awaitingHydration, setAwaitingHydration] = useState<CapabilityHydrationTicket | null>(
+    null
+  );
+  const hydration = useRef<{
+    ticket: CapabilityHydrationTicket;
+    journal: CapabilityJournal;
+    generation: number;
+  } | null>(null);
+  const hydrationSequence = useRef(0);
   const generation = useRef(0);
   const inFlight = useRef(false);
   const memory = useRef<{ commandId: string; body: CapabilityRequest } | null>(null);
@@ -70,6 +93,7 @@ export function useCapabilityCommand({
     scope.current = { actorId, branchId };
     memory.current = null;
     inFlight.current = false;
+    hydration.current = null;
     let active = true;
     queueMicrotask(() => {
       if (!active) return;
@@ -78,11 +102,13 @@ export function useCapabilityCommand({
       setHasFrozenBody(false);
       setRetryAvailable(false);
       setReceipt(null);
+      setAwaitingHydration(null);
       setError(null);
     });
     const pendingControllers = controllers.current;
     return () => {
       active = false;
+      hydration.current = null;
       generation.current += 1;
       for (const controller of pendingControllers) controller.abort();
       pendingControllers.clear();
@@ -128,20 +154,76 @@ export function useCapabilityCommand({
       generation.current,
       readCapabilityJournal()
     );
+  const invalidateHydration = () => {
+    hydration.current = null;
+    setAwaitingHydration(null);
+  };
+  // Called only with a current authoritative view, in the same React batch as
+  // the page's form hydration. The durable journal remains the interlock until
+  // this acknowledgement; HTTP success/read completion cannot unlock inputs.
+  const acknowledgeHydration = useCallback(
+    (ticket: CapabilityHydrationTicket, view: CapabilityHydrationView): boolean => {
+      const active = hydration.current;
+      if (
+        !active ||
+        active.ticket !== ticket ||
+        inFlight.current ||
+        !ownsCapabilityCallback(
+          active.journal,
+          scope.current.actorId,
+          scope.current.branchId,
+          active.generation,
+          generation.current,
+          readCapabilityJournal()
+        ) ||
+        view.actorId !== ticket.actorId ||
+        view.branchId !== ticket.branchId ||
+        view.policyId !== ticket.policyId ||
+        !Number.isSafeInteger(view.version) ||
+        view.version < ticket.resultVersion
+      )
+        return false;
+      let cleared = false;
+      try {
+        cleared = clearCapabilityJournal(ticket.actorId, ticket.commandId);
+      } catch {
+        // Retain the interlock when storage becomes unavailable after dispatch.
+      }
+      if (!cleared) {
+        setError("capabilities.storageUnavailable");
+        setStored(readCapabilityJournal());
+        return false;
+      }
+      hydration.current = null;
+      memory.current = null;
+      setAwaitingHydration(null);
+      setHasFrozenBody(false);
+      setStored(readCapabilityJournal());
+      setRetryAvailable(false);
+      setError(null);
+      return true;
+    },
+    []
+  );
   const settle = async (j: CapabilityJournal, result: CapabilityReceipt, dispatched: number) => {
     if (!owns(j, dispatched)) return;
     setReceipt(result);
     // Receipt is historical evidence. Current activation comes only from the
     // subsequent authoritative workspace read, never from the receipt action.
-    if (!(await onRefresh()) || !owns(j, dispatched)) return;
-    if (!clearCapabilityJournal(j.actorId, j.commandId)) {
-      setError("capabilities.storageUnavailable");
-      setStored(readCapabilityJournal());
+    if (!(await onRefresh()) || !owns(j, dispatched)) {
+      if (owns(j, dispatched)) setError("capabilities.loadError");
       return;
     }
-    memory.current = null;
-    setHasFrozenBody(false);
-    setStored(readCapabilityJournal());
+    const ticket = Object.freeze({
+      token: ++hydrationSequence.current,
+      actorId: j.actorId,
+      branchId: j.branchId,
+      commandId: j.commandId,
+      policyId: result.policyId,
+      resultVersion: result.resultVersion,
+    });
+    hydration.current = { ticket, journal: j, generation: dispatched };
+    setAwaitingHydration(ticket);
     setRetryAvailable(false);
     setError(null);
   };
@@ -149,6 +231,7 @@ export function useCapabilityCommand({
     if (inFlight.current) return;
     const dispatched = generation.current;
     inFlight.current = true;
+    invalidateHydration();
     setPending(true);
     setRetryAvailable(false);
     setError(null);
@@ -212,6 +295,7 @@ export function useCapabilityCommand({
     }
     const dispatched = generation.current;
     inFlight.current = true;
+    invalidateHydration();
     setPending(true);
     setReceipt(null);
     try {
@@ -264,6 +348,7 @@ export function useCapabilityCommand({
     const j = state.journal;
     const dispatched = generation.current;
     inFlight.current = true;
+    invalidateHydration();
     setPending(true);
     setRetryAvailable(false);
     setError(null);
@@ -340,6 +425,8 @@ export function useCapabilityCommand({
     journal,
     retryAvailable,
     receipt,
+    awaitingHydration,
+    acknowledgeHydration,
     error,
     locked: pending || stored.kind !== "empty",
     unavailable: stored.kind === "invalid" || stored.kind === "unavailable",

@@ -94,6 +94,7 @@
     "reconstruction": "Re-enter the exact original request. Content was not stored in this browser; only a matching fingerprint permits a retry. If you cannot reproduce it, contact Operations.",
     "otherOwner": "An unresolved command belongs to another account or branch in this tab. Return to its original workspace and account. Its content cannot be accessed or cleared here.",
     "historicalReceipt": "Original command committed. This is historical evidence only; current state below is read separately.",
+    "settling": "Command applied — waiting for the verified current form. Editing stays locked until ready.",
     "withdrawalWarning": "Withdrawal remains possible when the provider or branch is paused. No previous capability becomes active automatically.",
     "replacementWarning": "Approval retires whichever capability is current when the transaction commits. The original target version is checked; a particular predecessor is not locked by this confirmation.",
     "noCurrent": "No current capability for this category.",
