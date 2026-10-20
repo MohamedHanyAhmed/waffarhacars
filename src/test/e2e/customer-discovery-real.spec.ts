@@ -390,6 +390,8 @@ test("a genuine database read timeout is unavailable rather than empty, releases
   const observer = new pg.Client({ connectionString: databaseUrl, connectionTimeoutMillis: 5000 });
   const detailPage = await page.context().newPage();
   const coverageObserved = deferred();
+  const listErrorCaptured = deferred();
+  let listErrorBody: unknown;
   let locked = false;
   let blockerDisconnected = false;
   blocker.on("error", () => {
@@ -417,6 +419,21 @@ test("a genuine database read timeout is unavailable rather than empty, releases
       }
     });
     const before = await unchangedReadState();
+    await page.route("**/api/v1/offers?*", async (route) => {
+      const actual = await route.fetch();
+      if (actual.status() === 503) {
+        // Inspect the genuine completed API response before delivering its
+        // unchanged bytes. The browser client may abandon an error body after
+        // classifying its status, so its Response.json() is not our evidence.
+        listErrorBody = await actual.json();
+        listErrorCaptured.resolve();
+      }
+      try {
+        await route.fulfill({ response: actual });
+      } catch {
+        /* The read may be cancelled after its error status is delivered. */
+      }
+    });
     await blocker.query("BEGIN");
     locked = true;
     await blocker.query("SET LOCAL idle_in_transaction_session_timeout = '12s'");
@@ -444,11 +461,9 @@ test("a genuine database read timeout is unavailable rather than empty, releases
     const failed = await response;
     expect(failed.status()).toBe(503);
     expect((await coverageFailure).status()).toBe(503);
-    // Release the real sibling response before reading browser response bodies.
-    // Holding a routing callback while awaiting a different response body can
-    // stall Playwright's shared protocol; it is not an application DB timeout.
     coverageObserved.resolve();
-    expect(await failed.json()).toEqual({ error: "SERVICE_UNAVAILABLE" });
+    await listErrorCaptured.promise;
+    expect(listErrorBody).toEqual({ error: "SERVICE_UNAVAILABLE" });
     expect(failed.headers()["cache-control"]).toContain("no-store");
     await expect(alert(detailPage)).toBeVisible();
     await expect(detail(detailPage)).toHaveCount(0);
@@ -472,6 +487,7 @@ test("a genuine database read timeout is unavailable rather than empty, releases
       if (locked && !blockerDisconnected) await blocker.query("ROLLBACK");
     } finally {
       await Promise.all([blocker.end(), observer.end()]);
+      await page.unroute("**/api/v1/offers?*");
       await detailPage.close();
     }
   }
