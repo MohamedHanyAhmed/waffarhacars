@@ -271,7 +271,7 @@ test("committed CREATE with failed authoritative read remains locked until origi
   }
 });
 
-test("reconstructed CREATE retry relocks evidence and coverage until its actual receipt and current form settle", async ({
+test("original CREATE completing separately cannot leave restored content editable after known receipt and failed current read", async ({
   browser,
 }, info) => {
   const f = await fixture(browser, info.testId);
@@ -326,23 +326,35 @@ test("reconstructed CREATE retry relocks evidence and coverage until its actual 
       await release.promise;
       await route.fulfill({ response: actual });
     });
-    const retryRequest = page.waitForRequest(
-      (r) => r.method() === "POST" && new URL(r.url()).pathname === f.api
-    );
     let writes = 0;
     page.on("request", (r) => {
       if (r.method() !== "GET" && new URL(r.url()).pathname.startsWith(f.api)) writes++;
     });
-    const retried = await mutation(page, f.api, "", "capability-retry", 201);
-    expect((await retryRequest).postDataJSON()).toEqual(original);
-    expect(retried.command.commandId).toBe(original!.commandId);
+    // Complete the exact original command through the real cookie-authenticated
+    // public API, representing an independently finishing original request. Do
+    // not call the UI retry hook: it would repopulate the body's in-memory copy
+    // and change needsContent, missing the restored-without-memory condition.
+    const originalBody = structuredClone(original!);
+    const completion = await page.request.post(f.api, {
+      headers: { Origin: new URL(page.url()).origin },
+      data: originalBody,
+    });
+    expect(completion.status()).toBe(201);
+    expect(originalBody).toEqual(original);
+    const completed = (await completion.json()) as Receipt;
+    expect(completed.command.commandId).toBe(original!.commandId);
+    const firstReceiptRead = page.waitForResponse(
+      (r) => r.request().method() === "GET" && r.url().includes(completed.command.commandId)
+    );
+    await page.getByTestId("capability-recheck").click();
+    expect((await firstReceiptRead).status()).toBe(200);
     await failedRead.promise;
-    // Pending is now false: the real retry committed and its receipt is known,
+    // Pending is now false: the original command's real receipt is known,
     // but its current read failed while restore/needsContent still apply. This
     // is the decisive reconstruction escape, not merely the pending lock.
     await expect(page.getByTestId("capability-recheck")).toBeEnabled();
     await expect(page.getByTestId("capability-form-state")).toContainText(
-      retried.command.commandId
+      completed.command.commandId
     );
     await expect(page.locator("#capability-evidence")).toBeDisabled();
     for (const id of [
@@ -368,13 +380,18 @@ test("reconstructed CREATE retry relocks evidence and coverage until its actual 
           .querySelector(`[data-testid="${id}"]`)
           ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
-    expect(writes).toBe(1);
-    const policyId = retried.command.policyId;
+    expect(writes).toBe(0);
+    const policyId = completed.command.policyId;
     expect(
       await f.prisma.branchCapabilityVersion.findUniqueOrThrow({ where: { id: policyId } })
     ).toMatchObject({ version: 1, status: "DRAFT", evidenceRef: "CI:SETTLEMENT:RECONSTRUCT" });
+    const savedCoverage = await f.prisma.branchCapabilityCoverage.findMany({
+      where: { versionId: policyId },
+      select: { makeId: true, modelId: true, yearFrom: true, yearTo: true },
+    });
+    expect(savedCoverage).toEqual(originalBody.coverage);
     const receiptRead = page.waitForResponse(
-      (r) => r.request().method() === "GET" && r.url().includes(retried.command.commandId)
+      (r) => r.request().method() === "GET" && r.url().includes(completed.command.commandId)
     );
     await page.getByTestId("capability-recheck").click();
     expect((await receiptRead).status()).toBe(200);
