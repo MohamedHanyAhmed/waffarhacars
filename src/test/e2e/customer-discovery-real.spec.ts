@@ -17,6 +17,8 @@ function deferred() {
 const cards = (page: Page) => page.getByTestId("discovery-offer-card");
 const detail = (page: Page) => page.getByTestId("discovery-detail");
 const coverage = (page: Page) => page.getByTestId("discovery-coverage");
+// Next's route announcer also has role=alert, outside the application landmark.
+const alert = (page: Page) => page.locator("main").getByRole("alert");
 const offerPath = (id: string) => `/customer/offers/${id}`;
 async function choose(page: Page, category: string) {
   await page.getByTestId("discovery-category").selectOption(category);
@@ -320,7 +322,7 @@ test("publication replacement between actual detail and coverage reads rejects m
       data: { pinnedRevisionId: successor.id, version: { increment: 1 } },
     });
     releaseCoverage.resolve();
-    await expect(page.getByRole("alert")).toBeVisible();
+    await expect(alert(page)).toBeVisible();
     await expect(detail(page)).toHaveCount(0);
     await expect(coverage(page)).toHaveCount(0);
     held = false;
@@ -389,6 +391,11 @@ test("a genuine database read timeout is unavailable rather than empty, releases
   const detailPage = await page.context().newPage();
   const coverageObserved = deferred();
   let locked = false;
+  let blockerDisconnected = false;
+  blocker.on("error", () => {
+    blockerDisconnected = true;
+    coverageObserved.resolve();
+  });
   await blocker.connect();
   try {
     await observer.connect();
@@ -436,18 +443,22 @@ test("a genuine database read timeout is unavailable rather than empty, releases
       .toBeGreaterThanOrEqual(1);
     const failed = await response;
     expect(failed.status()).toBe(503);
+    expect((await coverageFailure).status()).toBe(503);
+    // Release the real sibling response before reading browser response bodies.
+    // Holding a routing callback while awaiting a different response body can
+    // stall Playwright's shared protocol; it is not an application DB timeout.
+    coverageObserved.resolve();
     expect(await failed.json()).toEqual({ error: "SERVICE_UNAVAILABLE" });
     expect(failed.headers()["cache-control"]).toContain("no-store");
-    expect((await coverageFailure).status()).toBe(503);
-    coverageObserved.resolve();
-    await expect(detailPage.getByRole("alert")).toBeVisible();
+    await expect(alert(detailPage)).toBeVisible();
     await expect(detail(detailPage)).toHaveCount(0);
     await expect(coverage(detailPage)).toHaveCount(0);
-    await expect(page.getByRole("alert")).toBeVisible();
+    await expect(alert(page)).toBeVisible();
     await expect(cards(page)).toHaveCount(0);
     await expect(page.getByTestId("discovery-retry")).toBeEnabled();
     await blocker.query("ROLLBACK");
     locked = false;
+    expect(blockerDisconnected).toBe(false);
     expect(await unchangedReadState()).toEqual(before);
     await page.getByTestId("discovery-retry").click();
     await expect(cards(page).first()).toBeVisible();
@@ -457,9 +468,12 @@ test("a genuine database read timeout is unavailable rather than empty, releases
     await noDemoOrPrivateClaims(page);
   } finally {
     coverageObserved.resolve();
-    if (locked) await blocker.query("ROLLBACK");
-    await Promise.all([blocker.end(), observer.end()]);
-    await detailPage.close();
+    try {
+      if (locked && !blockerDisconnected) await blocker.query("ROLLBACK");
+    } finally {
+      await Promise.all([blocker.end(), observer.end()]);
+      await detailPage.close();
+    }
   }
 });
 
@@ -467,13 +481,13 @@ test("invalid query and missing detail have safe deliberate recovery without dem
   page,
 }) => {
   await page.goto("/customer/offers?category=not-a-category&cursor=invalid");
-  await expect(page.getByRole("alert")).toBeVisible();
+  await expect(alert(page)).toBeVisible();
   await expect(cards(page)).toHaveCount(0);
   await expect(page.getByTestId("discovery-retry")).toBeEnabled();
   await page.getByTestId("discovery-retry").click();
   await expect(cards(page).first()).toBeVisible();
   await page.goto("/customer/offers/00000000-0000-4000-8000-000000000000");
-  await expect(page.getByRole("alert")).toBeVisible();
+  await expect(alert(page)).toBeVisible();
   await expect(detail(page)).toHaveCount(0);
   await expect(coverage(page)).toHaveCount(0);
   await noDemoOrPrivateClaims(page);
@@ -490,7 +504,7 @@ test("explicit and focus refresh remove stale success after actual withdrawal, p
     data: { status: "UNPUBLISHED", unpublishedAt: new Date(), version: { increment: 1 } },
   });
   await page.getByTestId("discovery-refresh").click();
-  await expect(page.getByRole("alert")).toBeVisible();
+  await expect(alert(page)).toBeVisible();
   await expect(detail(page)).toHaveCount(0);
   await expect(coverage(page)).toHaveCount(0);
   expect((await page.request.get(`/api/v1/offers/${target.offerId}`)).status()).toBe(404);
@@ -504,7 +518,7 @@ test("explicit and focus refresh remove stale success after actual withdrawal, p
   });
   try {
     await page.evaluate(() => window.dispatchEvent(new Event("focus")));
-    await expect(page.getByRole("alert")).toBeVisible();
+    await expect(alert(page)).toBeVisible();
     await expect(detail(page)).toHaveCount(0);
     await expect(coverage(page)).toHaveCount(0);
   } finally {
@@ -522,7 +536,7 @@ test("explicit and focus refresh remove stale success after actual withdrawal, p
     data: { pinnedRevisionId: expired.id, version: { increment: 1 } },
   });
   await page.getByTestId("discovery-refresh").click();
-  await expect(page.getByRole("alert")).toBeVisible();
+  await expect(alert(page)).toBeVisible();
   await expect(coverage(page)).toHaveCount(0);
   expect((await page.request.get(`/api/v1/offers/${expiring.offerId}`)).status()).toBe(404);
 
@@ -546,7 +560,7 @@ test("explicit and focus refresh remove stale success after actual withdrawal, p
     });
   });
   await page.getByTestId("discovery-refresh").click();
-  await expect(page.getByRole("alert")).toBeVisible();
+  await expect(alert(page)).toBeVisible();
   await expect(detail(page)).toHaveCount(0);
   await expect(coverage(page)).toHaveCount(0);
   expect(
