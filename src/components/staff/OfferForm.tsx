@@ -124,6 +124,9 @@ export function OfferForm({
   onReconciled,
   onDirtyChange,
   onConflict,
+  disabled = false,
+  readOnly = false,
+  onStateChange,
 }: {
   revision?: OfferRevisionDto;
   offer?: OfferDto;
@@ -131,6 +134,9 @@ export function OfferForm({
   onReconciled?: (updated: OfferRevisionDto) => void;
   onDirtyChange?: (dirty: boolean) => void;
   onConflict?: () => void;
+  disabled?: boolean;
+  readOnly?: boolean;
+  onStateChange?: (state: { dirty: boolean; pending: boolean; unknown: boolean }) => void;
 }) {
   const { t, locale, dir } = useI18n();
   const router = useRouter();
@@ -144,6 +150,28 @@ export function OfferForm({
   const [stage, setStage] = useState<"edit" | "check">("edit");
   const [pending, setPending] = useState(false);
   const [unknown, setUnknown] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  const [baseVersion, setBaseVersion] = useState(revision?.version);
+  const stale = Boolean(revision && revision.version !== baseVersion);
+  const reportState = useRef(onStateChange);
+  reportState.current = onStateChange;
+  useEffect(() => {
+    reportState.current?.({ dirty, pending, unknown });
+  }, [dirty, pending, unknown]);
+
+  useEffect(() => {
+    if (!revision || dirty || pending || unknown || revision.version === baseVersion) return;
+    let active = true;
+    queueMicrotask(() => {
+      if (!active) return;
+      setValues(initialValues(revision));
+      setBaseVersion(revision.version);
+      setStage("edit");
+    });
+    return () => {
+      active = false;
+    };
+  }, [revision, dirty, pending, unknown, baseVersion]);
   const [error, setError] = useState<string | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [message, setMessage] = useState<string | null>(null);
@@ -253,7 +281,8 @@ export function OfferForm({
   const selectedService = eligibleServices.find((service) => service.id === serviceId);
 
   const change = (key: FieldName, value: string) => {
-    if (pending || unknown) return;
+    if (disabled || readOnly || pending || unknown || stale) return;
+    setDirty(true);
     onDirtyChange?.(true);
     setValues((previous) => ({ ...previous, [key]: value }));
     setErrors((previous) => ({ ...previous, [key]: "" }));
@@ -346,7 +375,7 @@ export function OfferForm({
 
   const check = (event: React.FormEvent) => {
     event.preventDefault();
-    if (pending || unknown) return;
+    if (disabled || readOnly || pending || unknown || stale) return;
     if (validate()) {
       setError(null);
       setStage("check");
@@ -354,7 +383,7 @@ export function OfferForm({
   };
 
   const save = async () => {
-    if (inFlight.current || unknown || stage !== "check") return;
+    if (disabled || readOnly || stale || inFlight.current || unknown || stage !== "check") return;
     const existing = readPendingOfferOperation();
     if (existing) {
       setUnknown(true);
@@ -436,7 +465,7 @@ export function OfferForm({
             creationRequestId: crypto.randomUUID(),
             revisionRequestId: crypto.randomUUID(),
           };
-          if (!onConflict) setError(t("staffOffers.conflict"));
+          setError(t("staffOffers.conflict"));
           setStage("edit");
           onConflict?.();
           return;
@@ -461,6 +490,8 @@ export function OfferForm({
       }
       clearPendingOfferOperation(operation.operationId);
       if (revision) {
+        setBaseVersion((result.data as OfferRevisionDto).version);
+        setDirty(false);
         onSaved?.(result.data as OfferRevisionDto);
         onDirtyChange?.(false);
         setStage("edit");
@@ -477,6 +508,7 @@ export function OfferForm({
   };
 
   const reconcile = async () => {
+    if (disabled || pending) return;
     const journal = readPendingOfferOperation();
     const belongsHere = revision
       ? journal?.kind === "edit" &&
@@ -504,6 +536,10 @@ export function OfferForm({
           ) {
             clearPendingOfferOperation(journal.operationId);
             setUnknown(false);
+            setDirty(false);
+            setValues(initialValues(current));
+            setBaseVersion(current.version);
+            onDirtyChange?.(false);
             setManual(false);
             setError(t("staffOffers.conflict"));
             onReconciled?.(current);
@@ -599,6 +635,7 @@ export function OfferForm({
   return (
     <div className="space-y-6" dir={dir}>
       {loading && <p role="status">{t("staffOffers.loading")}</p>}
+      {stale && <p role="alert">{t("staffOffers.conflict")}</p>}
       {error && (
         <div
           ref={summaryRef}
@@ -634,6 +671,8 @@ export function OfferForm({
           <button
             type="button"
             onClick={reconcile}
+            data-testid="offer-commercial-recheck"
+            disabled={disabled || pending}
             className="mt-3 rounded-lg bg-slate-900 px-4 py-2 text-white"
           >
             {t("staffOffers.reconcile")}
@@ -684,15 +723,19 @@ export function OfferForm({
           <div className="flex gap-3">
             <button
               type="button"
-              disabled={pending || unknown || Boolean(frozen.current)}
-              onClick={() => setStage("edit")}
+              disabled={
+                disabled || readOnly || stale || pending || unknown || Boolean(frozen.current)
+              }
+              onClick={() => {
+                if (!disabled && !readOnly && !stale && !pending && !unknown) setStage("edit");
+              }}
               className="rounded-xl border px-5 py-3"
             >
               {t("staffOffers.editAnswers")}
             </button>
             <button
               type="button"
-              disabled={pending || unknown}
+              disabled={disabled || readOnly || stale || pending || unknown}
               onClick={save}
               className="rounded-xl bg-brand-600 px-5 py-3 font-semibold text-white disabled:opacity-50"
             >
@@ -702,7 +745,10 @@ export function OfferForm({
         </section>
       ) : (
         <form onSubmit={check} className="space-y-6">
-          <fieldset className="rounded-2xl border bg-white p-5 space-y-4">
+          <fieldset
+            disabled={disabled || readOnly || pending || unknown || stale}
+            className="rounded-2xl border bg-white p-5 space-y-4"
+          >
             <legend className="px-2 text-lg font-bold">{t("staffOffers.locationSection")}</legend>
             {revision ? (
               <p className="text-sm text-slate-600">
@@ -776,13 +822,19 @@ export function OfferForm({
               </div>
             )}
           </fieldset>
-          <fieldset className="rounded-2xl border bg-white p-5">
+          <fieldset
+            disabled={disabled || readOnly || pending || unknown || stale}
+            className="rounded-2xl border bg-white p-5"
+          >
             <legend className="px-2 text-lg font-bold">{t("staffOffers.scopeSection")}</legend>
             <div className="grid gap-4 sm:grid-cols-2">
               {textFields.map(({ key, multiline, latin }) => input(key, "text", multiline, latin))}
             </div>
           </fieldset>
-          <fieldset className="rounded-2xl border bg-white p-5">
+          <fieldset
+            disabled={disabled || readOnly || pending || unknown || stale}
+            className="rounded-2xl border bg-white p-5"
+          >
             <legend className="px-2 text-lg font-bold">{t("staffOffers.priceSection")}</legend>
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
@@ -820,7 +872,10 @@ export function OfferForm({
               </p>
             )}
           </fieldset>
-          <fieldset className="rounded-2xl border bg-white p-5">
+          <fieldset
+            disabled={disabled || readOnly || pending || unknown || stale}
+            className="rounded-2xl border bg-white p-5"
+          >
             <legend className="px-2 text-lg font-bold">{t("staffOffers.evidenceSection")}</legend>
             <p className="mb-4 text-sm text-slate-600">{t("staffOffers.packetHelp")}</p>
             <div className="grid gap-4 sm:grid-cols-2">
@@ -854,7 +909,7 @@ export function OfferForm({
           </fieldset>
           <button
             type="submit"
-            disabled={pending || unknown || loading}
+            disabled={disabled || readOnly || stale || pending || unknown || loading}
             className="rounded-xl bg-brand-600 px-5 py-3 font-semibold text-white disabled:opacity-50"
           >
             {t("staffOffers.checkAnswers")}

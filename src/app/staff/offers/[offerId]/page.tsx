@@ -1,10 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useI18n } from "@/context/I18nContext";
 import { OfferForm } from "@/components/staff/OfferForm";
+import OfferFitmentEditor from "@/components/staff/OfferFitmentEditor";
+import { readOfferFitmentJournal, type OfferFitmentReview } from "@/lib/fitment/offer-client";
+import { protectCapabilityNavigation } from "@/components/staff/CapabilityNavigationBoundary";
 import {
   clearPendingOfferOperation,
   clearPendingPublicationOperation,
@@ -45,17 +48,6 @@ const attestationLabels = {
   fitmentAllVariantsAttested: "staffOffers.attestFitmentVariants",
   fitmentScopePriceAttested: "staffOffers.attestFitmentScopePrice",
 } as const;
-type OfferFitmentReview = {
-  offerId: string;
-  revisionId: string;
-  version: number;
-  mode:
-    | "BASE_VEHICLE_ALL_VARIANTS_VERIFIED"
-    | "SERVICE_VEHICLE_INDEPENDENT_WITHIN_LISTED_COVERAGE"
-    | null;
-  evidenceRef: string | null;
-  coverage: Array<{ makeId: string; modelId: string; yearFrom: number; yearTo: number }>;
-};
 const reasons = [
   "PRICE_EVIDENCE_UNAVAILABLE",
   "PRICE_NOT_VERIFIED",
@@ -102,6 +94,31 @@ export default function StaffOfferDetailPage() {
   const [message, setMessage] = useState<string | null>(null);
   const [confirmSubmit, setConfirmSubmit] = useState(false);
   const [unsaved, setUnsaved] = useState(false);
+  const [editor, setEditor] = useState<"commercial" | "fitment">(() =>
+    readOfferFitmentJournal().kind === "empty" ? "commercial" : "fitment"
+  );
+  const [commercialEpoch, setCommercialEpoch] = useState(0);
+  const [commercialState, setCommercialState] = useState({
+    dirty: false,
+    pending: false,
+    unknown: false,
+  });
+  const [fitmentState, setFitmentState] = useState({
+    dirty: false,
+    pending: false,
+    unknown: false,
+  });
+  const reportCommercialState = useCallback(
+    (state: typeof commercialState) => setCommercialState(state),
+    []
+  );
+  const reportFitmentState = useCallback(
+    (state: typeof fitmentState) => setFitmentState(state),
+    []
+  );
+  const selectedRef = useRef<string | null>(null);
+  const actorRef = useRef<string | undefined>(undefined);
+  const loadGeneration = useRef(0);
   const [checks, setChecks] = useState<Record<(typeof attestations)[number], boolean>>({
     evidenceInspected: false,
     priceVerified: false,
@@ -144,9 +161,11 @@ export default function StaffOfferDetailPage() {
 
   useEffect(() => {
     const counter = generation;
-    const current = ++counter.current;
+    const loaderCounter = loadGeneration;
+    counter.current++;
     return () => {
-      if (counter.current === current) counter.current++;
+      counter.current++;
+      loaderCounter.current++;
     };
   }, [offerId]);
 
@@ -201,28 +220,135 @@ export default function StaffOfferDetailPage() {
   }, [offerId, t]);
 
   const load = useCallback(
-    async (signal?: AbortSignal) => {
-      const [auth, response] = await Promise.all([
-        offerApi<StaffAuthStatusResponse>("/api/v1/staff/auth/status", { signal }),
-        offerApi<OfferDto>(`/api/v1/staff/offers/${offerId}`, { signal }),
-      ]);
-      if (signal?.aborted) return;
-      if ((!auth.ok && auth.status === 401) || (!response.ok && response.status === 401))
-        return router.replace("/staff/login");
-      if (!auth.ok || !response.ok) {
-        setOffer(null);
-        setStaff(null);
-        setError(!response.ok ? offerFailureMessage(response, t) : t("staffOffers.denied"));
-      } else {
+    async (signal?: AbortSignal): Promise<boolean> => {
+      const current = ++loadGeneration.current;
+      const controller = new AbortController();
+      const abort = () => controller.abort();
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) controller.abort();
+      const deadline = setTimeout(abort, 12_000);
+      setLoading(true);
+      setConfirmSubmit(false);
+      setFitmentReview(null);
+      setFitmentLoadError(false);
+      try {
+        const auth = await offerApi<StaffAuthStatusResponse>("/api/v1/staff/auth/status", {
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted || current !== loadGeneration.current) return false;
+        if (
+          !auth.ok ||
+          auth.data.state !== "ACTIVE" ||
+          !auth.data.canAccessStaffApp ||
+          !auth.data.userId
+        ) {
+          setOffer(null);
+          setStaff(null);
+          if (!auth.ok && auth.status === 401) router.replace("/staff/login");
+          setError(t("staffOffers.denied"));
+          return false;
+        }
+        const changedActor = Boolean(actorRef.current && actorRef.current !== auth.data.userId);
+        if (changedActor) {
+          generation.current++;
+          publicationGeneration.current++;
+          setOffer(null);
+          setStaff(null);
+          setUnsaved(false);
+          inFlight.current = false;
+          setPending(false);
+          publicationInFlight.current = false;
+          setPublicationPending(false);
+          setPublication(null);
+          setPublicationConfirm(null);
+          setCommercialState({ dirty: false, pending: false, unknown: false });
+          setFitmentState({ dirty: false, pending: false, unknown: false });
+        }
+        actorRef.current = auth.data.userId;
+        const response = await offerApi<OfferDto>(`/api/v1/staff/offers/${offerId}`, {
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted || current !== loadGeneration.current) return false;
+        if (!response.ok || response.data.id !== offerId) {
+          setOffer(null);
+          setStaff(null);
+          if (!response.ok && response.status === 401) router.replace("/staff/login");
+          setError(!response.ok ? offerFailureMessage(response, t) : t("staffOffers.missing"));
+          return false;
+        }
+        const pendingFitment = readOfferFitmentJournal();
+        const pendingCommercial = readPendingOfferOperation();
+        const recoveryRevisionId =
+          pendingFitment.kind === "valid" &&
+          pendingFitment.journal.offerId === offerId &&
+          pendingFitment.journal.actorId === auth.data.userId
+            ? pendingFitment.journal.revisionId
+            : pendingCommercial?.offerId === offerId
+              ? pendingCommercial.revisionId
+              : undefined;
+        const revision =
+          response.data.revisions?.find(
+            (item) => item.id === (selectedRef.current ?? recoveryRevisionId)
+          ) ?? response.data.revisions?.[0];
+        if (!revision) {
+          setOffer(null);
+          setError(t("staffOffers.missing"));
+          return false;
+        }
+        const fitment = await offerApi<{ data: OfferFitmentReview }>(
+          `/api/v1/staff/offers/${offerId}/revisions/${revision.id}/fitment`,
+          { signal: controller.signal }
+        );
+        if (controller.signal.aborted || current !== loadGeneration.current) return false;
+        if (
+          !fitment.ok ||
+          fitment.data.data.offerId !== offerId ||
+          fitment.data.data.revisionId !== revision.id ||
+          fitment.data.data.version !== revision.version
+        ) {
+          if (!fitment.ok && fitment.status === 401) router.replace("/staff/login");
+          setFitmentLoadError(true);
+          setError(t("staffOffers.fitmentUnavailable"));
+          return false;
+        }
+        const finalAuth = await offerApi<StaffAuthStatusResponse>("/api/v1/staff/auth/status", {
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted || current !== loadGeneration.current) return false;
+        if (
+          !finalAuth.ok ||
+          finalAuth.data.state !== "ACTIVE" ||
+          !finalAuth.data.canAccessStaffApp ||
+          finalAuth.data.userId !== auth.data.userId
+        ) {
+          generation.current++;
+          publicationGeneration.current++;
+          setOffer(null);
+          setStaff(null);
+          if (!finalAuth.ok && finalAuth.status === 401) router.replace("/staff/login");
+          setError(t("staffOffers.denied"));
+          return false;
+        }
         setStaff(auth.data);
         setOffer(response.data);
-        setSelectedId((previous) =>
-          previous && response.data.revisions?.some((item) => item.id === previous)
-            ? previous
-            : (response.data.revisions?.[0]?.id ?? null)
-        );
+        selectedRef.current = revision.id;
+        setSelectedId(revision.id);
+        setFitmentReview({
+          snapshotIdentity: `${auth.data.userId}:${offerId}:${revision.id}:${revision.version}`,
+          data: fitment.data.data,
+        });
+        return !changedActor;
+      } catch {
+        if (current === loadGeneration.current && !signal?.aborted) {
+          setFitmentLoadError(true);
+          setError(t("staffOffers.genericError"));
+        }
+        return false;
+      } finally {
+        clearTimeout(deadline);
+        signal?.removeEventListener("abort", abort);
+        if (current === loadGeneration.current && !signal?.aborted) setLoading(false);
       }
-      setLoading(false);
     },
     [offerId, router, t]
   );
@@ -287,42 +413,15 @@ export default function StaffOfferDetailPage() {
   const revisions = offer?.revisions ?? [];
   const selected = revisions.find((item) => item.id === selectedId) ?? null;
   const latest = revisions[0] ?? null;
-  const snapshotIdentity = selected ? `${selected.id}:${selected.version}` : null;
-  useEffect(() => {
-    if (
-      !snapshotIdentity ||
-      selected?.status !== "PENDING_REVIEW" ||
-      staff?.department !== "OPERATIONS"
-    )
-      return;
-    const controller = new AbortController();
-    let active = true;
-    queueMicrotask(() => {
-      if (!active) return;
-      setFitmentReview(null);
-      setFitmentLoadError(false);
-    });
-    void offerApi<{ data: OfferFitmentReview }>(
-      `/api/v1/staff/offers/${offerId}/revisions/${selected.id}/fitment`,
-      { signal: controller.signal }
-    )
-      .then((response) => {
-        if (!active || controller.signal.aborted) return;
-        if (!response.ok) {
-          if (response.status === 401) router.replace("/staff/login");
-          setFitmentLoadError(true);
-          return;
-        }
-        setFitmentReview({ snapshotIdentity, data: response.data.data });
-      })
-      .catch(() => {
-        if (active && !controller.signal.aborted) setFitmentLoadError(true);
-      });
-    return () => {
-      active = false;
-      controller.abort();
-    };
-  }, [offerId, router, selected?.id, selected?.status, snapshotIdentity, staff?.department]);
+  const commercialJournal = readPendingOfferOperation();
+  const recoveringCommercial =
+    commercialJournal?.kind === "edit" &&
+    commercialJournal.offerId === offerId &&
+    commercialJournal.revisionId === selected?.id;
+  const snapshotIdentity =
+    selected && staff?.userId
+      ? `${staff.userId}:${offerId}:${selected.id}:${selected.version}`
+      : null;
   const reviewedFitment =
     fitmentReview?.snapshotIdentity === snapshotIdentity &&
     fitmentReview.data.revisionId === selected?.id &&
@@ -333,9 +432,21 @@ export default function StaffOfferDetailPage() {
   const fitmentReady = Boolean(
     reviewedFitment?.mode && reviewedFitment.evidenceRef && reviewedFitment.coverage.length > 0
   );
+  const reviewIdentity = JSON.stringify([
+    snapshotIdentity,
+    selected?.status,
+    offer?.providerOrganization?.status,
+    offer?.branch?.status,
+    reviewedFitment,
+  ]);
+  const currentReviewIdentity = useRef(reviewIdentity);
+  useLayoutEffect(() => {
+    currentReviewIdentity.current = reviewIdentity;
+  }, [reviewIdentity]);
   useEffect(() => {
-    if (attestedSnapshot.current === snapshotIdentity) return;
-    attestedSnapshot.current = snapshotIdentity;
+    if (attestedSnapshot.current === reviewIdentity) return;
+    attestedSnapshot.current = reviewIdentity;
+    setConfirmSubmit(false);
     setChecks({
       evidenceInspected: false,
       priceVerified: false,
@@ -344,7 +455,7 @@ export default function StaffOfferDetailPage() {
       fitmentAllVariantsAttested: false,
       fitmentScopePriceAttested: false,
     });
-  }, [snapshotIdentity]);
+  }, [reviewIdentity]);
   const isSalesOwner =
     staff?.state === "ACTIVE" &&
     staff.department === "SALES" &&
@@ -357,6 +468,17 @@ export default function StaffOfferDetailPage() {
     pending ||
     unknown ||
     loading ||
+    unsaved ||
+    commercialState.dirty ||
+    commercialState.pending ||
+    commercialState.unknown ||
+    fitmentState.dirty ||
+    fitmentState.pending ||
+    fitmentState.unknown ||
+    fitmentLoadError ||
+    !reviewedFitment ||
+    offer?.id !== offerId ||
+    readOfferFitmentJournal().kind !== "empty" ||
     Boolean(readPendingOfferOperation()) ||
     Boolean(readPendingPublicationOperation());
   const canManagePublication =
@@ -368,8 +490,106 @@ export default function StaffOfferDetailPage() {
     publicationLoading ||
     !publication ||
     publicationLoadError ||
+    unsaved ||
+    commercialState.dirty ||
+    commercialState.pending ||
+    commercialState.unknown ||
+    fitmentState.dirty ||
+    fitmentState.pending ||
+    fitmentState.unknown ||
+    loading ||
+    fitmentLoadError ||
+    !reviewedFitment ||
+    readOfferFitmentJournal().kind !== "empty" ||
     Boolean(publicationJournal) ||
     Boolean(readPendingOfferOperation());
+
+  const fitmentExternallyBlocked =
+    loading ||
+    fitmentLoadError ||
+    !reviewedFitment ||
+    pending ||
+    unknown ||
+    publicationPending ||
+    publicationUnknown ||
+    commercialState.dirty ||
+    commercialState.pending ||
+    commercialState.unknown ||
+    Boolean(readPendingOfferOperation()) ||
+    Boolean(readPendingPublicationOperation());
+  const commercialExternallyBlocked =
+    loading ||
+    fitmentLoadError ||
+    !reviewedFitment ||
+    pending ||
+    unknown ||
+    publicationPending ||
+    publicationUnknown ||
+    fitmentState.dirty ||
+    fitmentState.pending ||
+    fitmentState.unknown ||
+    readOfferFitmentJournal().kind !== "empty" ||
+    Boolean(readPendingPublicationOperation());
+  const protectedWork =
+    unsaved ||
+    commercialState.dirty ||
+    fitmentState.dirty ||
+    commercialState.pending ||
+    commercialState.unknown ||
+    fitmentState.pending ||
+    fitmentState.unknown ||
+    pending ||
+    unknown ||
+    publicationPending ||
+    publicationUnknown ||
+    Boolean(readPendingOfferOperation()) ||
+    Boolean(readPendingPublicationOperation()) ||
+    readOfferFitmentJournal().kind !== "empty";
+  useLayoutEffect(() => {
+    if (!protectedWork) return;
+    const protectedUrl = window.location.href;
+    const protectedState: unknown = window.history.state;
+    const warn = () => setError(t("offerFitment.navigationBlocked"));
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    const click = (event: MouseEvent) => {
+      const link = event.target instanceof Element ? event.target.closest("a[href]") : null;
+      if (!link || link.getAttribute("href")?.startsWith("#")) return;
+      event.preventDefault();
+      event.stopPropagation();
+      warn();
+    };
+    const release = protectCapabilityNavigation((event) => {
+      event.stopImmediatePropagation();
+      try {
+        window.history.pushState(protectedState, "", protectedUrl);
+      } catch {
+        window.history.replaceState(protectedState, "", protectedUrl);
+      }
+      warn();
+    });
+    window.addEventListener("beforeunload", beforeUnload);
+    document.addEventListener("click", click, true);
+    return () => {
+      release();
+      window.removeEventListener("beforeunload", beforeUnload);
+      document.removeEventListener("click", click, true);
+    };
+  }, [protectedWork, t]);
+
+  const switchEditor = (target: "commercial" | "fitment") => {
+    if (
+      protectedWork ||
+      readPendingOfferOperation() ||
+      readOfferFitmentJournal().kind !== "empty"
+    ) {
+      setError(t("offerFitment.navigationBlocked"));
+      return;
+    }
+    setEditor(target);
+  };
 
   useEffect(() => {
     let active = true;
@@ -582,15 +802,22 @@ export default function StaffOfferDetailPage() {
     revision: OfferRevisionDto,
     successorRequestId?: string
   ) => {
-    if (inFlight.current || actionDisabled) return;
     if (
-      (kind === "approve" || kind === "reject") &&
-      attestedSnapshot.current !== `${revision.id}:${revision.version}`
-    ) {
+      !staff?.userId ||
+      inFlight.current ||
+      actionDisabled ||
+      readOfferFitmentJournal().kind !== "empty"
+    )
+      return;
+    if ((kind === "approve" || kind === "reject") && attestedSnapshot.current !== reviewIdentity) {
       setError(t("staffOffers.conflict"));
       return;
     }
     if (kind === "approve" && (!fitmentReady || !attestations.every((key) => checks[key]))) {
+      setError(t("staffOffers.fitmentBlocked"));
+      return;
+    }
+    if (kind === "submit" && (!fitmentReady || !confirmSubmit || unsaved || fitmentState.dirty)) {
       setError(t("staffOffers.fitmentBlocked"));
       return;
     }
@@ -625,10 +852,38 @@ export default function StaffOfferDetailPage() {
       return;
     }
     operationRef.current = operation;
+    const controller = new AbortController();
+    const deadline = setTimeout(() => controller.abort(), 12_000);
+    const reviewedActor = staff.userId;
+    const dispatchedReview = reviewIdentity;
+    let dispatched = false;
     try {
+      // A shared browser session can change in another tab after the six checks
+      // were entered. Cached display identity is not proof of the acting session.
+      const actualActor = await offerApi<StaffAuthStatusResponse>("/api/v1/staff/auth/status", {
+        signal: controller.signal,
+      });
+      if (!ownsCurrentOperation()) return;
+      if (
+        !actualActor.ok ||
+        actualActor.data.state !== "ACTIVE" ||
+        !actualActor.data.canAccessStaffApp ||
+        actualActor.data.userId !== reviewedActor ||
+        currentReviewIdentity.current !== dispatchedReview
+      ) {
+        clearPendingOfferOperation(operation.operationId);
+        operationRef.current = null;
+        setConfirmSubmit(false);
+        setPending(false);
+        setError(t("staffOffers.denied"));
+        await load();
+        return;
+      }
+      dispatched = true;
       const response = await offerApi<OfferRevisionDto>(url, {
         method: "POST",
         body: JSON.stringify(body),
+        signal: controller.signal,
       });
       if (!ownsCurrentOperation()) return;
       if (!response.ok) {
@@ -685,11 +940,20 @@ export default function StaffOfferDetailPage() {
                 : "staffOffers.saved"
         )
       );
+      selectedRef.current = response.data.id;
       setSelectedId(response.data.id);
       setReload((value) => value + 1);
     } catch {
-      if (ownsCurrentOperation()) markUnknown(operation);
+      if (ownsCurrentOperation()) {
+        if (dispatched) markUnknown(operation);
+        else {
+          clearPendingOfferOperation(operation.operationId);
+          operationRef.current = null;
+          setError(t("staffOffers.genericError"));
+        }
+      }
     } finally {
+      clearTimeout(deadline);
       inFlight.current = false;
       if (generation.current === currentGeneration) setPending(false);
     }
@@ -731,6 +995,7 @@ export default function StaffOfferDetailPage() {
         setUnknown(false);
         setManual(false);
         setOffer(response.data);
+        selectedRef.current = successor?.id ?? current?.id ?? null;
         setSelectedId(successor?.id ?? current?.id ?? null);
         setMessage(null);
         setError(t("staffOffers.conflict"));
@@ -787,6 +1052,21 @@ export default function StaffOfferDetailPage() {
         </Link>
         <h1 className="mt-3 text-2xl font-bold">{t("staffOffers.offerDetails")}</h1>
         <p className="mt-1 text-sm text-slate-600">{t("staffOffers.internalOnly")}</p>
+        <button
+          type="button"
+          data-testid="offer-detail-refresh"
+          disabled={
+            loading ||
+            pending ||
+            publicationPending ||
+            commercialState.pending ||
+            fitmentState.pending
+          }
+          onClick={() => void load()}
+          className="mt-3 min-h-11 rounded-lg border px-4 py-2 disabled:opacity-50"
+        >
+          {t("offerFitment.refresh")}
+        </button>
       </header>
       {loading && <p role="status">{t("staffOffers.loading")}</p>}
       {error && (
@@ -843,7 +1123,18 @@ export default function StaffOfferDetailPage() {
                 value={selected.id}
                 disabled={actionDisabled}
                 onChange={(event) => {
+                  if (
+                    actionDisabled ||
+                    protectedWork ||
+                    readPendingOfferOperation() ||
+                    readOfferFitmentJournal().kind !== "empty"
+                  )
+                    return;
+                  selectedRef.current = event.target.value;
                   setSelectedId(event.target.value);
+                  setFitmentReview(null);
+                  setConfirmSubmit(false);
+                  setReload((value) => value + 1);
                   setUnsaved(false);
                   setChecks({
                     evidenceInspected: false,
@@ -944,99 +1235,183 @@ export default function StaffOfferDetailPage() {
                 )}
             </dl>
           </section>
-          {selected.status === "DRAFT" && isSalesOwner && (
-            <>
-              <OfferForm
-                key={`${selected.id}-${selected.version}`}
-                revision={selected}
-                offer={offer}
-                onSaved={(updated) => {
-                  setError(null);
-                  setOffer((previous) =>
-                    previous
-                      ? {
-                          ...previous,
-                          revisions: previous.revisions?.map((item) =>
-                            item.id === updated.id ? updated : item
-                          ),
-                        }
-                      : previous
-                  );
-                  setReload((value) => value + 1);
-                  setMessage(t("staffOffers.saved"));
-                }}
-                onReconciled={(current) => {
-                  operationRef.current = null;
-                  setUnknown(false);
-                  setOffer((previous) =>
-                    previous
-                      ? {
-                          ...previous,
-                          revisions: previous.revisions?.map((item) =>
-                            item.id === current.id ? current : item
-                          ),
-                        }
-                      : previous
-                  );
-                  setUnsaved(false);
-                  setMessage(null);
-                  setError(t("staffOffers.conflict"));
-                  setReload((value) => value + 1);
-                }}
-                onDirtyChange={(dirty) => {
-                  setUnsaved(dirty);
-                  if (dirty) {
-                    setError(null);
-                    setMessage(null);
-                  }
-                }}
-                onConflict={() => {
-                  setError(t("staffOffers.conflict"));
-                  setUnsaved(false);
-                  setReload((value) => value + 1);
-                }}
-              />
-              <section className="rounded-2xl border bg-white p-5">
-                <h2 className="font-bold">{t("staffOffers.submitReview")}</h2>
-                <p className="mt-2 text-sm text-slate-600">{t("staffOffers.internalOnly")}</p>
-                {confirmSubmit ? (
-                  <div className="mt-4 flex gap-3">
+          {isSalesOwner && (selected.status === "DRAFT" || commercialState.dirty) && (
+            <section className="space-y-3 rounded-2xl border bg-white p-5">
+              <p className="text-sm text-slate-600">{t("offerFitment.coordinating")}</p>
+              <div className="flex flex-wrap gap-3">
+                <button
+                  type="button"
+                  data-testid="offer-editor-commercial"
+                  aria-pressed={editor === "commercial"}
+                  disabled={protectedWork || loading}
+                  onClick={() => switchEditor("commercial")}
+                  className="min-h-11 rounded-lg border px-4 py-2 disabled:opacity-50"
+                >
+                  {t("offerFitment.commercialEditor")}
+                </button>
+                <button
+                  type="button"
+                  data-testid="offer-editor-fitment"
+                  aria-pressed={editor === "fitment"}
+                  disabled={protectedWork || loading}
+                  onClick={() => switchEditor("fitment")}
+                  className="min-h-11 rounded-lg border px-4 py-2 disabled:opacity-50"
+                >
+                  {t("offerFitment.fitmentEditor")}
+                </button>
+                {commercialState.dirty &&
+                  !commercialState.pending &&
+                  !commercialState.unknown &&
+                  !readPendingOfferOperation() && (
                     <button
                       type="button"
-                      disabled={actionDisabled || unsaved}
-                      onClick={() =>
-                        void mutate(
-                          "submit",
-                          `/api/v1/staff/offers/${offerId}/revisions/${selected.id}/submit`,
-                          { expectedVersion: selected.version },
-                          selected
+                      data-testid="offer-commercial-discard"
+                      disabled={loading}
+                      onClick={() => {
+                        if (
+                          commercialState.pending ||
+                          commercialState.unknown ||
+                          readPendingOfferOperation()
                         )
-                      }
-                      className="rounded-xl bg-brand-600 px-5 py-3 font-bold text-white disabled:opacity-50"
+                          return;
+                        setCommercialEpoch((value) => value + 1);
+                        setUnsaved(false);
+                        setCommercialState({ dirty: false, pending: false, unknown: false });
+                        setConfirmSubmit(false);
+                      }}
+                      className="min-h-11 rounded-lg border px-4 py-2"
                     >
-                      {t("staffOffers.submitReview")}
+                      {t("offerFitment.discardCommercial")}
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => setConfirmSubmit(false)}
-                      className="rounded-xl border px-5 py-3"
-                    >
-                      {t("staffOffers.editAnswers")}
-                    </button>
-                  </div>
-                ) : (
-                  <button
-                    type="button"
-                    disabled={actionDisabled || unsaved}
-                    onClick={() => setConfirmSubmit(true)}
-                    className="mt-4 rounded-xl border px-5 py-3 font-semibold"
-                  >
-                    {t("staffOffers.checkAnswers")}
-                  </button>
-                )}
-              </section>
-            </>
+                  )}
+              </div>
+            </section>
           )}
+          <OfferFitmentEditor
+            key={`${staff?.userId}:${offerId}:${selected.id}`}
+            actorId={staff?.userId}
+            offerId={offerId}
+            revisionId={selected.id}
+            expectedVersion={selected.version}
+            saved={reviewedFitment}
+            editable={selected.status === "DRAFT" && Boolean(isSalesOwner) && editor === "fitment"}
+            disabled={fitmentExternallyBlocked}
+            onRefresh={() => load()}
+            onUnauthorized={() => router.replace("/staff/login")}
+            onStateChange={reportFitmentState}
+            onConflict={() => setError(t("staffOffers.conflict"))}
+          />
+          {isSalesOwner &&
+            (selected.status === "DRAFT" ||
+              commercialState.dirty ||
+              commercialState.pending ||
+              commercialState.unknown ||
+              recoveringCommercial) && (
+              <>
+                {editor === "commercial" && (
+                  <OfferForm
+                    key={`${staff?.userId}:${selected.id}:${commercialEpoch}`}
+                    revision={selected}
+                    offer={offer}
+                    disabled={commercialExternallyBlocked}
+                    readOnly={selected.status !== "DRAFT"}
+                    onStateChange={reportCommercialState}
+                    onSaved={(updated) => {
+                      setError(null);
+                      setOffer((previous) =>
+                        previous
+                          ? {
+                              ...previous,
+                              revisions: previous.revisions?.map((item) =>
+                                item.id === updated.id ? updated : item
+                              ),
+                            }
+                          : previous
+                      );
+                      setReload((value) => value + 1);
+                      setMessage(t("staffOffers.saved"));
+                    }}
+                    onReconciled={(current) => {
+                      operationRef.current = null;
+                      setUnknown(false);
+                      setOffer((previous) =>
+                        previous
+                          ? {
+                              ...previous,
+                              revisions: previous.revisions?.map((item) =>
+                                item.id === current.id ? current : item
+                              ),
+                            }
+                          : previous
+                      );
+                      setUnsaved(false);
+                      setMessage(null);
+                      setError(t("staffOffers.conflict"));
+                      setReload((value) => value + 1);
+                    }}
+                    onDirtyChange={(dirty) => {
+                      setUnsaved(dirty);
+                      if (dirty) {
+                        setError(null);
+                        setMessage(null);
+                      }
+                    }}
+                    onConflict={() => {
+                      setError(t("staffOffers.conflict"));
+                      setReload((value) => value + 1);
+                    }}
+                  />
+                )}
+                {selected.status === "DRAFT" && (
+                  <section className="rounded-2xl border bg-white p-5">
+                    <h2 className="font-bold">{t("staffOffers.submitReview")}</h2>
+                    <p className="mt-2 text-sm text-slate-600">{t("staffOffers.internalOnly")}</p>
+                    {!fitmentReady && (
+                      <p role="alert" className="mt-2 text-sm text-rose-700">
+                        {t("staffOffers.fitmentBlocked")}
+                      </p>
+                    )}
+                    {confirmSubmit ? (
+                      <div className="mt-4 flex gap-3">
+                        <button
+                          type="button"
+                          disabled={actionDisabled || unsaved || !fitmentReady}
+                          onClick={() =>
+                            void mutate(
+                              "submit",
+                              `/api/v1/staff/offers/${offerId}/revisions/${selected.id}/submit`,
+                              { expectedVersion: selected.version },
+                              selected
+                            )
+                          }
+                          className="rounded-xl bg-brand-600 px-5 py-3 font-bold text-white disabled:opacity-50"
+                        >
+                          {t("staffOffers.submitReview")}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setConfirmSubmit(false)}
+                          className="rounded-xl border px-5 py-3"
+                        >
+                          {t("staffOffers.editAnswers")}
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled={actionDisabled || unsaved || !fitmentReady}
+                        onClick={() => {
+                          if (!actionDisabled && fitmentReady && !unsaved) setConfirmSubmit(true);
+                        }}
+                        className="mt-4 rounded-xl border px-5 py-3 font-semibold"
+                      >
+                        {t("staffOffers.checkAnswers")}
+                      </button>
+                    )}
+                  </section>
+                )}
+              </>
+            )}
           {selected.id === latest?.id &&
             (selected.status === "APPROVED" || selected.status === "REJECTED") &&
             isSalesOwner && (
@@ -1091,11 +1466,18 @@ export default function StaffOfferDetailPage() {
                         <ul className="mt-2 list-disc space-y-2 ps-5 text-sm">
                           {reviewedFitment.coverage.map((row) => (
                             <li key={`${row.modelId}:${row.yearFrom}:${row.yearTo}`}>
+                              <span>
+                                {locale === "ar" ? row.make.nameAr : row.make.nameEn} ·{" "}
+                                {locale === "ar" ? row.model.nameAr : row.model.nameEn}
+                              </span>{" "}
                               <bdi dir="ltr">
-                                {t("staffOffers.fitmentMakeId")}: {row.makeId} ·{" "}
-                                {t("staffOffers.fitmentModelId")}: {row.modelId} · {row.yearFrom}–
-                                {row.yearTo}
+                                {row.yearFrom}–{row.yearTo}
                               </bdi>
+                              <p className="break-all text-xs text-slate-500">
+                                <bdi dir="ltr">
+                                  {row.makeId} / {row.modelId}
+                                </bdi>
+                              </p>
                             </li>
                           ))}
                         </ul>
@@ -1132,7 +1514,7 @@ export default function StaffOfferDetailPage() {
                       <input
                         type="checkbox"
                         checked={checks[key]}
-                        disabled={!fitmentReady}
+                        disabled={!fitmentReady || actionDisabled}
                         onChange={(event) =>
                           setChecks((previous) => ({ ...previous, [key]: event.target.checked }))
                         }
