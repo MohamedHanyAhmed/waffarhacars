@@ -42,6 +42,11 @@ export default defineConfig({
       use: { ...devices["Desktop Chrome"], viewport: { width: 1440, height: 900 } },
     },
     {
+      name: "PostgreSQL Real Customer Discovery",
+      testMatch: /customer-discovery-real\.spec\.ts/,
+      use: { ...devices["Desktop Chrome"], viewport: { width: 1440, height: 900 } },
+    },
+    {
       name: "Visual Evidence Capture",
       testMatch: /screenshots\.spec\.ts/,
       use: { ...devices["Desktop Chrome"] },
