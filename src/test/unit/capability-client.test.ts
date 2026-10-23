@@ -190,6 +190,296 @@ describe("capability command identity and private journal", () => {
 });
 
 describe("capability controller client transport recovery (unit isolation, no authentication claim)", () => {
+  it("keeps the journal and command handlers locked through deferred read and explicit form hydration", async () => {
+    const refresh = deferred<boolean>();
+    const refreshed = vi.fn().mockReturnValue(refresh.promise);
+    const fetcher = vi.fn((_: string, init: RequestInit) =>
+      Promise.resolve(success(JSON.parse(String(init.body)).commandId, "EDIT"))
+    );
+    installTransport(fetcher);
+    const { result } = renderHook(() =>
+      useCapabilityCommand({ actorId, branchId, onRefresh: refreshed, onUnauthorized: vi.fn() })
+    );
+    let dispatched: Promise<void>;
+    act(() => {
+      dispatched = result.current.dispatch("EDIT", { policyId, expectedVersion: 2 }, content);
+    });
+    await waitFor(() => expect(refreshed).toHaveBeenCalledTimes(1));
+    const original = readCapabilityJournal();
+    expect(original.kind).toBe("valid");
+    expect(result.current.pending).toBe(true);
+    expect(result.current.locked).toBe(true);
+    expect(result.current.awaitingHydration).toBeNull();
+    await act(async () => {
+      await result.current.dispatch("SUBMIT", { policyId, expectedVersion: 3 });
+      await result.current.recheck();
+      expect(await result.current.retry()).toBe(false);
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      refresh.resolve(true);
+      await dispatched!;
+    });
+    expect(result.current.pending).toBe(false);
+    expect(result.current.locked).toBe(true);
+    expect(readCapabilityJournal()).toEqual(original);
+    const ticket = result.current.awaitingHydration!;
+    expect(ticket).toMatchObject({ actorId, branchId, policyId, resultVersion: 3 });
+    await act(async () => {
+      await result.current.dispatch("SUBMIT", { policyId, expectedVersion: 3 });
+      expect(await result.current.retry()).toBe(false);
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    act(() => {
+      expect(
+        result.current.acknowledgeHydration(ticket, { actorId, branchId, policyId, version: 3 })
+      ).toBe(true);
+    });
+    expect(result.current.locked).toBe(false);
+    expect(result.current.awaitingHydration).toBeNull();
+    expect(readCapabilityJournal()).toEqual({ kind: "empty" });
+  });
+  it("rejects mismatched hydration identity, old version and forged token without clearing intent", async () => {
+    writeCapabilityJournal(journal);
+    installTransport(() => Promise.resolve(success(commandId, "EDIT")));
+    const { result } = renderHook(() =>
+      useCapabilityCommand({
+        actorId,
+        branchId,
+        onRefresh: async () => true,
+        onUnauthorized: vi.fn(),
+      })
+    );
+    await act(async () => {
+      await result.current.recheck();
+    });
+    const ticket = result.current.awaitingHydration!;
+    const view = { actorId, branchId, policyId, version: 3 };
+    for (const changed of [
+      { ...view, actorId: otherId },
+      { ...view, branchId: otherId },
+      { ...view, policyId: otherId },
+      { ...view, version: 2 },
+      { ...view, version: Number.NaN },
+      { ...view, version: 3.5 },
+    ]) {
+      act(() => {
+        expect(result.current.acknowledgeHydration(ticket, changed)).toBe(false);
+      });
+      expect(result.current.locked).toBe(true);
+      expect(readCapabilityJournal()).toEqual({ kind: "valid", journal });
+    }
+    act(() => {
+      expect(
+        result.current.acknowledgeHydration({ ...ticket, token: ticket.token + 1 }, view)
+      ).toBe(false);
+    });
+    expect(readCapabilityJournal()).toEqual({ kind: "valid", journal });
+    act(() => {
+      expect(result.current.acknowledgeHydration(ticket, view)).toBe(true);
+    });
+  });
+  it("requires a fresh read ticket after failed refresh and invalidates an older ticket on recheck", async () => {
+    writeCapabilityJournal(journal);
+    const nextRead = deferred<boolean>();
+    const refreshed = vi
+      .fn()
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true)
+      .mockReturnValueOnce(nextRead.promise);
+    installTransport(() => Promise.resolve(success(commandId, "EDIT")));
+    const { result } = renderHook(() =>
+      useCapabilityCommand({ actorId, branchId, onRefresh: refreshed, onUnauthorized: vi.fn() })
+    );
+    await act(async () => {
+      await result.current.recheck();
+    });
+    expect(result.current.awaitingHydration).toBeNull();
+    expect(result.current.locked).toBe(true);
+    expect(readCapabilityJournal()).toEqual({ kind: "valid", journal });
+    await act(async () => {
+      await result.current.recheck();
+    });
+    const previous = result.current.awaitingHydration!;
+    let checked: Promise<void>;
+    act(() => {
+      checked = result.current.recheck();
+    });
+    await waitFor(() => expect(refreshed).toHaveBeenCalledTimes(3));
+    const view = { actorId, branchId, policyId, version: 3 };
+    expect(result.current.pending).toBe(true);
+    expect(result.current.awaitingHydration).toBeNull();
+    act(() => {
+      expect(result.current.acknowledgeHydration(previous, view)).toBe(false);
+    });
+    expect(readCapabilityJournal()).toEqual({ kind: "valid", journal });
+    await act(async () => {
+      nextRead.resolve(true);
+      await checked!;
+    });
+    const current = result.current.awaitingHydration!;
+    expect(current.token).not.toBe(previous.token);
+    act(() => {
+      expect(result.current.acknowledgeHydration(previous, view)).toBe(false);
+    });
+    expect(readCapabilityJournal()).toEqual({ kind: "valid", journal });
+    act(() => {
+      expect(result.current.acknowledgeHydration(current, view)).toBe(true);
+    });
+  });
+  it.each(["throws", "silently ignores"])(
+    "retains the hydration lock if storage %s journal removal",
+    async (failure) => {
+      writeCapabilityJournal(journal);
+      installTransport(() => Promise.resolve(success(commandId, "EDIT")));
+      const { result } = renderHook(() =>
+        useCapabilityCommand({
+          actorId,
+          branchId,
+          onRefresh: async () => true,
+          onUnauthorized: vi.fn(),
+        })
+      );
+      await act(async () => {
+        await result.current.recheck();
+      });
+      const removal = vi.spyOn(Storage.prototype, "removeItem").mockImplementation(() => {
+        if (failure === "throws") throw new Error("storage denied");
+      });
+      const ticket = result.current.awaitingHydration!;
+      act(() => {
+        expect(
+          result.current.acknowledgeHydration(ticket, {
+            actorId,
+            branchId,
+            policyId,
+            version: 3,
+          })
+        ).toBe(false);
+      });
+      expect(result.current.locked).toBe(true);
+      expect(result.current.error).toBe("capabilities.storageUnavailable");
+      expect(readCapabilityJournal()).toEqual({ kind: "valid", journal });
+      removal.mockRestore();
+      act(() => {
+        expect(
+          result.current.acknowledgeHydration(ticket, { actorId, branchId, policyId, version: 3 })
+        ).toBe(true);
+      });
+      expect(readCapabilityJournal()).toEqual({ kind: "empty" });
+      expect(result.current.locked).toBe(false);
+    }
+  );
+  it("acknowledges a later current version without inferring activation from the historical receipt", async () => {
+    writeCapabilityJournal({ ...journal, action: "APPROVE" });
+    installTransport(() => Promise.resolve(success(commandId, "APPROVE")));
+    const { result } = renderHook(() =>
+      useCapabilityCommand({
+        actorId,
+        branchId,
+        onRefresh: async () => true,
+        onUnauthorized: vi.fn(),
+      })
+    );
+    await act(async () => {
+      await result.current.recheck();
+    });
+    expect(result.current.receipt).toMatchObject({ action: "APPROVE", resultVersion: 3 });
+    // A current WITHDRAWN v4 can hydrate an APPROVE v3 receipt. The controller
+    // exposes no domain status; the page must render that authoritative record.
+    act(() => {
+      expect(
+        result.current.acknowledgeHydration(result.current.awaitingHydration!, {
+          actorId,
+          branchId,
+          policyId,
+          version: 4,
+        })
+      ).toBe(true);
+    });
+    expect(result.current.locked).toBe(false);
+    expect(result.current.receipt?.resultVersion).toBe(3);
+  });
+  it("refuses an old hydration ticket after a newer command owns the journal", async () => {
+    writeCapabilityJournal(journal);
+    installTransport(() => Promise.resolve(success(commandId, "EDIT")));
+    const { result } = renderHook(() =>
+      useCapabilityCommand({
+        actorId,
+        branchId,
+        onRefresh: async () => true,
+        onUnauthorized: vi.fn(),
+      })
+    );
+    await act(async () => {
+      await result.current.recheck();
+    });
+    const ticket = result.current.awaitingHydration!;
+    sessionStorage.removeItem(CAPABILITY_JOURNAL_KEY);
+    const newer = { ...journal, commandId: otherId };
+    writeCapabilityJournal(newer);
+    act(() => {
+      expect(
+        result.current.acknowledgeHydration(ticket, { actorId, branchId, policyId, version: 3 })
+      ).toBe(false);
+    });
+    expect(readCapabilityJournal()).toEqual({ kind: "valid", journal: newer });
+    expect(result.current.locked).toBe(true);
+  });
+  it.each(["actor", "branch"])(
+    "invalidates hydration ticket after %s scope change",
+    async (changed) => {
+      writeCapabilityJournal(journal);
+      installTransport(() => Promise.resolve(success(commandId, "EDIT")));
+      const { result, rerender } = renderHook(
+        ({ actor, branch }) =>
+          useCapabilityCommand({
+            actorId: actor,
+            branchId: branch,
+            onRefresh: async () => true,
+            onUnauthorized: vi.fn(),
+          }),
+        { initialProps: { actor: actorId, branch: branchId } }
+      );
+      await act(async () => {
+        await result.current.recheck();
+      });
+      const ticket = result.current.awaitingHydration!;
+      rerender({
+        actor: changed === "actor" ? otherId : actorId,
+        branch: changed === "branch" ? otherId : branchId,
+      });
+      act(() => {
+        expect(
+          result.current.acknowledgeHydration(ticket, { actorId, branchId, policyId, version: 3 })
+        ).toBe(false);
+      });
+      expect(readCapabilityJournal()).toEqual({ kind: "valid", journal });
+      await waitFor(() => expect(result.current.awaitingHydration).toBeNull());
+      expect(result.current.locked).toBe(true);
+      expect(result.current.otherOwner).toBe(true);
+    }
+  );
+  it("ignores a queued authoritative refresh completion after unmount", async () => {
+    writeCapabilityJournal(journal);
+    const refresh = deferred<boolean>();
+    const refreshed = vi.fn().mockReturnValue(refresh.promise);
+    installTransport(() => Promise.resolve(success(commandId, "EDIT")));
+    const { result, unmount } = renderHook(() =>
+      useCapabilityCommand({ actorId, branchId, onRefresh: refreshed, onUnauthorized: vi.fn() })
+    );
+    let checked: Promise<void>;
+    act(() => {
+      checked = result.current.recheck();
+    });
+    await waitFor(() => expect(refreshed).toHaveBeenCalledTimes(1));
+    unmount();
+    await act(async () => {
+      refresh.resolve(true);
+      await checked!;
+    });
+    expect(readCapabilityJournal()).toEqual({ kind: "valid", journal });
+  });
   it.each(["expired", "different-account"])(
     "ignores deferred %s authentication preflight after actor rerender",
     async (scenario) => {
@@ -386,6 +676,18 @@ describe("capability controller client transport recovery (unit isolation, no au
       await result.current.retry();
     });
     expect(JSON.parse(fetcher.mock.calls[2][1].body)).toEqual(original);
+    expect(result.current.locked).toBe(true);
+    expect(readCapabilityJournal()).toEqual(pending);
+    act(() => {
+      expect(
+        result.current.acknowledgeHydration(result.current.awaitingHydration!, {
+          actorId,
+          branchId,
+          policyId,
+          version: 3,
+        })
+      ).toBe(true);
+    });
     expect(readCapabilityJournal()).toEqual({ kind: "empty" });
     expect(refreshed).toHaveBeenCalledTimes(1);
   });
@@ -425,6 +727,17 @@ describe("capability controller client transport recovery (unit isolation, no au
     fetcher.mockResolvedValueOnce(success(commandId, "EDIT"));
     await act(async () => {
       await result.current.retry(content);
+    });
+    expect(result.current.locked).toBe(true);
+    act(() => {
+      expect(
+        result.current.acknowledgeHydration(result.current.awaitingHydration!, {
+          actorId,
+          branchId,
+          policyId,
+          version: 3,
+        })
+      ).toBe(true);
     });
     expect(readCapabilityJournal()).toEqual({ kind: "empty" });
   });

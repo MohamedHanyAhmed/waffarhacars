@@ -38,7 +38,7 @@ export default defineConfig({
     },
     {
       name: "PostgreSQL Real Staff Capabilities",
-      testMatch: /staff-capabilities-real\.spec\.ts/,
+      testMatch: /(staff-capabilities-real|capability-settlement-real)\.spec\.ts/,
       use: { ...devices["Desktop Chrome"], viewport: { width: 1440, height: 900 } },
     },
     {

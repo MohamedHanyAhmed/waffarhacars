@@ -96,12 +96,13 @@ function Workspace({ providerId, branchId }: { providerId: string; branchId: str
   const actor = useRef<string | null>(null);
   const dirtyRef = useRef(false);
   const selectionRef = useRef<string | null>(null);
-  const handledReceipt = useRef<string | null>(null);
+  const loadedRef = useRef<Loaded | null>(null);
   const validationElement = useRef<HTMLParagraphElement>(null);
   useLayoutEffect(() => {
     dirtyRef.current = dirty || reason.length > 0;
     selectionRef.current = selection;
-  }, [dirty, selection, reason]);
+    loadedRef.current = data;
+  }, [dirty, selection, reason, data]);
 
   const onUnauthorized = useCallback(() => router.replace("/staff/login"), [router]);
   const refresh = useCallback(async (): Promise<boolean> => {
@@ -284,28 +285,59 @@ function Workspace({ providerId, branchId }: { providerId: string; branchId: str
     setPendingSelection(null);
   }, []);
 
+  const {
+    pending: commandPending,
+    awaitingHydration,
+    acknowledgeHydration,
+    locked: commandLocked,
+  } = command;
   useEffect(() => {
-    if (!data) return;
+    if (!data || readBusy || readError || commandPending) return;
+    const read = loadGeneration.current;
+    const selected = selectionRef.current;
     let active = true;
     queueMicrotask(() => {
-      if (!active) return;
       if (
-        command.receipt &&
-        !command.locked &&
-        handledReceipt.current !== command.receipt.commandId
-      ) {
-        handledReceipt.current = command.receipt.commandId;
-        hydrate(command.receipt.policyId, data);
-      } else if (selectionRef.current === null) {
-        hydrate(command.journal?.policyId ?? data.workspace.policies[0]?.id ?? "new", data);
-      } else if (!dirtyRef.current && !command.locked) {
-        hydrate(selectionRef.current, data);
+        !active ||
+        !pageMounted.current ||
+        read !== loadGeneration.current ||
+        loadedRef.current !== data ||
+        actor.current !== data.actorId ||
+        selectionRef.current !== selected
+      )
+        return;
+      const ticket = awaitingHydration;
+      if (ticket) {
+        const row = data.workspace.policies.find((entry) => entry.id === ticket.policyId);
+        if (!row) return;
+        // Journal acknowledgement and form hydration commit in the same React
+        // batch: the preceding render stays locked throughout settlement.
+        if (
+          acknowledgeHydration(ticket, {
+            actorId: data.actorId,
+            branchId: data.workspace.context.branchId,
+            policyId: row.id,
+            version: row.version,
+          })
+        )
+          hydrate(row.id, data);
+      } else if (!commandLocked && !dirtyRef.current) {
+        hydrate(selected ?? data.workspace.policies[0]?.id ?? "new", data);
       }
     });
     return () => {
       active = false;
     };
-  }, [data, command.receipt, command.locked, command.journal?.policyId, hydrate]);
+  }, [
+    data,
+    readBusy,
+    readError,
+    commandPending,
+    awaitingHydration,
+    acknowledgeHydration,
+    commandLocked,
+    hydrate,
+  ]);
 
   // Full-page exits use the native prompt. Same-document Back/Forward cannot be
   // cancelled, so restore the protected entry before Next consumes the popstate.
@@ -373,7 +405,16 @@ function Workspace({ providerId, branchId }: { providerId: string; branchId: str
   const attested = attestation === snapshot;
   const locked = command.locked || readBusy || Boolean(readError);
   const editing = !policy || policy.eligibility.edit;
-  const canReconstruct = restore && command.needsContent && !command.pending && !command.otherOwner;
+  const canReconstruct =
+    restore &&
+    !readBusy &&
+    !readError &&
+    command.retryAvailable &&
+    command.needsContent &&
+    !command.pending &&
+    !command.otherOwner &&
+    !command.receipt &&
+    !command.awaitingHydration;
   const contentDisabled = readBusy || (locked && !canReconstruct) || (!editing && !canReconstruct);
   const labelled = policy?.coverage.map((entry) => ({
     ...entry,
@@ -391,6 +432,7 @@ function Workspace({ providerId, branchId }: { providerId: string; branchId: str
     queueMicrotask(() => validationElement.current?.focus());
   };
   const updateForm = (patch: Partial<Form>) => {
+    if (contentDisabled) return;
     setForm((previous) => ({ ...previous, ...patch }));
     setDirty(true);
     setValidation(null);
@@ -475,7 +517,18 @@ function Workspace({ providerId, branchId }: { providerId: string; branchId: str
     );
   };
   const restoreContent = () => {
-    if (!command.journal || !command.needsContent || command.pending || !data) return;
+    if (
+      !command.journal ||
+      !command.needsContent ||
+      command.pending ||
+      !data ||
+      !command.retryAvailable ||
+      command.receipt ||
+      command.awaitingHydration ||
+      readBusy ||
+      readError
+    )
+      return;
     const target = data.workspace.policies.find((entry) => entry.id === command.journal?.policyId);
     setSelection(target?.id ?? "new");
     setForm({
@@ -504,7 +557,14 @@ function Workspace({ providerId, branchId }: { providerId: string; branchId: str
   const message = validation ?? command.error ?? readError;
 
   return (
-    <main dir={dir} className="mx-auto max-w-5xl space-y-5 px-4 py-6">
+    <main
+      dir={dir}
+      className="mx-auto max-w-5xl space-y-5 px-4 py-6"
+      data-testid="capability-form-state"
+      data-policy-id={selection ?? "new"}
+      data-version={form.version ?? ""}
+      data-ready={!locked && !stale}
+    >
       <Link
         className="inline-block min-h-11 py-2 text-blue-700 underline"
         href={`/staff/providers/${providerId}`}
@@ -618,7 +678,10 @@ function Workspace({ providerId, branchId }: { providerId: string; branchId: str
               type="button"
               className={button}
               data-testid="capability-discard"
-              onClick={() => hydrate(pendingSelection ?? selection ?? "new", data)}
+              disabled={locked}
+              onClick={() => {
+                if (!locked) hydrate(pendingSelection ?? selection ?? "new", data);
+              }}
             >
               {t("capabilities.discard")}
             </button>
@@ -627,9 +690,11 @@ function Workspace({ providerId, branchId }: { providerId: string; branchId: str
             <section
               data-testid="capability-unknown"
               className="space-y-3 rounded-lg border border-amber-300 bg-amber-50 p-4"
-              aria-label={t("capabilities.unknown")}
+              aria-label={t(command.receipt ? "capabilities.settling" : "capabilities.unknown")}
             >
-              <h2 className="font-semibold">{t("capabilities.unknown")}</h2>
+              <h2 className="font-semibold">
+                {t(command.receipt ? "capabilities.settling" : "capabilities.unknown")}
+              </h2>
               <p>{t("capabilities.unresolved")}</p>
               <div className="flex flex-wrap gap-2">
                 <button
@@ -821,7 +886,10 @@ function Workspace({ providerId, branchId }: { providerId: string; branchId: str
                         className="mt-1 h-5 w-5"
                         checked={attested}
                         disabled={locked || stale}
-                        onChange={(event) => setAttestation(event.target.checked ? snapshot : null)}
+                        onChange={(event) => {
+                          if (!locked && !stale)
+                            setAttestation(event.target.checked ? snapshot : null);
+                        }}
                       />
                       <span>{t("capabilities.attestation")}</span>
                     </label>
@@ -849,6 +917,7 @@ function Workspace({ providerId, branchId }: { providerId: string; branchId: str
                       maxLength={1000}
                       disabled={locked && !canReconstruct}
                       onChange={(event) => {
+                        if (locked && !canReconstruct) return;
                         setReason(event.target.value);
                         setValidation(null);
                         setConfirmation(null);
@@ -895,7 +964,9 @@ function Workspace({ providerId, branchId }: { providerId: string; branchId: str
                   className={input}
                   value={reason}
                   maxLength={1000}
-                  onChange={(event) => setReason(event.target.value)}
+                  onChange={(event) => {
+                    if (canReconstruct) setReason(event.target.value);
+                  }}
                 />
               </div>
             )}
