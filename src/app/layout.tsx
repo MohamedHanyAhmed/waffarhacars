@@ -1,9 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import { I18nProvider } from "../context/I18nContext";
-import { DemoStateProvider } from "../context/DemoStateContext";
-import { DemoBanner } from "../components/common/DemoBanner";
-import { LocalizedFooter } from "../components/common/LocalizedFooter";
+import AppSurface from "../components/common/AppSurface";
 import CapabilityNavigationBoundary from "../components/staff/CapabilityNavigationBoundary";
 
 export const metadata: Metadata = {
@@ -22,11 +20,7 @@ export default function RootLayout({
       <body className="font-sans min-h-screen flex flex-col bg-slate-50 text-slate-900 selection:bg-brand-500 selection:text-white">
         <CapabilityNavigationBoundary />
         <I18nProvider>
-          <DemoStateProvider>
-            <DemoBanner />
-            <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8">{children}</main>
-            <LocalizedFooter />
-          </DemoStateProvider>
+          <AppSurface>{children}</AppSurface>
         </I18nProvider>
       </body>
     </html>
