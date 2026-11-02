@@ -35,7 +35,7 @@
     "@better-auth/prisma-adapter": "1.7.5",
     "@prisma/adapter-pg": "7.10.0",
     "@prisma/client": "7.10.0",
-    "better-auth": "1.7.5",
+    "better-auth": "1.7.7",
     "clsx": "^2.1.1",
     "libphonenumber-js": "1.13.13",
     "lucide-react": "^0.468.0",
